@@ -1,0 +1,59 @@
+# Month-End Close Scenario
+# Generates synthetic finance data for a mid-size company's fiscal year.
+# Used to calibrate dataraum-context entropy detectors.
+
+name: month-end-close
+description: >
+  Month-end close for a mid-size company. 12-month fiscal year with ~10K rows
+  across 8 tables. Entropy injections simulate real-world data quality issues
+  found in ERP exports, multi-system consolidation, and manual data entry.
+
+tables:
+  - chart_of_accounts
+  - journal_entries
+  - journal_lines
+  - invoices
+  - payments
+  - bank_transactions
+  - fx_rates
+  - trial_balance
+
+defaults:
+  seed: 42
+  months: 12
+  strategy: medium
+
+stories:
+  journal_lines.debit:
+    injection: corrupt_types
+    story: "ERP export glitch corrupts numeric debit values"
+  journal_lines.cost_center:
+    injection: introduce_nulls
+    story: "Optional field inconsistently populated across departments"
+  journal_lines.credit:
+    injection: inject_outliers
+    story: "Miskeyed amounts — decimal point errors"
+  bank_transactions.amount:
+    injection: break_benford
+    story: "Round-number batch payments from automated system"
+  invoices.amount:
+    injection: mix_units
+    story: "Multi-currency invoices without explicit currency declaration"
+  payments.date:
+    injection: corrupt_dates
+    story: "System format mismatch between payment processor and ERP"
+  payments.invoice_id:
+    injection: break_referential_integrity
+    story: "Deleted invoices leave orphaned payment references"
+  journal_lines.debit_credit:
+    injection: create_mutual_exclusivity
+    story: "Double-entry bookkeeping enforces debit XOR credit per line"
+  trial_balance.debit_balance:
+    injection: drift_formula
+    story: "Rounding errors in aggregation from journal lines"
+  bank_transactions.amount_drift:
+    injection: inject_temporal_drift
+    story: "Process change mid-year shifts transaction amounts"
+  invoices.vendor_id:
+    injection: obscure_column_names
+    story: "Legacy system export uses cryptic column names"
