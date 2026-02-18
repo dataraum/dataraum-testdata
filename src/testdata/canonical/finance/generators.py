@@ -454,17 +454,6 @@ def _generate_trial_balance(
     months: int,
 ) -> list[TrialBalance]:
     """Derive trial balance from journal lines (ensures consistency)."""
-    # Accumulate by account_id × period
-    balances: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
-
-    for line in journal_lines:
-        # We need the entry date to determine period, but lines don't have dates.
-        # We'll use a simpler approach: accumulate all lines per account, then
-        # distribute across periods based on line_id ordering.
-        pass
-
-    # Simpler approach: accumulate totals per account across all lines,
-    # then create monthly trial balances from journal entries + lines
     return _derive_trial_balance(journal_lines, fiscal_start, months)
 
 

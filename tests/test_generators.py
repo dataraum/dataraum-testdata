@@ -1,7 +1,6 @@
 """Tests for deterministic finance data generators."""
 
 from collections import Counter
-from decimal import Decimal
 
 from testdata.canonical.finance.generators import generate_finance_dataset
 
@@ -45,8 +44,8 @@ def test_balanced_journals():
         lines_by_entry.setdefault(line.entry_id, []).append(line)
 
     for entry_id, lines in lines_by_entry.items():
-        total_debit = sum(l.debit for l in lines)
-        total_credit = sum(l.credit for l in lines)
+        total_debit = sum(line.debit for line in lines)
+        total_credit = sum(line.credit for line in lines)
         assert total_debit == total_credit, (
             f"Entry {entry_id}: debit={total_debit} != credit={total_credit}"
         )

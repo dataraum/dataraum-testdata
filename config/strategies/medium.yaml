@@ -1,0 +1,97 @@
+name: medium
+level: medium
+description: "Realistic problems — ~11 injection types across all layers"
+
+injections:
+  # Value layer
+  - injector: corrupt_types
+    table: journal_lines
+    params:
+      col: debit
+      ratio: 0.03
+      severity: medium
+
+  - injector: introduce_nulls
+    table: journal_lines
+    params:
+      col: cost_center
+      ratio: 0.15
+      severity: medium
+
+  - injector: inject_outliers
+    table: journal_lines
+    params:
+      col: credit
+      ratio: 0.05
+      factor: 10.0
+      severity: medium
+
+  - injector: break_benford
+    table: bank_transactions
+    params:
+      col: amount
+      method: round_numbers
+      severity: medium
+
+  - injector: inject_temporal_drift
+    table: bank_transactions
+    params:
+      value_col: amount
+      time_col: date
+      shift_date: "2025-09-01"
+      shift_factor: 1.35
+      severity: medium
+
+  # Semantic layer
+  - injector: mix_units
+    table: invoices
+    params:
+      col: amount
+      alt_currency: EUR
+      ratio: 0.10
+      fx_rate: 1.1
+      severity: medium
+
+  - injector: obscure_column_names
+    table: invoices
+    params:
+      mapping:
+        vendor_id: vid
+        payment_terms: pt
+      severity: medium
+
+  # Structural layer
+  - injector: corrupt_dates
+    table: payments
+    params:
+      col: date
+      formats:
+        - MM/DD/YYYY
+        - DD/MM/YYYY
+        - DD-Mon-YY
+      severity: medium
+
+  - injector: break_referential_integrity
+    table: payments
+    params:
+      fk_col: invoice_id
+      ratio: 0.05
+      severity: high
+
+  - injector: create_mutual_exclusivity
+    table: journal_lines
+    params:
+      col_a: debit
+      col_b: credit
+      severity: low
+
+  # Computational layer
+  - injector: drift_formula
+    table: trial_balance
+    params:
+      derived_col: debit_balance
+      source_cols:
+        - account_id
+        - period
+      error_ratio: 0.02
+      severity: medium

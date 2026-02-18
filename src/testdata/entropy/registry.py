@@ -57,7 +57,7 @@ class InjectionRegistry:
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-    def summary(self) -> dict[str, int]:
+    def summary(self) -> dict[str, dict[str, int]]:
         """Count injections by layer and detector."""
         by_layer: dict[str, int] = {}
         by_detector: dict[str, int] = {}

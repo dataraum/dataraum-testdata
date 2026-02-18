@@ -1,10 +1,15 @@
-"""Pre-built injection strategy profiles."""
+"""Pre-built injection strategy profiles, loaded from YAML config."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
+
+import yaml
+
+from testdata.config import get_config_dir
 
 
 class StrategyLevel(StrEnum):
@@ -33,192 +38,55 @@ class Strategy:
     injections: list[InjectionSpec] = field(default_factory=list)
 
 
-# --- Strategy Definitions ---
+# ---------------------------------------------------------------------------
+# YAML loading
+# ---------------------------------------------------------------------------
 
-CLEAN = Strategy(
-    name="clean",
-    level=StrategyLevel.CLEAN,
-    description="No injections — baseline clean data",
-    injections=[],
-)
+def load_strategy(path: Path) -> Strategy:
+    """Parse a single strategy YAML file into a Strategy dataclass."""
+    with open(path) as f:
+        raw = yaml.safe_load(f)
 
-LOW_ENTROPY = Strategy(
-    name="low",
-    level=StrategyLevel.LOW,
-    description="Subtle issues (2-5% rates), hard to detect",
-    injections=[
-        InjectionSpec("corrupt_types", "journal_lines", {"col": "debit", "ratio": 0.02, "severity": "low"}),
-        InjectionSpec("introduce_nulls", "journal_lines", {"col": "cost_center", "ratio": 0.05, "severity": "low"}),
-        InjectionSpec("inject_outliers", "journal_lines", {"col": "credit", "ratio": 0.02, "factor": 5.0, "severity": "low"}),
-        InjectionSpec("corrupt_dates", "payments", {
-            "col": "date",
-            "formats": ["MM/DD/YYYY", "YYYYMMDD"],
-            "severity": "low",
-        }),
-    ],
-)
+    injections = [
+        InjectionSpec(
+            injector=entry["injector"],
+            table=entry["table"],
+            kwargs=entry.get("params", {}),
+        )
+        for entry in (raw.get("injections") or [])
+    ]
 
-MEDIUM_ENTROPY = Strategy(
-    name="medium",
-    level=StrategyLevel.MEDIUM,
-    description="Realistic problems — ~11 injection types across all layers",
-    injections=[
-        # Value layer
-        InjectionSpec("corrupt_types", "journal_lines", {"col": "debit", "ratio": 0.03, "severity": "medium"}),
-        InjectionSpec("introduce_nulls", "journal_lines", {"col": "cost_center", "ratio": 0.15, "severity": "medium"}),
-        InjectionSpec("inject_outliers", "journal_lines", {"col": "credit", "ratio": 0.05, "factor": 10.0, "severity": "medium"}),
-        InjectionSpec("break_benford", "bank_transactions", {"col": "amount", "method": "round_numbers", "severity": "medium"}),
-        InjectionSpec("inject_temporal_drift", "bank_transactions", {
-            "value_col": "amount",
-            "time_col": "date",
-            "shift_date": "2025-09-01",
-            "shift_factor": 1.35,
-            "severity": "medium",
-        }),
-
-        # Semantic layer
-        InjectionSpec("mix_units", "invoices", {
-            "col": "amount",
-            "alt_currency": "EUR",
-            "ratio": 0.10,
-            "fx_rate": 1.1,
-            "severity": "medium",
-        }),
-        InjectionSpec("obscure_column_names", "invoices", {
-            "mapping": {"vendor_id": "vid", "payment_terms": "pt"},
-            "severity": "medium",
-        }),
-
-        # Structural layer
-        InjectionSpec("corrupt_dates", "payments", {
-            "col": "date",
-            "formats": ["MM/DD/YYYY", "DD/MM/YYYY", "DD-Mon-YY"],
-            "severity": "medium",
-        }),
-        InjectionSpec("break_referential_integrity", "payments", {
-            "fk_col": "invoice_id",
-            "ratio": 0.05,
-            "severity": "high",
-        }),
-        InjectionSpec("create_mutual_exclusivity", "journal_lines", {
-            "col_a": "debit",
-            "col_b": "credit",
-            "severity": "low",
-        }),
-
-        # Computational layer
-        InjectionSpec("drift_formula", "trial_balance", {
-            "derived_col": "debit_balance",
-            "source_cols": ["account_id", "period"],
-            "error_ratio": 0.02,
-            "severity": "medium",
-        }),
-    ],
-)
-
-HIGH_ENTROPY = Strategy(
-    name="high",
-    level=StrategyLevel.HIGH,
-    description="Severe quality issues — high rates across all layers",
-    injections=[
-        # Value layer (aggressive)
-        InjectionSpec("corrupt_types", "journal_lines", {"col": "debit", "ratio": 0.10, "severity": "high"}),
-        InjectionSpec("corrupt_types", "journal_lines", {"col": "credit", "ratio": 0.08, "severity": "high"}),
-        InjectionSpec("introduce_nulls", "journal_lines", {"col": "cost_center", "ratio": 0.40, "severity": "critical"}),
-        InjectionSpec("introduce_nulls", "invoices", {"col": "amount", "ratio": 0.10, "severity": "high"}),
-        InjectionSpec("inject_outliers", "journal_lines", {"col": "credit", "ratio": 0.15, "factor": 50.0, "severity": "critical"}),
-        InjectionSpec("break_benford", "bank_transactions", {"col": "amount", "method": "uniform", "severity": "high"}),
-        InjectionSpec("inject_temporal_drift", "bank_transactions", {
-            "value_col": "amount",
-            "time_col": "date",
-            "shift_date": "2025-07-01",
-            "shift_factor": 2.0,
-            "severity": "high",
-        }),
-
-        # Semantic layer (aggressive)
-        InjectionSpec("mix_units", "invoices", {
-            "col": "amount",
-            "alt_currency": "EUR",
-            "ratio": 0.25,
-            "fx_rate": 1.1,
-            "severity": "high",
-        }),
-        InjectionSpec("mix_units", "bank_transactions", {
-            "col": "amount",
-            "alt_currency": "GBP",
-            "ratio": 0.15,
-            "fx_rate": 1.27,
-            "severity": "high",
-        }),
-        InjectionSpec("obscure_column_names", "invoices", {
-            "mapping": {"vendor_id": "vid", "payment_terms": "pt", "due_date": "dd", "status": "st"},
-            "severity": "high",
-        }),
-        InjectionSpec("obscure_column_names", "bank_transactions", {
-            "mapping": {"counterparty": "cp", "reconciled": "rc", "reference": "ref"},
-            "severity": "high",
-        }),
-
-        # Structural layer (aggressive)
-        InjectionSpec("corrupt_dates", "payments", {
-            "col": "date",
-            "formats": ["MM/DD/YYYY", "DD/MM/YYYY", "DD-Mon-YY", "Mon DD, YYYY", "YYYYMMDD"],
-            "severity": "high",
-        }),
-        InjectionSpec("corrupt_dates", "invoices", {
-            "col": "date",
-            "formats": ["DD/MM/YYYY", "YYYYMMDD"],
-            "severity": "high",
-        }),
-        InjectionSpec("break_referential_integrity", "payments", {
-            "fk_col": "invoice_id",
-            "ratio": 0.15,
-            "severity": "critical",
-        }),
-        InjectionSpec("break_referential_integrity", "journal_lines", {
-            "fk_col": "account_id",
-            "ratio": 0.08,
-            "severity": "critical",
-        }),
-        InjectionSpec("add_duplicate_fk_paths", "journal_lines", {
-            "existing_fk_col": "entry_id",
-            "new_col_name": "je_ref",
-            "noise_ratio": 0.10,
-            "severity": "medium",
-        }),
-        InjectionSpec("create_mutual_exclusivity", "journal_lines", {
-            "col_a": "debit",
-            "col_b": "credit",
-            "severity": "low",
-        }),
-
-        # Computational layer (aggressive)
-        InjectionSpec("drift_formula", "trial_balance", {
-            "derived_col": "debit_balance",
-            "source_cols": ["account_id", "period"],
-            "error_ratio": 0.10,
-            "severity": "high",
-        }),
-        InjectionSpec("drift_formula", "trial_balance", {
-            "derived_col": "credit_balance",
-            "source_cols": ["account_id", "period"],
-            "error_ratio": 0.08,
-            "severity": "high",
-        }),
-    ],
-)
+    return Strategy(
+        name=raw["name"],
+        level=StrategyLevel(raw["level"]),
+        description=raw.get("description", ""),
+        injections=injections,
+    )
 
 
-STRATEGIES: dict[str, Strategy] = {
-    "clean": CLEAN,
-    "low": LOW_ENTROPY,
-    "medium": MEDIUM_ENTROPY,
-    "high": HIGH_ENTROPY,
-}
+def load_all_strategies(config_dir: Path | None = None) -> dict[str, Strategy]:
+    """Load all ``*.yaml`` files from the strategies config directory."""
+    if config_dir is None:
+        config_dir = get_config_dir() / "strategies"
+    strategies: dict[str, Strategy] = {}
+    for path in sorted(config_dir.glob("*.yaml")):
+        strategy = load_strategy(path)
+        strategies[strategy.name] = strategy
+    return strategies
+
+
+# Module-level cache — populated on first call to get_strategy()
+_STRATEGIES: dict[str, Strategy] | None = None
 
 
 def get_strategy(name: str) -> Strategy:
-    if name not in STRATEGIES:
-        raise ValueError(f"Unknown strategy: {name!r}. Available: {list(STRATEGIES.keys())}")
-    return STRATEGIES[name]
+    """Return a named strategy, loading from YAML on first access."""
+    global _STRATEGIES  # noqa: PLW0603
+    if _STRATEGIES is None:
+        _STRATEGIES = load_all_strategies()
+    if name not in _STRATEGIES:
+        raise ValueError(
+            f"Unknown strategy: {name!r}. "
+            f"Available: {list(_STRATEGIES.keys())}"
+        )
+    return _STRATEGIES[name]

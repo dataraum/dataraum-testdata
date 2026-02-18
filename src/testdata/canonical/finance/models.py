@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+import datetime
 from decimal import Decimal
 from enum import StrEnum
 
@@ -63,7 +63,7 @@ class ChartOfAccounts(BaseModel):
 
 class JournalEntry(BaseModel):
     entry_id: str = Field(description="Unique journal entry identifier")
-    date: date
+    date: datetime.date
     description: str
     status: JournalStatus = JournalStatus.POSTED
     created_by: str
@@ -82,8 +82,8 @@ class JournalLine(BaseModel):
 class Invoice(BaseModel):
     invoice_id: str
     vendor_id: str
-    date: date
-    due_date: date
+    date: datetime.date
+    due_date: datetime.date
     amount: Decimal
     currency: Currency = Currency.USD
     status: InvoiceStatus = InvoiceStatus.OPEN
@@ -93,7 +93,7 @@ class Invoice(BaseModel):
 class Payment(BaseModel):
     payment_id: str
     invoice_id: str = Field(description="FK to Invoice")
-    date: date
+    date: datetime.date
     amount: Decimal
     currency: Currency = Currency.USD
     method: PaymentMethod = PaymentMethod.WIRE
@@ -101,7 +101,7 @@ class Payment(BaseModel):
 
 class BankTransaction(BaseModel):
     txn_id: str
-    date: date
+    date: datetime.date
     amount: Decimal = Field(description="Positive=credit, negative=debit")
     currency: Currency = Currency.USD
     reference: str
@@ -112,7 +112,7 @@ class BankTransaction(BaseModel):
 class FXRate(BaseModel):
     from_ccy: Currency
     to_ccy: Currency
-    date: date
+    date: datetime.date
     rate: Decimal
     source: str = "ECB"
 

@@ -7,16 +7,25 @@ import random
 from pathlib import Path
 
 import polars as pl
+import yaml
 
 from testdata.canonical.finance.generators import generate_finance_dataset
+from testdata.config import get_config_dir
 from testdata.entropy import injectors
 from testdata.entropy.registry import InjectionRegistry
-from testdata.entropy.strategies import InjectionSpec, Strategy, get_strategy
+from testdata.entropy.strategies import InjectionSpec, get_strategy
 from testdata.export import dataset_to_dataframes, export_dataframes
 
 
 SCENARIO_NAME = "month-end-close"
 SCENARIO_DESCRIPTION = "Month-end close for a mid-size company. 12-month fiscal year with ~10K rows across 8 tables."
+
+
+def _load_scenario_defaults() -> dict:
+    """Load defaults from the scenario YAML config."""
+    path = get_config_dir() / "scenarios" / "month_end_close.yaml"
+    with open(path) as f:
+        return yaml.safe_load(f).get("defaults", {})
 
 
 def _apply_injection(
@@ -43,12 +52,15 @@ def _apply_injection(
 
 
 def run_scenario(
-    strategy_name: str = "medium",
-    seed: int = 42,
-    months: int = 12,
+    strategy_name: str | None = None,
+    seed: int | None = None,
+    months: int | None = None,
     output_dir: Path | None = None,
 ) -> dict:
     """Generate finance data, apply entropy injections, and export.
+
+    Parameters fall back to ``config/scenarios/month_end_close.yaml`` defaults
+    when not provided.  CLI flags override these.
 
     Args:
         strategy_name: Which injection strategy to use (clean/low/medium/high).
@@ -59,6 +71,14 @@ def run_scenario(
     Returns:
         Dict with 'dataframes', 'registry', and 'dataset' keys.
     """
+    defaults = _load_scenario_defaults()
+    if strategy_name is None:
+        strategy_name = defaults.get("strategy", "medium")
+    if seed is None:
+        seed = defaults.get("seed", 42)
+    if months is None:
+        months = defaults.get("months", 12)
+
     strategy = get_strategy(strategy_name)
     rng = random.Random(seed + 1000)  # Offset seed so injections differ from generation
 

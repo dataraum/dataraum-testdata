@@ -1,0 +1,167 @@
+name: high
+level: high
+description: "Severe quality issues — high rates across all layers"
+
+injections:
+  # Value layer (aggressive)
+  - injector: corrupt_types
+    table: journal_lines
+    params:
+      col: debit
+      ratio: 0.10
+      severity: high
+
+  - injector: corrupt_types
+    table: journal_lines
+    params:
+      col: credit
+      ratio: 0.08
+      severity: high
+
+  - injector: introduce_nulls
+    table: journal_lines
+    params:
+      col: cost_center
+      ratio: 0.40
+      severity: critical
+
+  - injector: introduce_nulls
+    table: invoices
+    params:
+      col: amount
+      ratio: 0.10
+      severity: high
+
+  - injector: inject_outliers
+    table: journal_lines
+    params:
+      col: credit
+      ratio: 0.15
+      factor: 50.0
+      severity: critical
+
+  - injector: break_benford
+    table: bank_transactions
+    params:
+      col: amount
+      method: uniform
+      severity: high
+
+  - injector: inject_temporal_drift
+    table: bank_transactions
+    params:
+      value_col: amount
+      time_col: date
+      shift_date: "2025-07-01"
+      shift_factor: 2.0
+      severity: high
+
+  # Semantic layer (aggressive)
+  - injector: mix_units
+    table: invoices
+    params:
+      col: amount
+      alt_currency: EUR
+      ratio: 0.25
+      fx_rate: 1.1
+      severity: high
+
+  - injector: mix_units
+    table: bank_transactions
+    params:
+      col: amount
+      alt_currency: GBP
+      ratio: 0.15
+      fx_rate: 1.27
+      severity: high
+
+  - injector: obscure_column_names
+    table: invoices
+    params:
+      mapping:
+        vendor_id: vid
+        payment_terms: pt
+        due_date: dd
+        status: st
+      severity: high
+
+  - injector: obscure_column_names
+    table: bank_transactions
+    params:
+      mapping:
+        counterparty: cp
+        reconciled: rc
+        reference: ref
+      severity: high
+
+  # Structural layer (aggressive)
+  - injector: corrupt_dates
+    table: payments
+    params:
+      col: date
+      formats:
+        - MM/DD/YYYY
+        - DD/MM/YYYY
+        - DD-Mon-YY
+        - Mon DD, YYYY
+        - YYYYMMDD
+      severity: high
+
+  - injector: corrupt_dates
+    table: invoices
+    params:
+      col: date
+      formats:
+        - DD/MM/YYYY
+        - YYYYMMDD
+      severity: high
+
+  - injector: break_referential_integrity
+    table: payments
+    params:
+      fk_col: invoice_id
+      ratio: 0.15
+      severity: critical
+
+  - injector: break_referential_integrity
+    table: journal_lines
+    params:
+      fk_col: account_id
+      ratio: 0.08
+      severity: critical
+
+  - injector: add_duplicate_fk_paths
+    table: journal_lines
+    params:
+      existing_fk_col: entry_id
+      new_col_name: je_ref
+      noise_ratio: 0.10
+      severity: medium
+
+  - injector: create_mutual_exclusivity
+    table: journal_lines
+    params:
+      col_a: debit
+      col_b: credit
+      severity: low
+
+  # Computational layer (aggressive)
+  - injector: drift_formula
+    table: trial_balance
+    params:
+      derived_col: debit_balance
+      source_cols:
+        - account_id
+        - period
+      error_ratio: 0.10
+      severity: high
+
+  - injector: drift_formula
+    table: trial_balance
+    params:
+      derived_col: credit_balance
+      source_cols:
+        - account_id
+        - period
+      error_ratio: 0.08
+      severity: high

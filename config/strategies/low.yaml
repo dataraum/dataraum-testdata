@@ -1,0 +1,35 @@
+name: low
+level: low
+description: "Subtle issues (2-5% rates), hard to detect"
+
+injections:
+  - injector: corrupt_types
+    table: journal_lines
+    params:
+      col: debit
+      ratio: 0.02
+      severity: low
+
+  - injector: introduce_nulls
+    table: journal_lines
+    params:
+      col: cost_center
+      ratio: 0.05
+      severity: low
+
+  - injector: inject_outliers
+    table: journal_lines
+    params:
+      col: credit
+      ratio: 0.02
+      factor: 5.0
+      severity: low
+
+  - injector: corrupt_dates
+    table: payments
+    params:
+      col: date
+      formats:
+        - MM/DD/YYYY
+        - YYYYMMDD
+      severity: low

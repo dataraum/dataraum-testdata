@@ -6,7 +6,6 @@ and records what it did in the InjectionRegistry.
 
 from __future__ import annotations
 
-import math
 import random
 
 import polars as pl
@@ -110,7 +109,6 @@ def inject_outliers(
     n = len(df)
     count = max(1, int(n * ratio))
     indices = rng.sample(range(n), min(count, n))
-    idx_set = set(indices)
 
     values = df[col].to_list()
     actual_affected = []

@@ -1,0 +1,5 @@
+name: clean
+level: clean
+description: "No injections — baseline clean data"
+
+injections: []

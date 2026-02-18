@@ -21,6 +21,8 @@ testdata = "testdata.cli:app"
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-pyyaml>=6.0.0",
 ]
 
 [build-system]

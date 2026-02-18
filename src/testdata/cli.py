@@ -74,7 +74,8 @@ def describe(
     typer.echo(f"Scenario: {info['name']}")
     typer.echo(f"Description: {info['description']}")
     typer.echo(f"Default strategy: {info['default_strategy']}")
-    typer.echo(f"Tables: {', '.join(info['tables'])}")
+    tables: list[str] = info["tables"]  # type: ignore[assignment]
+    typer.echo(f"Tables: {', '.join(tables)}")
     typer.echo("\nAvailable strategies: clean, low, medium, high")
 
 
