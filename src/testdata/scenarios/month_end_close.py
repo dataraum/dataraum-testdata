@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import random
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -21,11 +22,16 @@ SCENARIO_NAME = "month-end-close"
 SCENARIO_DESCRIPTION = "Month-end close for a mid-size company. 12-month fiscal year with ~10K rows across 8 tables."
 
 
-def _load_scenario_defaults() -> dict:
-    """Load defaults from the scenario YAML config."""
+def _load_scenario_config() -> dict:
+    """Load full scenario config from YAML."""
     path = get_config_dir() / "scenarios" / "month_end_close.yaml"
     with open(path) as f:
-        return yaml.safe_load(f).get("defaults", {})
+        return yaml.safe_load(f)
+
+
+def _load_scenario_defaults() -> dict:
+    """Load defaults from the scenario YAML config."""
+    return _load_scenario_config().get("defaults", {})
 
 
 def _apply_injection(
@@ -71,7 +77,8 @@ def run_scenario(
     Returns:
         Dict with 'dataframes', 'registry', and 'dataset' keys.
     """
-    defaults = _load_scenario_defaults()
+    config = _load_scenario_config()
+    defaults = config.get("defaults", {})
     if strategy_name is None:
         strategy_name = defaults.get("strategy", "medium")
     if seed is None:
@@ -79,11 +86,24 @@ def run_scenario(
     if months is None:
         months = defaults.get("months", 12)
 
+    # Build generator kwargs from YAML generator: block
+    gen_cfg = config.get("generator", {})
+    gen_kwargs: dict = {}
+    if "fiscal_start" in gen_cfg:
+        gen_kwargs["fiscal_start"] = date.fromisoformat(gen_cfg["fiscal_start"])
+    for key in (
+        "invoices_count", "bank_transactions_count",
+        "journal_entries_per_month", "journal_entries_stddev",
+        "q4_seasonal_boost",
+    ):
+        if key in gen_cfg:
+            gen_kwargs[key] = gen_cfg[key]
+
     strategy = get_strategy(strategy_name)
     rng = random.Random(seed + 1000)  # Offset seed so injections differ from generation
 
     # Step 1: Generate clean data
-    dataset = generate_finance_dataset(seed=seed, months=months)
+    dataset = generate_finance_dataset(seed=seed, months=months, **gen_kwargs)
 
     # Step 2: Convert to DataFrames
     dataframes = dataset_to_dataframes(dataset)

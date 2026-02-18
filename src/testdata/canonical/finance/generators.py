@@ -172,6 +172,9 @@ def _generate_journal_entries(
     rng: random.Random,
     fiscal_start: date,
     months: int,
+    entries_per_month: int = 420,
+    entries_stddev: int = 40,
+    q4_seasonal_boost: float = 0.3,
 ) -> tuple[list[JournalEntry], list[JournalLine]]:
     leaf = _get_leaf_accounts()
     entries: list[JournalEntry] = []
@@ -188,8 +191,8 @@ def _generate_journal_entries(
         month_label = month_start.strftime("%B %Y")
 
         # Seasonal factor: Q4 has more activity
-        seasonal = 1.0 + 0.3 * (month_start.month >= 10)
-        entries_this_month = int(rng.gauss(420, 40) * seasonal)
+        seasonal = 1.0 + q4_seasonal_boost * (month_start.month >= 10)
+        entries_this_month = int(rng.gauss(entries_per_month, entries_stddev) * seasonal)
 
         for _ in range(entries_this_month):
             entry_counter += 1
@@ -501,24 +504,54 @@ def _derive_trial_balance(
 
 # --- Main Generator ---
 
-def generate_finance_dataset(seed: int = 42, months: int = 12) -> FinanceDataset:
+def generate_finance_dataset(
+    seed: int = 42,
+    months: int = 12,
+    fiscal_start: date | None = None,
+    invoices_count: int | None = None,
+    bank_transactions_count: int | None = None,
+    journal_entries_per_month: int | None = None,
+    journal_entries_stddev: int | None = None,
+    q4_seasonal_boost: float | None = None,
+) -> FinanceDataset:
     """Generate a complete clean finance dataset.
 
     Args:
         seed: Random seed for reproducibility.
         months: Number of months to generate (fiscal year).
+        fiscal_start: First day of the fiscal year.
+        invoices_count: Number of invoices to generate.
+        bank_transactions_count: Number of bank transactions to generate.
+        journal_entries_per_month: Mean journal entries per month.
+        journal_entries_stddev: Std-dev of journal entries per month.
+        q4_seasonal_boost: Fractional boost applied to Q4 months.
 
     Returns:
         FinanceDataset with all 8 tables populated.
     """
     rng = random.Random(seed)
-    fiscal_start = date(2025, 1, 1)
+    if fiscal_start is None:
+        fiscal_start = date(2025, 1, 1)
+
+    je_kwargs: dict[str, int | float] = {}
+    if journal_entries_per_month is not None:
+        je_kwargs["entries_per_month"] = journal_entries_per_month
+    if journal_entries_stddev is not None:
+        je_kwargs["entries_stddev"] = journal_entries_stddev
+    if q4_seasonal_boost is not None:
+        je_kwargs["q4_seasonal_boost"] = q4_seasonal_boost
 
     chart = generate_chart_of_accounts()
-    entries, lines = _generate_journal_entries(rng, fiscal_start, months)
-    invoices = _generate_invoices(rng, fiscal_start, months)
+    entries, lines = _generate_journal_entries(rng, fiscal_start, months, **je_kwargs)
+    invoices = _generate_invoices(
+        rng, fiscal_start, months,
+        **({"count": invoices_count} if invoices_count is not None else {}),
+    )
     payments = _generate_payments(rng, invoices)
-    bank_txns = _generate_bank_transactions(rng, fiscal_start, months)
+    bank_txns = _generate_bank_transactions(
+        rng, fiscal_start, months,
+        **({"count": bank_transactions_count} if bank_transactions_count is not None else {}),
+    )
     fx_rates = _generate_fx_rates(rng, fiscal_start, months)
     trial_bal = _generate_trial_balance(lines, fiscal_start, months)
 
