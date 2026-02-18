@@ -24,6 +24,7 @@ defaults:
   strategy: medium
 
 generator:
+  normalization: full  # full | partial | flat
   fiscal_start: "2025-01-01"
   invoices_count: 3000
   bank_transactions_count: 8000

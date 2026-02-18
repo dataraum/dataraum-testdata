@@ -27,10 +27,22 @@ testdata describe --scenario month-end-close
 | `medium` | Realistic problems (~11 injection types) |
 | `high`   | Severe quality issues across all layers |
 
+## Normalization Levels
+
+The `normalization` setting in the scenario YAML controls table structure:
+
+| Level | Tables | Analogue |
+|-------|--------|----------|
+| `full` | 8 (default) | ERP schema export |
+| `partial` | 6 | Reporting views — merges parent-child pairs |
+| `flat` | 5 | Analyst spreadsheet — inlines lookup tables |
+
+Set via `generator.normalization` in `config/scenarios/month_end_close.yaml`.
+
 ## Output
 
 Each generation produces:
-- **CSV files** — one per table (8 tables for finance)
+- **CSV files** — one per table (varies by normalization level)
 - **manifest.yaml** — file list, row counts, generation parameters
 - **entropy_map.yaml** — ground truth: every injection with target rows, detector ID, layer, severity
 
@@ -53,3 +65,10 @@ Each generation produces:
 uv sync
 uv run pytest tests/ -v
 ```
+
+## Backlog
+
+- `single` normalization level (1 mega-table) — requires design decisions for non-joinable tables
+- Composite vs surrogate key options
+- Wide/tall pivot for trial_balance and journal_lines
+- Column naming styles (snake_case, camelCase, legacy)

@@ -66,5 +66,12 @@ class InjectionRegistry:
             by_detector[inj.detector_id] = by_detector.get(inj.detector_id, 0) + 1
         return {"by_layer": by_layer, "by_detector": by_detector}
 
+    def remap_tables(self, mapping: dict[str, str]) -> None:
+        """Update ``target_file`` for injections whose table was renamed by schema transforms."""
+        for inj in self._injections:
+            old_table = inj.target_file.removesuffix(".csv")
+            if old_table in mapping:
+                inj.target_file = f"{mapping[old_table]}.csv"
+
     def __len__(self) -> int:
         return len(self._injections)

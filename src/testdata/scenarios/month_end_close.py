@@ -16,6 +16,7 @@ from testdata.entropy import injectors
 from testdata.entropy.registry import InjectionRegistry
 from testdata.entropy.strategies import InjectionSpec, get_strategy
 from testdata.export import dataset_to_dataframes, export_dataframes
+from testdata.schema_transforms import apply_normalization
 
 
 SCENARIO_NAME = "month-end-close"
@@ -113,7 +114,13 @@ def run_scenario(
     for spec in strategy.injections:
         _apply_injection(spec, dataframes, registry, rng)
 
-    # Step 4: Export if output_dir provided
+    # Step 4: Apply normalization transforms
+    normalization = gen_cfg.get("normalization", "full")
+    dataframes, table_mapping = apply_normalization(dataframes, normalization)
+    if table_mapping:
+        registry.remap_tables(table_mapping)
+
+    # Step 5: Export if output_dir provided
     if output_dir is not None:
         generation_params = {
             "scenario": SCENARIO_NAME,
