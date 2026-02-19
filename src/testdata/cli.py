@@ -6,7 +6,7 @@ from pathlib import Path
 
 import typer
 
-from testdata.scenarios.month_end_close import SCENARIOS, run_scenario
+from testdata.scenarios.runner import discover_scenarios, run_scenario
 
 app = typer.Typer(
     name="testdata",
@@ -18,24 +18,38 @@ app = typer.Typer(
 @app.command()
 def generate(
     scenario: str = typer.Option("month-end-close", help="Scenario to generate"),
-    strategy: str = typer.Option("medium", help="Injection strategy: clean, low, medium, high"),
-    output: Path = typer.Option(..., help="Output directory for CSV and YAML files"),
-    seed: int = typer.Option(42, help="Random seed for reproducibility"),
-    months: int = typer.Option(12, help="Number of months in fiscal year"),
+    strategy: str = typer.Option(None, help="Injection strategy (default: from scenario YAML)"),
+    output: Path = typer.Option(..., help="Output directory"),
+    seed: int = typer.Option(None, help="Random seed (default: from scenario YAML)"),
+    months: int = typer.Option(None, help="Number of months (default: from scenario YAML)"),
+    fmt: str = typer.Option("csv", "--format", help="Export format: csv, parquet, both"),
 ) -> None:
     """Generate synthetic test data with entropy injections."""
-    if scenario not in SCENARIOS:
-        typer.echo(f"Unknown scenario: {scenario!r}. Available: {list(SCENARIOS.keys())}")
+    scenarios = discover_scenarios()
+    if scenario not in scenarios:
+        typer.echo(f"Unknown scenario: {scenario!r}. Available: {list(scenarios.keys())}")
         raise typer.Exit(1)
 
-    typer.echo(f"Generating scenario={scenario!r} strategy={strategy!r} seed={seed} months={months}")
-    typer.echo(f"Output: {output}")
+    if fmt not in ("csv", "parquet", "both"):
+        typer.echo(f"Unknown format: {fmt!r}. Available: csv, parquet, both")
+        raise typer.Exit(1)
+
+    # Resolve effective values for display (CLI override → YAML default)
+    config = scenarios[scenario]
+    eff_seed = seed if seed is not None else config.seed
+    eff_months = months if months is not None else config.months
+    eff_strategy = strategy if strategy is not None else config.strategy
+
+    typer.echo(f"Generating scenario={scenario!r} strategy={eff_strategy!r} seed={eff_seed} months={eff_months}")
+    typer.echo(f"Output: {output} (format={fmt})")
 
     result = run_scenario(
+        scenario,
         strategy_name=strategy,
         seed=seed,
         months=months,
         output_dir=output,
+        fmt=fmt,
     )
 
     registry = result["registry"]
@@ -57,25 +71,30 @@ def generate(
 @app.command()
 def list_scenarios() -> None:
     """List available scenarios."""
-    for name, info in SCENARIOS.items():
-        typer.echo(f"  {name}: {info['description']}")
+    for name, config in discover_scenarios().items():
+        typer.echo(f"  {name}: {config.description}")
 
 
 @app.command()
 def describe(
     scenario: str = typer.Option("month-end-close", help="Scenario to describe"),
 ) -> None:
-    """Describe a scenario and its tables."""
-    if scenario not in SCENARIOS:
-        typer.echo(f"Unknown scenario: {scenario!r}. Available: {list(SCENARIOS.keys())}")
+    """Describe a scenario's configuration."""
+    scenarios = discover_scenarios()
+    if scenario not in scenarios:
+        typer.echo(f"Unknown scenario: {scenario!r}. Available: {list(scenarios.keys())}")
         raise typer.Exit(1)
 
-    info = SCENARIOS[scenario]
-    typer.echo(f"Scenario: {info['name']}")
-    typer.echo(f"Description: {info['description']}")
-    typer.echo(f"Default strategy: {info['default_strategy']}")
-    tables: list[str] = info["tables"]  # type: ignore[assignment]
-    typer.echo(f"Tables: {', '.join(tables)}")
+    config = scenarios[scenario]
+    typer.echo(f"Scenario: {config.name}")
+    typer.echo(f"Description: {config.description}")
+    typer.echo(f"Tables: {', '.join(config.tables)}")
+    typer.echo(f"\nDefaults:")
+    typer.echo(f"  strategy: {config.strategy}")
+    typer.echo(f"  seed: {config.seed}")
+    typer.echo(f"  months: {config.months}")
+    typer.echo(f"  fiscal_start: {config.fiscal_start}")
+    typer.echo(f"  normalization: {config.normalization}")
     typer.echo("\nAvailable strategies: clean, low, medium, high")
 
 

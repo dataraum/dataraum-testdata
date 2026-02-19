@@ -1,17 +1,19 @@
-"""Export finance dataset to CSV files + manifest YAML."""
+"""Export finance dataset to CSV/Parquet files + manifest YAML."""
 
 from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 import yaml
 
 from testdata.canonical.finance.models import FinanceDataset
 
+
+ExportFormat = Literal["csv", "parquet", "both"]
 
 # Table name -> model field name mapping
 TABLE_NAMES: dict[str, str] = {
@@ -27,7 +29,7 @@ TABLE_NAMES: dict[str, str] = {
 
 
 def _serialize_value(v: Any) -> Any:
-    """Convert Pydantic-native types to CSV-friendly primitives."""
+    """Convert Pydantic-native types to export-friendly primitives."""
     if isinstance(v, Decimal):
         return float(v)
     if isinstance(v, (date, datetime)):
@@ -58,65 +60,54 @@ def dataset_to_dataframes(dataset: FinanceDataset) -> dict[str, pl.DataFrame]:
     return result
 
 
+def _write_table(
+    df: pl.DataFrame,
+    output_dir: Path,
+    table_name: str,
+    fmt: ExportFormat,
+) -> list[dict[str, Any]]:
+    """Write a single table in the requested format(s). Returns manifest entries."""
+    entries: list[dict[str, Any]] = []
+    base = {"table": table_name, "rows": len(df), "columns": df.columns}
+
+    if fmt in ("csv", "both"):
+        csv_path = output_dir / f"{table_name}.csv"
+        df.write_csv(csv_path)
+        entries.append({"file": f"{table_name}.csv", **base})
+
+    if fmt in ("parquet", "both"):
+        parquet_path = output_dir / f"{table_name}.parquet"
+        df.write_parquet(parquet_path)
+        entries.append({"file": f"{table_name}.parquet", **base})
+
+    return entries
+
+
 def export_dataset(
     dataset: FinanceDataset,
     output_dir: Path,
     entropy_records: list[dict] | None = None,
     generation_params: dict | None = None,
+    fmt: ExportFormat = "csv",
 ) -> None:
-    """Export dataset to CSV files with manifest and optional entropy map.
+    """Export dataset to files with manifest and optional entropy map.
 
     Args:
         dataset: The finance dataset to export.
         output_dir: Directory to write files into.
         entropy_records: Optional list of entropy injection records for the map.
         generation_params: Optional dict of generation parameters for the manifest.
+        fmt: Export format — "csv", "parquet", or "both".
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-
     dataframes = dataset_to_dataframes(dataset)
+
     file_manifest: list[dict[str, Any]] = []
-
     for table_name, df in dataframes.items():
-        csv_path = output_dir / f"{table_name}.csv"
-        df.write_csv(csv_path)
-        file_manifest.append({
-            "file": f"{table_name}.csv",
-            "table": table_name,
-            "rows": len(df),
-            "columns": df.columns,
-        })
+        file_manifest.extend(_write_table(df, output_dir, table_name, fmt))
 
-    # Write manifest
-    manifest = {
-        "generated_at": datetime.now().isoformat(),
-        "generator": "dataraum-testdata",
-        "version": "0.1.0",
-        "parameters": generation_params or {},
-        "files": file_manifest,
-    }
-    manifest_path = output_dir / "manifest.yaml"
-    with open(manifest_path, "w") as f:
-        yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
-
-    # Write entropy map
-    entropy_path = output_dir / "entropy_map.yaml"
-    if entropy_records:
-        with open(entropy_path, "w") as f:
-            yaml.dump(
-                {"injections": entropy_records, "total_injections": len(entropy_records)},
-                f,
-                default_flow_style=False,
-                sort_keys=False,
-            )
-    else:
-        with open(entropy_path, "w") as f:
-            yaml.dump(
-                {"injections": [], "total_injections": 0},
-                f,
-                default_flow_style=False,
-                sort_keys=False,
-            )
+    _write_manifest(output_dir, file_manifest, generation_params)
+    _write_entropy_map(output_dir, entropy_records)
 
 
 def export_dataframes(
@@ -124,26 +115,36 @@ def export_dataframes(
     output_dir: Path,
     entropy_records: list[dict] | None = None,
     generation_params: dict | None = None,
+    fmt: ExportFormat = "csv",
 ) -> None:
-    """Export pre-built DataFrames (after injection) to CSV + manifest.
+    """Export pre-built DataFrames (after injection) to files + manifest.
 
     This is the post-injection export path: the scenario has already
     mutated the DataFrames and recorded entropy injections.
+
+    Args:
+        dataframes: Table name → DataFrame mapping.
+        output_dir: Directory to write files into.
+        entropy_records: Optional list of entropy injection records.
+        generation_params: Optional dict of generation parameters.
+        fmt: Export format — "csv", "parquet", or "both".
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     file_manifest: list[dict[str, Any]] = []
-
     for table_name, df in dataframes.items():
-        csv_path = output_dir / f"{table_name}.csv"
-        df.write_csv(csv_path)
-        file_manifest.append({
-            "file": f"{table_name}.csv",
-            "table": table_name,
-            "rows": len(df),
-            "columns": df.columns,
-        })
+        file_manifest.extend(_write_table(df, output_dir, table_name, fmt))
 
+    _write_manifest(output_dir, file_manifest, generation_params)
+    _write_entropy_map(output_dir, entropy_records)
+
+
+def _write_manifest(
+    output_dir: Path,
+    file_manifest: list[dict[str, Any]],
+    generation_params: dict | None,
+) -> None:
+    """Write manifest.yaml."""
     manifest = {
         "generated_at": datetime.now().isoformat(),
         "generator": "dataraum-testdata",
@@ -154,10 +155,15 @@ def export_dataframes(
     with open(output_dir / "manifest.yaml", "w") as f:
         yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
 
-    entropy_path = output_dir / "entropy_map.yaml"
+
+def _write_entropy_map(
+    output_dir: Path,
+    entropy_records: list[dict] | None,
+) -> None:
+    """Write entropy_map.yaml."""
     entropy_data = {
         "injections": entropy_records or [],
         "total_injections": len(entropy_records) if entropy_records else 0,
     }
-    with open(entropy_path, "w") as f:
+    with open(output_dir / "entropy_map.yaml", "w") as f:
         yaml.dump(entropy_data, f, default_flow_style=False, sort_keys=False)

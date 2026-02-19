@@ -1,0 +1,72 @@
+# ERP Migration Scenario
+# Simulates data extracted during a mid-year ERP-to-ERP migration.
+# Two systems, overlapping periods, format clashes, and ID remapping issues.
+
+name: erp-migration
+description: >
+  ERP migration for a mid-size company. 6-month transition window with data
+  from legacy and target systems. Entropy injections simulate format mismatches,
+  ID remapping failures, column naming inconsistencies, and referential integrity
+  breaks typical of system migrations.
+
+tables:
+  - chart_of_accounts
+  - journal_entries
+  - journal_lines
+  - invoices
+  - payments
+  - bank_transactions
+  - fx_rates
+  - trial_balance
+
+defaults:
+  seed: 7777
+  months: 6
+  strategy: high
+
+generator:
+  normalization: partial  # merged exports from two systems
+  fiscal_start: "2025-04-01"
+  invoices_count: 1500
+  bank_transactions_count: 4000
+  journal_entries_per_month: 350
+  journal_entries_stddev: 60
+  q4_seasonal_boost: 0.0  # no seasonal effect during migration window
+
+stories:
+  journal_lines.debit:
+    injection: corrupt_types
+    story: "Legacy system exported numeric fields with inline error markers"
+  journal_lines.cost_center:
+    injection: introduce_nulls
+    story: "Target system has mandatory cost center; legacy data lacks it"
+  journal_lines.credit:
+    injection: inject_outliers
+    story: "Currency conversion errors during bulk import created extreme values"
+  bank_transactions.amount:
+    injection: break_benford
+    story: "Migration script generated round-number settlement entries"
+  invoices.amount:
+    injection: mix_units
+    story: "Legacy system stored all amounts in local currency; target system uses USD"
+  payments.date:
+    injection: corrupt_dates
+    story: "Legacy system used DD/MM/YYYY; target system uses ISO 8601"
+  payments.invoice_id:
+    injection: break_referential_integrity
+    story: "Invoice ID remapping during migration left orphaned payment references"
+  journal_lines.debit_credit:
+    injection: create_mutual_exclusivity
+    story: "Target system enforces single-sided journal lines; legacy allowed both"
+  trial_balance.debit_balance:
+    injection: drift_formula
+    story: "Opening balances recalculated with different rounding rules"
+  bank_transactions.amount_drift:
+    injection: inject_temporal_drift
+    story: "Post-migration cutover date introduces systematic amount shift"
+  invoices.vendor_id:
+    injection: obscure_column_names
+    story: "Legacy system export uses abbreviated column headers"
+  journal_lines.account_id:
+    injection: break_referential_integrity
+    story: "Chart of accounts renumbered in target system; old IDs remain in journal data"

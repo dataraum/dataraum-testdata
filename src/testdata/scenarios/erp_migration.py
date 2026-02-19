@@ -1,6 +1,6 @@
-"""Month-end-close scenario — thin wrapper around shared runner.
+"""ERP-migration scenario — thin wrapper around shared runner.
 
-All configuration lives in ``config/scenarios/month_end_close.yaml``.
+All configuration lives in ``config/scenarios/erp_migration.yaml``.
 This module provides a convenience ``run_scenario()`` for direct use in
 tests and scripts.
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 from testdata.export import ExportFormat
 from testdata.scenarios.runner import run_scenario as _run
 
-SCENARIO_NAME = "month-end-close"
+SCENARIO_NAME = "erp-migration"
 
 
 def run_scenario(
@@ -22,7 +22,7 @@ def run_scenario(
     output_dir: Path | None = None,
     fmt: ExportFormat = "csv",
 ) -> dict:
-    """Run the month-end-close scenario. See ``runner.run_scenario`` for details."""
+    """Run the ERP-migration scenario. See ``runner.run_scenario`` for details."""
     return _run(
         SCENARIO_NAME,
         strategy_name=strategy_name,
