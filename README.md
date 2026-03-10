@@ -87,9 +87,52 @@ Beyond normalization levels, the library provides additional transforms:
 - `PascalCase` — C#/.NET style
 - `legacy` — abbreviated uppercase (ERP-style: `DR_AMT`, `ACCT_NO`, `CC`)
 
+**Key strategies** (`apply_key_strategy`):
+- `surrogate` — default (identity, e.g. `JE-0001`)
+- `natural` — prefix-based (e.g. `JE-00001`)
+- `uuid` — deterministic UUIDs (seeded)
+- `composite` — table-prefixed (`journal_entries::JE-0001`)
+
 **Pivots** (standalone functions):
 - `pivot_trial_balance_wide` — accounts as rows, periods as columns
 - `pivot_journal_lines_wide` — single `amount` + `side` column instead of separate debit/credit
+
+## Scenarios
+
+| Scenario | Sources | Description |
+|----------|---------|-------------|
+| `month-end-close` | 1 | 12-month fiscal year, 8 tables, standard ERP export |
+| `erp-migration` | 1 | 6-month migration window, high entropy, partial normalization |
+| `multi-system-recon` | 3 | Same events exported through ERP (legacy), banking (PascalCase), AP system (camelCase) |
+
+### Multi-Source Scenarios
+
+Multi-source scenarios split tables across separate "data sources" with different schema conventions. Each source gets its own subdirectory, manifest, and column naming.
+
+```bash
+testdata generate --scenario multi-system-recon --strategy clean --output ./output/multi --seed 42
+```
+
+Output:
+```
+output/
+├── erp_export/          # chart_of_accounts, journal_*, trial_balance (legacy columns)
+├── banking_feed/        # bank_transactions, fx_rates (PascalCase columns)
+├── ap_system/           # invoices, payments (camelCase columns)
+├── sources.yaml         # source index
+├── entropy_map.yaml     # injection ground truth
+└── ground_truth.yaml    # financial ground truth
+```
+
+Define sources in scenario YAML:
+```yaml
+sources:
+  erp_export:
+    tables: [chart_of_accounts, journal_entries, journal_lines, trial_balance]
+    column_style: legacy
+    key_strategy: surrogate
+    format: csv
+```
 
 ## Ground Truth
 
@@ -102,5 +145,4 @@ Each scenario run computes `ground_truth.yaml` with known-correct financial metr
 ## Backlog
 
 - Format profiles (DATEV, SAP, Salesforce, HubSpot) via YAML config + OpenAPI specs
-- Composite vs surrogate key options
-- Additional scenarios (supply chain, sales/CRM)
+- Additional verticals (supply chain, sales/CRM)

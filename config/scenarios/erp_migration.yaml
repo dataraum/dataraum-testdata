@@ -28,9 +28,6 @@ generator:
   normalization: partial  # merged exports from two systems
   fiscal_start: "2025-04-01"
   invoices_count: 1500
-  bank_transactions_count: 4000
-  journal_entries_per_month: 350
-  journal_entries_stddev: 60
   q4_seasonal_boost: 0.0  # no seasonal effect during migration window
 
 stories:

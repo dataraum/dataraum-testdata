@@ -30,7 +30,23 @@ from testdata.ground_truth import (
     estimate_injection_impact,
     export_ground_truth,
 )
-from testdata.schema_transforms import apply_normalization
+from testdata.schema_transforms import (
+    apply_column_style,
+    apply_key_strategy,
+    apply_normalization,
+)
+
+
+@dataclass
+class SourceConfig:
+    """A single data source within a multi-source scenario."""
+
+    name: str
+    description: str
+    tables: list[str]
+    column_style: str  # snake_case, camelCase, PascalCase, legacy
+    key_strategy: str  # surrogate, natural, uuid, composite
+    format: str  # csv, parquet
 
 
 @dataclass
@@ -48,6 +64,8 @@ class ScenarioConfig:
     normalization: str
     fiscal_start: date
     generator_kwargs: dict
+    # Multi-source (None for single-source scenarios)
+    sources: list[SourceConfig] | None = None
 
 
 def load_scenario_config(scenario_name: str) -> ScenarioConfig:
@@ -75,6 +93,20 @@ def load_scenario_config(scenario_name: str) -> ScenarioConfig:
         if key in gen:
             gen_kwargs[key] = gen[key]
 
+    # Parse multi-source definitions
+    sources: list[SourceConfig] | None = None
+    if "sources" in raw:
+        sources = []
+        for src_name, src_cfg in raw["sources"].items():
+            sources.append(SourceConfig(
+                name=src_name,
+                description=src_cfg.get("description", ""),
+                tables=src_cfg["tables"],
+                column_style=src_cfg.get("column_style", "snake_case"),
+                key_strategy=src_cfg.get("key_strategy", "surrogate"),
+                format=src_cfg.get("format", "csv"),
+            ))
+
     return ScenarioConfig(
         name=raw["name"],
         description=raw["description"].strip(),
@@ -85,6 +117,7 @@ def load_scenario_config(scenario_name: str) -> ScenarioConfig:
         normalization=gen.get("normalization", "full"),
         fiscal_start=date.fromisoformat(gen.get("fiscal_start", "2025-01-01")),
         generator_kwargs=gen_kwargs,
+        sources=sources,
     )
 
 
@@ -191,13 +224,23 @@ def run_scenario(
             "normalization": config.normalization,
             "injection_count": len(registry),
         }
-        export_dataframes(
-            dataframes=dataframes,
-            output_dir=output_dir,
-            entropy_records=registry.export_dicts(),
-            generation_params=generation_params,
-            fmt=fmt,
-        )
+        if config.sources:
+            _export_multi_source(
+                dataframes=dataframes,
+                sources=config.sources,
+                output_dir=output_dir,
+                seed=seed,
+                entropy_records=registry.export_dicts(),
+                generation_params=generation_params,
+            )
+        else:
+            export_dataframes(
+                dataframes=dataframes,
+                output_dir=output_dir,
+                entropy_records=registry.export_dicts(),
+                generation_params=generation_params,
+                fmt=fmt,
+            )
         export_ground_truth(ground_truth, output_dir)
 
     return {
@@ -207,6 +250,72 @@ def run_scenario(
         "config": config,
         "ground_truth": ground_truth,
     }
+
+
+def _export_multi_source(
+    dataframes: dict[str, pl.DataFrame],
+    sources: list[SourceConfig],
+    output_dir: Path,
+    seed: int,
+    entropy_records: list[dict],
+    generation_params: dict,
+) -> None:
+    """Export data split across multiple source directories.
+
+    Each source gets its own subdirectory with per-source column/key transforms.
+    A top-level ``sources.yaml`` indexes all sources.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source_index: list[dict] = []
+
+    for src in sources:
+        # Extract this source's tables
+        src_dfs = {t: dataframes[t] for t in src.tables if t in dataframes}
+
+        # Apply key strategy (before column rename so key columns keep canonical names)
+        if src.key_strategy != "surrogate":
+            src_dfs = apply_key_strategy(src_dfs, src.key_strategy, seed=seed)
+
+        # Apply column style
+        if src.column_style != "snake_case":
+            src_dfs = apply_column_style(src_dfs, src.column_style)
+
+        # Export to source subdirectory
+        src_dir = output_dir / src.name
+        src_params = {**generation_params, "source": src.name, "column_style": src.column_style}
+        export_dataframes(
+            dataframes=src_dfs,
+            output_dir=src_dir,
+            entropy_records=None,  # Entropy map goes at top level
+            generation_params=src_params,
+            fmt=src.format,
+        )
+
+        source_index.append({
+            "name": src.name,
+            "description": src.description,
+            "directory": src.name,
+            "tables": list(src_dfs.keys()),
+            "column_style": src.column_style,
+            "key_strategy": src.key_strategy,
+            "format": src.format,
+        })
+
+    # Write top-level sources.yaml
+    with open(output_dir / "sources.yaml", "w") as f:
+        yaml.dump(
+            {"sources": source_index, "generation": generation_params},
+            f, default_flow_style=False, sort_keys=False,
+        )
+
+    # Write top-level entropy map
+    entropy_data = {
+        "injections": entropy_records or [],
+        "total_injections": len(entropy_records) if entropy_records else 0,
+    }
+    with open(output_dir / "entropy_map.yaml", "w") as f:
+        yaml.dump(entropy_data, f, default_flow_style=False, sort_keys=False)
 
 
 def discover_scenarios() -> dict[str, ScenarioConfig]:
