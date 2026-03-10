@@ -5,8 +5,12 @@ import random
 import polars as pl
 
 from testdata.entropy.injectors import (
+    add_duplicate_fk_paths,
     break_benford,
+    break_gl_invoice_match,
+    break_payment_bank_match,
     break_referential_integrity,
+    break_trial_balance,
     corrupt_dates,
     corrupt_types,
     create_mutual_exclusivity,
@@ -16,7 +20,6 @@ from testdata.entropy.injectors import (
     introduce_nulls,
     mix_units,
     obscure_column_names,
-    add_duplicate_fk_paths,
 )
 from testdata.entropy.registry import InjectionRegistry
 
@@ -170,6 +173,48 @@ def test_create_mutual_exclusivity():
     credit_vals = result["credit"].to_list()
     for d, c in zip(debit_vals, credit_vals):
         assert d == 0.0 or c == 0.0, f"Both populated: debit={d}, credit={c}"
+
+
+def test_break_gl_invoice_match():
+    df = pl.DataFrame({"amount": [1000.0] * 100})
+    reg = _make_registry()
+    result = break_gl_invoice_match(
+        df, "amount", ratio=0.10, registry=reg, table_name="invoices", rng=_make_rng(),
+    )
+    values = result["amount"].to_list()
+    changed = [v for v in values if abs(v - 1000.0) > 0.01]
+    assert len(changed) >= 5  # ~10% of 100
+    assert len(reg) == 1
+    assert reg.injections[0].detector_id == "cross_table_consistency"
+    assert reg.injections[0].sub_dimension == "gl_invoice_mismatch"
+
+
+def test_break_payment_bank_match():
+    df = pl.DataFrame({"amount": [500.0] * 100})
+    reg = _make_registry()
+    result = break_payment_bank_match(
+        df, "amount", ratio=0.08, registry=reg, table_name="payments", rng=_make_rng(),
+    )
+    values = result["amount"].to_list()
+    changed = [v for v in values if abs(v - 500.0) > 0.01]
+    assert len(changed) >= 4  # ~8% of 100
+    assert len(reg) == 1
+    assert reg.injections[0].detector_id == "cross_table_consistency"
+    assert reg.injections[0].sub_dimension == "payment_bank_mismatch"
+
+
+def test_break_trial_balance():
+    df = pl.DataFrame({"debit_balance": [10000.0] * 100})
+    reg = _make_registry()
+    result = break_trial_balance(
+        df, "debit_balance", ratio=0.10, registry=reg, table_name="trial_balance", rng=_make_rng(),
+    )
+    values = result["debit_balance"].to_list()
+    changed = [v for v in values if abs(v - 10000.0) > 0.01]
+    assert len(changed) >= 5
+    assert len(reg) == 1
+    assert reg.injections[0].detector_id == "derived_value_consistency"
+    assert reg.injections[0].sub_dimension == "trial_balance_gl_mismatch"
 
 
 def test_registry_summary():

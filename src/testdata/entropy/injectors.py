@@ -480,6 +480,166 @@ def inject_temporal_drift(
     return df
 
 
+# --- Cross-table relationship injectors ---
+# These corrupt ONE side of a cross-table relationship.
+# The other table retains the original value, creating a detectable mismatch.
+
+
+def break_gl_invoice_match(
+    df: pl.DataFrame,
+    col: str,
+    ratio: float,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,
+    factor_range: tuple[float, float] = (0.8, 1.3),
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Scale invoice amounts so they no longer match corresponding GL entries.
+
+    Operates on the invoices table. The matching journal entry (DR Expense,
+    CR AP) retains the original amount, creating a cross-table mismatch
+    that a relationship detector should catch.
+    """
+    n = len(df)
+    count = max(1, int(n * ratio))
+    indices = rng.sample(range(n), min(count, n))
+
+    values = df[col].to_list()
+    actual_affected = []
+    for i in indices:
+        if values[i] is not None:
+            try:
+                val = float(values[i])
+            except (ValueError, TypeError):
+                continue
+            factor = rng.uniform(*factor_range)
+            # Avoid factor ≈ 1.0 (undetectable)
+            if abs(factor - 1.0) < 0.05:
+                factor = factor_range[1]
+            values[i] = round(val * factor, 2)
+            actual_affected.append(i)
+
+    df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    registry.record(EntropyInjection(
+        injection_id=registry.next_id("XMATCH"),
+        target_file=f"{table_name}.csv",
+        target_column=col,
+        target_rows=sorted(actual_affected),
+        layer="structural",
+        dimension="cross_table_consistency",
+        sub_dimension="gl_invoice_mismatch",
+        detector_id="cross_table_consistency",
+        injection_type="break_gl_invoice_match",
+        parameters={"ratio": ratio, "factor_range": list(factor_range)},
+        severity=severity,
+    ))
+    return df
+
+
+def break_payment_bank_match(
+    df: pl.DataFrame,
+    col: str,
+    ratio: float,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,
+    factor_range: tuple[float, float] = (0.9, 1.2),
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Scale payment amounts so they no longer match corresponding bank transactions.
+
+    Operates on the payments table. The matching bank transaction retains
+    the original amount, creating a cross-table mismatch.
+    """
+    n = len(df)
+    count = max(1, int(n * ratio))
+    indices = rng.sample(range(n), min(count, n))
+
+    values = df[col].to_list()
+    actual_affected = []
+    for i in indices:
+        if values[i] is not None:
+            try:
+                val = float(values[i])
+            except (ValueError, TypeError):
+                continue
+            factor = rng.uniform(*factor_range)
+            if abs(factor - 1.0) < 0.03:
+                factor = factor_range[1]
+            values[i] = round(val * factor, 2)
+            actual_affected.append(i)
+
+    df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    registry.record(EntropyInjection(
+        injection_id=registry.next_id("XMATCH"),
+        target_file=f"{table_name}.csv",
+        target_column=col,
+        target_rows=sorted(actual_affected),
+        layer="structural",
+        dimension="cross_table_consistency",
+        sub_dimension="payment_bank_mismatch",
+        detector_id="cross_table_consistency",
+        injection_type="break_payment_bank_match",
+        parameters={"ratio": ratio, "factor_range": list(factor_range)},
+        severity=severity,
+    ))
+    return df
+
+
+def break_trial_balance(
+    df: pl.DataFrame,
+    col: str,
+    ratio: float,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,
+    error_range: tuple[float, float] = (0.01, 5.0),
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Introduce errors in trial balance so it no longer matches cumulative GL.
+
+    Unlike drift_formula (which adds small rounding errors), this creates
+    meaningful discrepancies that indicate the TB was exported from a
+    different source or aggregated incorrectly.
+    """
+    n = len(df)
+    count = max(1, int(n * ratio))
+    indices = rng.sample(range(n), min(count, n))
+
+    values = df[col].to_list()
+    actual_affected = []
+    for i in indices:
+        if values[i] is not None:
+            try:
+                val = float(values[i])
+            except (ValueError, TypeError):
+                continue
+            # Percentage error (±error_range)
+            error_pct = rng.uniform(*error_range) * rng.choice([1, -1]) / 100.0
+            values[i] = round(val * (1 + error_pct), 2)
+            actual_affected.append(i)
+
+    df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    registry.record(EntropyInjection(
+        injection_id=registry.next_id("XBAL"),
+        target_file=f"{table_name}.csv",
+        target_column=col,
+        target_rows=sorted(actual_affected),
+        layer="computational",
+        dimension="cross_table_consistency",
+        sub_dimension="trial_balance_gl_mismatch",
+        detector_id="derived_value_consistency",
+        injection_type="break_trial_balance",
+        parameters={"ratio": ratio, "error_range": list(error_range)},
+        severity=severity,
+    ))
+    return df
+
+
 def create_mutual_exclusivity(
     df: pl.DataFrame,
     col_a: str,
