@@ -89,7 +89,7 @@ def describe(
     typer.echo(f"Scenario: {config.name}")
     typer.echo(f"Description: {config.description}")
     typer.echo(f"Tables: {', '.join(config.tables)}")
-    typer.echo(f"\nDefaults:")
+    typer.echo("\nDefaults:")
     typer.echo(f"  strategy: {config.strategy}")
     typer.echo(f"  seed: {config.seed}")
     typer.echo(f"  months: {config.months}")

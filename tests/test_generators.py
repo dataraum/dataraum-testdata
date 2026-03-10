@@ -231,7 +231,7 @@ def test_cash_receipts_reduce_ar():
         if "Cash receipt" not in entry.description:
             continue
         entry_lines = lines_by_entry.get(entry.entry_id, [])
-        has_cash_debit = any(l.account_id in cash_accounts and l.debit > 0 for l in entry_lines)
-        has_ar_credit = any(l.account_id in ar_accounts and l.credit > 0 for l in entry_lines)
+        has_cash_debit = any(line.account_id in cash_accounts and line.debit > 0 for line in entry_lines)
+        has_ar_credit = any(line.account_id in ar_accounts and line.credit > 0 for line in entry_lines)
         assert has_cash_debit, f"Cash receipt {entry.entry_id} has no Cash debit"
         assert has_ar_credit, f"Cash receipt {entry.entry_id} has no AR credit"
