@@ -25,6 +25,7 @@ from testdata.entropy import injectors
 from testdata.entropy.registry import InjectionRegistry
 from testdata.entropy.strategies import InjectionSpec, get_strategy
 from testdata.export import ExportFormat, dataset_to_dataframes, export_dataframes
+from testdata.ground_truth import calculate_ground_truth, export_ground_truth
 from testdata.schema_transforms import apply_normalization
 
 
@@ -148,20 +149,29 @@ def run_scenario(
         **config.generator_kwargs,
     )
 
-    # Step 2: Convert to DataFrames
+    # Step 2: Compute ground truth from clean data (before injection)
+    ground_truth = calculate_ground_truth(
+        dataset,
+        seed=seed,
+        strategy=strategy_name,
+        fiscal_start=config.fiscal_start,
+        months=months,
+    )
+
+    # Step 3: Convert to DataFrames
     dataframes = dataset_to_dataframes(dataset)
 
-    # Step 3: Apply injections
+    # Step 4: Apply injections
     registry = InjectionRegistry()
     for spec in strategy.injections:
         _apply_injection(spec, dataframes, registry, rng)
 
-    # Step 4: Apply normalization
+    # Step 5: Apply normalization
     dataframes, table_mapping = apply_normalization(dataframes, config.normalization)
     if table_mapping:
         registry.remap_tables(table_mapping)
 
-    # Step 5: Export
+    # Step 6: Export
     if output_dir is not None:
         generation_params = {
             "scenario": scenario_name,
@@ -178,12 +188,14 @@ def run_scenario(
             generation_params=generation_params,
             fmt=fmt,
         )
+        export_ground_truth(ground_truth, output_dir)
 
     return {
         "dataframes": dataframes,
         "registry": registry,
         "dataset": dataset,
         "config": config,
+        "ground_truth": ground_truth,
     }
 
 
