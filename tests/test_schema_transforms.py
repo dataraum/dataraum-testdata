@@ -10,6 +10,7 @@ from testdata.entropy.registry import EntropyInjection, InjectionRegistry
 from testdata.export import dataset_to_dataframes
 from testdata.schema_transforms import (
     apply_column_style,
+    apply_key_strategy,
     apply_normalization,
     pivot_journal_lines_wide,
     pivot_trial_balance_wide,
@@ -302,3 +303,64 @@ def test_journal_lines_wide_pivot(base_dataframes):
     assert sides == {"debit", "credit"}
     # Row count should match non-zero lines
     assert len(wide) == len(jl)  # Every line has exactly one non-zero side
+
+
+# ---------------------------------------------------------------------------
+# key strategies
+# ---------------------------------------------------------------------------
+
+def test_surrogate_is_identity(base_dataframes):
+    """surrogate returns DataFrames unchanged."""
+    result = apply_key_strategy(dict(base_dataframes), "surrogate")
+    for name, df in result.items():
+        assert df.columns == base_dataframes[name].columns
+        assert df.shape == base_dataframes[name].shape
+
+
+def test_natural_keys(base_dataframes):
+    """natural converts surrogate IDs to prefix-based keys."""
+    result = apply_key_strategy(dict(base_dataframes), "natural")
+    je = result["journal_entries"]
+    # entry_id should now start with "JE-"
+    sample = je["entry_id"][0]
+    assert sample.startswith("JE-")
+
+    jl = result["journal_lines"]
+    # line_id should start with "JL-"
+    assert jl["line_id"][0].startswith("JL-")
+    # Foreign key entry_id in journal_lines matches PK in journal_entries
+    je_ids = set(je["entry_id"].unique().to_list())
+    jl_entry_ids = set(jl["entry_id"].drop_nulls().unique().to_list())
+    assert jl_entry_ids.issubset(je_ids)
+
+
+def test_uuid_keys(base_dataframes):
+    """uuid converts surrogate IDs to UUID format."""
+    result = apply_key_strategy(dict(base_dataframes), "uuid")
+    je = result["journal_entries"]
+    sample = je["entry_id"][0]
+    # Should look like a UUID (8-4-4-4-12 hex)
+    parts = sample.split("-")
+    assert len(parts) == 5
+    assert len(parts[0]) == 8
+
+    # FK consistency: journal_lines.entry_id values exist in journal_entries.entry_id
+    jl = result["journal_lines"]
+    je_ids = set(je["entry_id"].unique().to_list())
+    jl_entry_ids = set(jl["entry_id"].drop_nulls().unique().to_list())
+    assert jl_entry_ids.issubset(je_ids)
+
+
+def test_uuid_deterministic(base_dataframes):
+    """Same seed produces identical UUIDs."""
+    r1 = apply_key_strategy(dict(base_dataframes), "uuid", seed=42)
+    r2 = apply_key_strategy(dict(base_dataframes), "uuid", seed=42)
+    assert r1["journal_entries"]["entry_id"].to_list() == r2["journal_entries"]["entry_id"].to_list()
+
+
+def test_composite_keys(base_dataframes):
+    """composite prefixes keys with table name."""
+    result = apply_key_strategy(dict(base_dataframes), "composite")
+    je = result["journal_entries"]
+    sample = je["entry_id"][0]
+    assert "::" in sample

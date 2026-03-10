@@ -13,6 +13,7 @@ Normalization levels:
 
 from __future__ import annotations
 
+import uuid
 from typing import Literal
 
 import polars as pl
@@ -99,6 +100,114 @@ def apply_column_style(
         out[name] = df.rename(mapping)
 
     return out
+
+
+# --- Key strategies ---
+
+KeyStrategy = Literal["surrogate", "natural", "uuid", "composite"]
+
+# Columns that are primary or foreign keys (column_name → table where it's the PK)
+_KEY_COLUMNS: dict[str, str] = {
+    "entry_id": "journal_entries",
+    "line_id": "journal_lines",
+    "account_id": "chart_of_accounts",
+    "invoice_id": "invoices",
+    "payment_id": "payments",
+    "txn_id": "bank_transactions",
+    "vendor_id": "invoices",
+}
+
+# Natural key mappings: surrogate → human-readable pattern
+_NATURAL_KEYS: dict[str, str] = {
+    "entry_id": "JE",
+    "line_id": "JL",
+    "account_id": "ACCT",
+    "invoice_id": "INV",
+    "payment_id": "PAY",
+    "txn_id": "BT",
+    "vendor_id": "V",
+}
+
+
+def apply_key_strategy(
+    dataframes: dict[str, pl.DataFrame],
+    strategy: KeyStrategy,
+    seed: int = 42,
+) -> dict[str, pl.DataFrame]:
+    """Transform key columns across all DataFrames to the requested strategy.
+
+    Args:
+        dataframes: Table name → DataFrame mapping.
+        strategy: Key strategy to apply.
+        seed: Seed for deterministic UUID generation.
+
+    Returns:
+        Transformed DataFrames with consistent key remapping across tables.
+    """
+    if strategy == "surrogate":
+        return dataframes  # Already the default format
+
+    # Build a global remapping: old_value → new_value per column
+    remap: dict[str, dict[str, str]] = {}
+
+    for table_name, df in dataframes.items():
+        for col in df.columns:
+            if col not in _KEY_COLUMNS:
+                continue
+            if col in remap:
+                continue  # Already built from another table
+
+            unique_vals = df[col].drop_nulls().unique().sort().to_list()
+            if strategy == "uuid":
+                rng = _SeededUUID(seed, col)
+                remap[col] = {v: rng.next() for v in unique_vals}
+            elif strategy == "natural":
+                prefix = _NATURAL_KEYS.get(col, col.upper())
+                remap[col] = {
+                    v: _to_natural_key(v, prefix) for v in unique_vals
+                }
+            elif strategy == "composite":
+                # Composite: prefix with table context
+                remap[col] = {
+                    v: f"{table_name}::{v}" for v in unique_vals
+                }
+
+    # Apply remapping to all tables (both PK and FK columns)
+    out: dict[str, pl.DataFrame] = {}
+    for table_name, df in dataframes.items():
+        for col in df.columns:
+            if col in remap:
+                mapping = remap[col]
+                df = df.with_columns(
+                    pl.col(col).replace_strict(
+                        mapping, default=pl.col(col),
+                    ).alias(col)
+                )
+        out[table_name] = df
+
+    return out
+
+
+class _SeededUUID:
+    """Deterministic UUID generator seeded by column name."""
+
+    def __init__(self, seed: int, col: str) -> None:
+        import random as _random
+
+        self._rng = _random.Random(hash((seed, col)))
+
+    def next(self) -> str:
+        return str(uuid.UUID(int=self._rng.getrandbits(128), version=4))
+
+
+def _to_natural_key(surrogate: str, prefix: str) -> str:
+    """Convert a surrogate key like 'V-0001' to a natural key like 'VENDOR-ACME-001'."""
+    # Extract numeric part if present
+    parts = surrogate.split("-")
+    if len(parts) >= 2 and parts[-1].isdigit():
+        num = int(parts[-1])
+        return f"{prefix}-{num:05d}"
+    return f"{prefix}-{surrogate}"
 
 
 # --- Pivots ---
