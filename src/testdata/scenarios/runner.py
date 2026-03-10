@@ -25,7 +25,11 @@ from testdata.entropy import injectors
 from testdata.entropy.registry import InjectionRegistry
 from testdata.entropy.strategies import InjectionSpec, get_strategy
 from testdata.export import ExportFormat, dataset_to_dataframes, export_dataframes
-from testdata.ground_truth import calculate_ground_truth, export_ground_truth
+from testdata.ground_truth import (
+    calculate_ground_truth,
+    estimate_injection_impact,
+    export_ground_truth,
+)
 from testdata.schema_transforms import apply_normalization
 
 
@@ -166,12 +170,18 @@ def run_scenario(
     for spec in strategy.injections:
         _apply_injection(spec, dataframes, registry, rng)
 
-    # Step 5: Apply normalization
+    # Step 5: Estimate injection impact on ground truth metrics
+    if len(registry) > 0:
+        ground_truth.injection_impact = estimate_injection_impact(
+            registry.export_dicts()
+        )
+
+    # Step 6: Apply normalization
     dataframes, table_mapping = apply_normalization(dataframes, config.normalization)
     if table_mapping:
         registry.remap_tables(table_mapping)
 
-    # Step 6: Export
+    # Step 7: Export
     if output_dir is not None:
         generation_params = {
             "scenario": scenario_name,

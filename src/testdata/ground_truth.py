@@ -77,6 +77,14 @@ class Invariants(BaseModel):
     bank_reconciliation_rate: float
 
 
+class InjectionImpact(BaseModel):
+    """Estimated impact of an injection on a financial metric."""
+
+    metric: str
+    expected_error_pct: float
+    affected_by: list[str]
+
+
 class GroundTruth(BaseModel):
     """Complete ground truth for a generated finance dataset."""
 
@@ -88,6 +96,7 @@ class GroundTruth(BaseModel):
     annual: AnnualMetrics
     monthly: list[PeriodMetrics]
     invariants: Invariants
+    injection_impact: list[InjectionImpact] = []
 
 
 # --- Calculation ---
@@ -399,3 +408,114 @@ def _to_yaml_dict(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_to_yaml_dict(v) for v in obj]
     return obj
+
+
+# --- Injection impact estimation ---
+
+# Maps injection_type → list of (metric, estimation_fn)
+# estimation_fn(params) → approximate error percentage on that metric
+_IMPACT_RULES: dict[str, list[tuple[str, str]]] = {
+    # Value-layer injections
+    "corrupt_type": [
+        ("revenue", "ratio"),
+        ("expenses", "ratio"),
+    ],
+    "introduce_nulls": [
+        ("revenue", "ratio"),
+        ("expenses", "ratio"),
+    ],
+    "inject_outliers": [
+        ("revenue", "ratio_x_factor"),
+        ("expenses", "ratio_x_factor"),
+    ],
+    # Semantic-layer injections
+    "mix_units": [
+        ("invoice_totals", "ratio_x_fx_delta"),
+    ],
+    # Structural-layer injections
+    "break_gl_invoice_match": [
+        ("invoice_gl_consistency", "ratio"),
+    ],
+    "break_payment_bank_match": [
+        ("payment_bank_consistency", "ratio"),
+    ],
+    "break_referential_integrity": [
+        ("referential_integrity", "ratio"),
+    ],
+    # Computational-layer injections
+    "drift_formula": [
+        ("trial_balance_accuracy", "error_ratio"),
+    ],
+    "break_trial_balance": [
+        ("trial_balance_accuracy", "ratio"),
+    ],
+    # Distribution injections
+    "break_benford": [
+        ("benford_compliance", "fixed_60"),
+    ],
+    "inject_temporal_drift": [
+        ("temporal_stability", "shift_factor"),
+    ],
+}
+
+
+def estimate_injection_impact(
+    injections: list[dict[str, Any]],
+) -> list[InjectionImpact]:
+    """Estimate metric deviation from known injection parameters.
+
+    Args:
+        injections: List of injection dicts from registry.export_dicts().
+
+    Returns:
+        List of InjectionImpact estimates per affected metric.
+    """
+    # Accumulate impacts by metric
+    metric_impacts: dict[str, tuple[float, list[str]]] = {}
+
+    for inj in injections:
+        inj_type = inj.get("injection_type", "")
+        params = inj.get("parameters", {})
+        target = f"{inj_type}:{inj.get('target_file', '')}"
+
+        rules = _IMPACT_RULES.get(inj_type, [])
+        for metric, method in rules:
+            error_pct = _estimate_error(method, params)
+            if error_pct <= 0:
+                continue
+
+            prev_error, prev_sources = metric_impacts.get(metric, (0.0, []))
+            # Compound: independent errors combine
+            combined = prev_error + error_pct - (prev_error * error_pct / 100.0)
+            metric_impacts[metric] = (combined, prev_sources + [target])
+
+    return [
+        InjectionImpact(
+            metric=metric,
+            expected_error_pct=round(error, 2),
+            affected_by=sources,
+        )
+        for metric, (error, sources) in sorted(metric_impacts.items())
+    ]
+
+
+def _estimate_error(method: str, params: dict[str, Any]) -> float:
+    """Estimate error percentage from injection parameters."""
+    if method == "ratio":
+        return params.get("ratio", 0) * 100.0
+    if method == "error_ratio":
+        return params.get("error_ratio", 0) * 100.0
+    if method == "ratio_x_factor":
+        ratio = params.get("ratio", 0)
+        factor = params.get("factor", 1)
+        return ratio * (factor - 1) * 100.0
+    if method == "ratio_x_fx_delta":
+        ratio = params.get("ratio", 0)
+        fx_rate = params.get("fx_rate", 1.0)
+        return ratio * abs(fx_rate - 1.0) * 100.0
+    if method == "fixed_60":
+        return 60.0  # ~60% of values affected by break_benford
+    if method == "shift_factor":
+        factor = params.get("shift_factor", 1.0)
+        return abs(factor - 1.0) * 50.0  # ~50% of data affected (post-cutoff)
+    return 0.0

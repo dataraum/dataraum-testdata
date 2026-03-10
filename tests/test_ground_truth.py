@@ -7,7 +7,11 @@ from pathlib import Path
 import yaml
 
 from testdata.canonical.finance.generators import generate_finance_dataset
-from testdata.ground_truth import calculate_ground_truth, export_ground_truth
+from testdata.ground_truth import (
+    calculate_ground_truth,
+    estimate_injection_impact,
+    export_ground_truth,
+)
 
 
 def _truth():
@@ -160,3 +164,64 @@ def test_scenario_export_includes_ground_truth_yaml():
         run_scenario(strategy_name="clean", seed=42, months=6, output_dir=output)
         assert (output / "ground_truth.yaml").exists()
         assert (output / "manifest.yaml").exists()
+
+
+# --- Injection impact ---
+
+
+def test_clean_has_no_injection_impact():
+    """Clean strategy produces no injection impact."""
+    from testdata.scenarios.month_end_close import run_scenario
+
+    result = run_scenario(strategy_name="clean", seed=42, months=6)
+    assert result["ground_truth"].injection_impact == []
+
+
+def test_medium_has_injection_impact():
+    """Medium strategy produces injection impact estimates."""
+    from testdata.scenarios.month_end_close import run_scenario
+
+    result = run_scenario(strategy_name="medium", seed=42, months=12)
+    gt = result["ground_truth"]
+    assert len(gt.injection_impact) > 0
+    # Each impact should have metric, error_pct, and affected_by
+    for impact in gt.injection_impact:
+        assert impact.metric
+        assert impact.expected_error_pct > 0
+        assert len(impact.affected_by) > 0
+
+
+def test_estimate_injection_impact_directly():
+    """Direct call to estimate_injection_impact works."""
+    injections = [
+        {
+            "injection_type": "corrupt_type",
+            "target_file": "journal_lines.csv",
+            "parameters": {"ratio": 0.03},
+        },
+        {
+            "injection_type": "mix_units",
+            "target_file": "invoices.csv",
+            "parameters": {"ratio": 0.10, "fx_rate": 1.1},
+        },
+    ]
+    impacts = estimate_injection_impact(injections)
+    metrics = {i.metric for i in impacts}
+    assert "revenue" in metrics
+    assert "invoice_totals" in metrics
+
+
+def test_injection_impact_in_exported_yaml():
+    """Exported YAML includes injection_impact for non-clean strategies."""
+    from testdata.scenarios.month_end_close import run_scenario
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "output"
+        run_scenario(strategy_name="medium", seed=42, months=6, output_dir=output)
+
+        with open(output / "ground_truth.yaml") as f:
+            data = yaml.safe_load(f)
+
+        assert len(data["injection_impact"]) > 0
+        assert data["injection_impact"][0]["metric"]
+        assert data["injection_impact"][0]["expected_error_pct"] > 0
