@@ -2,6 +2,17 @@
 
 Synthetic test data generator with **known entropy injections** for calibrating [dataraum-context](https://github.com/...) entropy detectors.
 
+## Architecture
+
+The generator uses an **event-driven cascade model** where business events produce numerically consistent data across all tables:
+
+- **Revenue cycle**: Sales → AR journal entries → cash receipts → bank transactions
+- **Expenditure cycle**: Purchase invoices → AP journal entries → vendor payments → bank transactions
+- **Operating events**: Monthly payroll, rent, depreciation, insurance, misc expenses
+- **Trial balance**: Derived from actual cumulative GL entries (not approximated)
+
+This produces **closed-loop accounting** — GL entries, invoices, payments, bank transactions, and trial balance are all numerically consistent and traceable back to the originating business event.
+
 ## Quick Start
 
 ```bash
@@ -50,14 +61,14 @@ Each generation produces:
 
 | Table | ~Rows | Description |
 |-------|-------|-------------|
-| chart_of_accounts | 60 | Account hierarchy |
-| journal_entries | 5K | General ledger entries |
-| journal_lines | 15K | Debit/credit lines |
-| invoices | 3K | Vendor invoices |
-| payments | 2.5K | Invoice payments |
-| bank_transactions | 8K | Bank statement |
-| fx_rates | 500 | Exchange rates |
-| trial_balance | 500 | Monthly trial balance |
+| chart_of_accounts | 60 | Account hierarchy (60 accounts, 5 types) |
+| journal_entries | 12K | General ledger entries (event-driven) |
+| journal_lines | 25K | Debit/credit lines (balanced per entry) |
+| invoices | 3K | Vendor/purchase invoices |
+| payments | 2.5K | Invoice payments (paid + partial) |
+| bank_transactions | 5.5K | Bank statement (derived from cash events) |
+| fx_rates | 470 | Weekly exchange rates (8 currency pairs) |
+| trial_balance | 324 | Monthly cumulative balances (27 accounts × 12 months) |
 
 ## Development
 
