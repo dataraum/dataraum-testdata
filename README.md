@@ -77,9 +77,30 @@ uv sync
 uv run pytest tests/ -v
 ```
 
+## Schema Variants
+
+Beyond normalization levels, the library provides additional transforms:
+
+**Column naming styles** (`apply_column_style`):
+- `snake_case` — default (identity)
+- `camelCase` — JavaScript/API style
+- `PascalCase` — C#/.NET style
+- `legacy` — abbreviated uppercase (ERP-style: `DR_AMT`, `ACCT_NO`, `CC`)
+
+**Pivots** (standalone functions):
+- `pivot_trial_balance_wide` — accounts as rows, periods as columns
+- `pivot_journal_lines_wide` — single `amount` + `side` column instead of separate debit/credit
+
+## Ground Truth
+
+Each scenario run computes `ground_truth.yaml` with known-correct financial metrics:
+- **Annual**: revenue, expenses, gross profit, AR/AP/cash balances, DSO, DPO, FCF
+- **Monthly**: same metrics per period plus revenue growth MoM
+- **Invariants**: journal balanced, TB balanced, invoice-payment matched, bank reconciliation rate
+- **Injection impact**: estimated metric deviations from known injection parameters
+
 ## Backlog
 
-- `single` normalization level (1 mega-table) — requires design decisions for non-joinable tables
+- Format profiles (DATEV, SAP, Salesforce, HubSpot) via YAML config + OpenAPI specs
 - Composite vs surrogate key options
-- Wide/tall pivot for trial_balance and journal_lines
-- Column naming styles (snake_case, camelCase, legacy)
+- Additional scenarios (supply chain, sales/CRM)
