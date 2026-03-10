@@ -60,10 +60,11 @@ def load_scenario_config(scenario_name: str) -> ScenarioConfig:
     gen = raw.get("generator", {})
 
     # Extract generator kwargs (everything except normalization and fiscal_start)
+    # Note: journal_entries_per_month, journal_entries_stddev, and
+    # bank_transactions_count are legacy params ignored by event-driven generator
     gen_kwargs: dict = {}
     for key in (
-        "invoices_count", "bank_transactions_count",
-        "journal_entries_per_month", "journal_entries_stddev",
+        "invoices_count",
         "q4_seasonal_boost",
     ):
         if key in gen:

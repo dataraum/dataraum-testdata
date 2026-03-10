@@ -1,8 +1,15 @@
-"""Seed-based deterministic generators for canonical finance data."""
+"""Seed-based deterministic generators for canonical finance data.
+
+Event-driven architecture: business events cascade across tables to produce
+a closed-loop accounting system where GL entries, invoices, payments, bank
+transactions, and trial balance are numerically consistent.
+"""
 
 from __future__ import annotations
 
+import math
 import random
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -35,15 +42,21 @@ VENDOR_NAMES = [
     "Deloitte", "KPMG", "Ernst & Young", "PwC",
     "Google Workspace", "Microsoft", "Zoom", "Slack",
 ]
-COUNTERPARTIES = VENDOR_NAMES + [
+CUSTOMER_NAMES = [
+    "Northwind Corp", "Contoso Ltd", "Adventure Works", "Fabrikam Inc",
+    "Tailspin Toys", "Woodgrove Bank", "Litware Inc", "Proseware",
+    "Alpine Ski House", "Trey Research", "Humongous Insurance", "Datum Corp",
+    "A. Datum", "Coho Vineyard", "Lucerne Publishing", "Margie's Travel",
+]
+COUNTERPARTIES = VENDOR_NAMES + CUSTOMER_NAMES + [
     "First National Bank", "Wells Fargo", "JPMorgan Chase",
-    "Customer A", "Customer B", "Customer C", "Customer D", "Customer E",
 ]
 
 
+# --- Helpers ---
+
 def _benford_amount(rng: random.Random, min_val: float = 10.0, max_val: float = 100000.0) -> Decimal:
     """Generate a Benford-compliant amount using log-uniform distribution."""
-    import math
     log_min = math.log10(min_val)
     log_max = math.log10(max_val)
     value = 10 ** (rng.uniform(log_min, log_max))
@@ -56,7 +69,72 @@ def _quantize(d: Decimal) -> Decimal:
 
 def _random_date(rng: random.Random, start: date, end: date) -> date:
     delta = (end - start).days
+    if delta <= 0:
+        return start
     return start + timedelta(days=rng.randint(0, delta))
+
+
+def _split_amount(rng: random.Random, total: Decimal, n: int) -> list[Decimal]:
+    """Split a total into n parts that sum exactly to total."""
+    if n == 1:
+        return [_quantize(total)]
+
+    raw = [rng.random() for _ in range(n)]
+    raw_sum = sum(raw)
+    parts = [_quantize(total * Decimal(str(r / raw_sum))) for r in raw]
+
+    # Fix rounding: adjust last element
+    parts[-1] = _quantize(total - sum(parts[:-1]))
+    return parts
+
+
+def _month_end(year: int, month: int) -> date:
+    """Return the last day of the given month."""
+    if month == 12:
+        return date(year, 12, 31)
+    return date(year, month + 1, 1) - timedelta(days=1)
+
+
+def _month_start_end(fiscal_start: date, month_offset: int) -> tuple[date, date]:
+    """Return (first_day, last_day) for fiscal_start + month_offset months."""
+    year = fiscal_start.year + (fiscal_start.month + month_offset - 1) // 12
+    month = (fiscal_start.month + month_offset - 1) % 12 + 1
+    start = date(year, month, 1)
+    end = _month_end(year, month)
+    return start, end
+
+
+# --- Counters ---
+
+@dataclass
+class _Counters:
+    """Mutable counters for sequential ID generation across event types."""
+
+    entry: int = 0
+    line: int = 0
+    invoice: int = 0
+    payment: int = 0
+    bank_txn: int = 0
+
+    def next_entry(self) -> str:
+        self.entry += 1
+        return f"JE-{self.entry:06d}"
+
+    def next_line(self) -> str:
+        self.line += 1
+        return f"JL-{self.line:07d}"
+
+    def next_invoice(self) -> str:
+        self.invoice += 1
+        return f"INV-{self.invoice:06d}"
+
+    def next_payment(self) -> str:
+        self.payment += 1
+        return f"PAY-{self.payment:06d}"
+
+    def next_bank_txn(self) -> str:
+        self.bank_txn += 1
+        return f"BT-{self.bank_txn:07d}"
 
 
 # --- Chart of Accounts ---
@@ -129,11 +207,6 @@ _ACCOUNT_TREE: list[tuple[str, str, AccountType, str | None]] = [
     ("5920", "FX Losses", AccountType.EXPENSE, "5900"),
 ]
 
-# Leaf accounts (the ones we actually book against)
-_LEAF_ACCOUNTS: dict[AccountType, list[str]] = {}
-for _aid, _name, _atype, _parent in _ACCOUNT_TREE:
-    # An account is a leaf if no other account has it as parent
-    pass
 
 def _get_leaf_accounts() -> dict[AccountType, list[str]]:
     parent_ids = {row[3] for row in _ACCOUNT_TREE if row[3] is not None}
@@ -144,6 +217,12 @@ def _get_leaf_accounts() -> dict[AccountType, list[str]]:
     return result
 
 
+# Specific account groups for event-driven generation
+_AR_ACCOUNTS = ["1210", "1220"]
+_CASH_ACCOUNTS = ["1110", "1120"]
+_AP_ACCOUNTS = ["2110", "2120"]
+
+
 def generate_chart_of_accounts() -> list[ChartOfAccounts]:
     return [
         ChartOfAccounts(account_id=aid, name=name, account_type=atype, parent_id=parent)
@@ -151,141 +230,204 @@ def generate_chart_of_accounts() -> list[ChartOfAccounts]:
     ]
 
 
-# --- Journal Entries & Lines ---
+# --- Revenue Cycle: Sales → Cash Receipts ---
 
-_JOURNAL_TEMPLATES = [
-    # (description_template, debit_type, credit_type, amount_range)
-    ("Vendor payment - {vendor}", AccountType.LIABILITY, AccountType.ASSET, (500, 50000)),
-    ("Revenue recognition - {desc}", AccountType.ASSET, AccountType.REVENUE, (1000, 80000)),
-    ("Payroll - {month}", AccountType.EXPENSE, AccountType.ASSET, (5000, 75000)),
-    ("Office supplies", AccountType.EXPENSE, AccountType.LIABILITY, (50, 2000)),
-    ("Depreciation - {month}", AccountType.EXPENSE, AccountType.ASSET, (500, 5000)),
-    ("Insurance premium", AccountType.EXPENSE, AccountType.ASSET, (1000, 10000)),
-    ("Rent payment - {month}", AccountType.EXPENSE, AccountType.ASSET, (3000, 15000)),
-    ("Professional fees - {vendor}", AccountType.EXPENSE, AccountType.LIABILITY, (2000, 30000)),
-    ("Tax accrual - {month}", AccountType.EXPENSE, AccountType.LIABILITY, (1000, 20000)),
-    ("Bank fees", AccountType.EXPENSE, AccountType.ASSET, (10, 500)),
-]
+@dataclass
+class _SaleRecord:
+    """Internal tracking for a sale event (for cash receipt generation)."""
+
+    entry_id: str
+    sale_date: date
+    amount: Decimal
+    customer: str
+    collected: bool = False
 
 
-def _generate_journal_entries(
+def _generate_revenue_entries(
     rng: random.Random,
     fiscal_start: date,
     months: int,
-    entries_per_month: int = 420,
-    entries_stddev: int = 40,
+    counters: _Counters,
+    *,
+    sales_per_month: int = 250,
     q4_seasonal_boost: float = 0.3,
-) -> tuple[list[JournalEntry], list[JournalLine]]:
+) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord]]:
+    """Generate customer sale events: DR AR, CR Revenue.
+
+    Returns GL entries/lines plus internal sale records for cash receipt generation.
+    """
     leaf = _get_leaf_accounts()
+    revenue_accounts = leaf.get(AccountType.REVENUE, [])
+    # Exclude "Other Income" (interest, FX gains) from sales
+    sales_revenue = [a for a in revenue_accounts if a.startswith(("41", "42"))]
+
     entries: list[JournalEntry] = []
     lines: list[JournalLine] = []
-    entry_counter = 0
-    line_counter = 0
+    sales: list[_SaleRecord] = []
 
     for month_offset in range(months):
-        month_start = date(fiscal_start.year, fiscal_start.month + month_offset, 1)
-        if month_start.month == 12:
-            month_end = date(month_start.year, 12, 31)
-        else:
-            month_end = date(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
-        month_label = month_start.strftime("%B %Y")
+        m_start, m_end = _month_start_end(fiscal_start, month_offset)
 
-        # Seasonal factor: Q4 has more activity
-        seasonal = 1.0 + q4_seasonal_boost * (month_start.month >= 10)
-        entries_this_month = int(rng.gauss(entries_per_month, entries_stddev) * seasonal)
+        # Q4 seasonal boost
+        seasonal = 1.0 + q4_seasonal_boost * (m_start.month >= 10)
+        count = int(rng.gauss(sales_per_month, sales_per_month * 0.1) * seasonal)
 
-        for _ in range(entries_this_month):
-            entry_counter += 1
-            entry_id = f"JE-{entry_counter:06d}"
-            entry_date = _random_date(rng, month_start, month_end)
+        for _ in range(count):
+            sale_date = _random_date(rng, m_start, m_end)
+            amount = _benford_amount(rng, 500, 80000)
+            customer = rng.choice(CUSTOMER_NAMES)
+            cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
 
-            template = rng.choice(_JOURNAL_TEMPLATES)
-            desc_tmpl, debit_type, credit_type, (amt_min, amt_max) = template
-            vendor = rng.choice(VENDOR_NAMES)
-            desc = desc_tmpl.format(vendor=vendor, month=month_label, desc=f"Q{(month_start.month - 1) // 3 + 1}")
-
-            status = JournalStatus.POSTED
-            if rng.random() < 0.02:
-                status = JournalStatus.REVERSED
-            elif rng.random() < 0.05:
-                status = JournalStatus.DRAFT
-
+            entry_id = counters.next_entry()
             entries.append(JournalEntry(
                 entry_id=entry_id,
-                date=entry_date,
-                description=desc,
-                status=status,
+                date=sale_date,
+                description=f"Revenue recognition - {customer}",
+                status=JournalStatus.POSTED,
                 created_by=rng.choice(USERS),
             ))
 
-            # Generate balanced lines (1-3 debit lines, 1-3 credit lines)
-            n_debit = rng.choices([1, 2, 3], weights=[70, 25, 5])[0]
-            n_credit = rng.choices([1, 2, 3], weights=[70, 25, 5])[0]
+            # DR: AR
+            ar_account = rng.choice(_AR_ACCOUNTS)
+            lines.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=ar_account,
+                debit=amount,
+                credit=Decimal("0.00"),
+                cost_center=cost_center,
+            ))
 
-            total_amount = _benford_amount(rng, amt_min, amt_max)
-
-            # Split into debit amounts
-            debit_amounts = _split_amount(rng, total_amount, n_debit)
-            credit_amounts = _split_amount(rng, total_amount, n_credit)
-
-            cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
-
-            for i, amt in enumerate(debit_amounts):
-                line_counter += 1
+            # CR: Revenue (may split across 1-2 revenue accounts)
+            n_rev = rng.choices([1, 2], weights=[80, 20])[0]
+            rev_amounts = _split_amount(rng, amount, n_rev)
+            for rev_amt in rev_amounts:
                 lines.append(JournalLine(
-                    line_id=f"JL-{line_counter:07d}",
+                    line_id=counters.next_line(),
                     entry_id=entry_id,
-                    account_id=rng.choice(leaf[debit_type]),
-                    debit=amt,
-                    credit=Decimal("0.00"),
-                    cost_center=cost_center,
-                ))
-
-            for i, amt in enumerate(credit_amounts):
-                line_counter += 1
-                lines.append(JournalLine(
-                    line_id=f"JL-{line_counter:07d}",
-                    entry_id=entry_id,
-                    account_id=rng.choice(leaf[credit_type]),
+                    account_id=rng.choice(sales_revenue),
                     debit=Decimal("0.00"),
-                    credit=amt,
+                    credit=rev_amt,
                     cost_center=cost_center,
                 ))
 
-    return entries, lines
+            sales.append(_SaleRecord(
+                entry_id=entry_id,
+                sale_date=sale_date,
+                amount=amount,
+                customer=customer,
+            ))
+
+    return entries, lines, sales
 
 
-def _split_amount(rng: random.Random, total: Decimal, n: int) -> list[Decimal]:
-    """Split a total into n parts that sum exactly to total."""
-    if n == 1:
-        return [_quantize(total)]
+def _generate_cash_receipts(
+    rng: random.Random,
+    sales: list[_SaleRecord],
+    fiscal_start: date,
+    months: int,
+    counters: _Counters,
+    *,
+    collection_rate: float = 0.85,
+) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
+    """Generate cash receipt events for collected sales: DR Cash, CR AR + Bank Txn."""
+    fiscal_end = _month_start_end(fiscal_start, months - 1)[1]
 
-    # Generate random proportions
-    raw = [rng.random() for _ in range(n)]
-    raw_sum = sum(raw)
-    parts = [_quantize(total * Decimal(str(r / raw_sum))) for r in raw]
+    entries: list[JournalEntry] = []
+    lines: list[JournalLine] = []
+    bank_txns: list[BankTransaction] = []
 
-    # Fix rounding: adjust last element
-    parts[-1] = _quantize(total - sum(parts[:-1]))
-    return parts
+    for sale in sales:
+        # Older sales more likely to be collected
+        days_outstanding = (fiscal_end - sale.sale_date).days
+        if days_outstanding > 60:
+            collect_prob = collection_rate
+        elif days_outstanding > 30:
+            collect_prob = collection_rate * 0.7
+        else:
+            collect_prob = collection_rate * 0.3
+
+        if rng.random() >= collect_prob:
+            continue
+
+        sale.collected = True
+
+        # Payment arrives 5-45 days after sale
+        receipt_date = sale.sale_date + timedelta(days=rng.randint(5, 45))
+        if receipt_date > fiscal_end:
+            receipt_date = fiscal_end
+
+        # Partial collection (5% chance)
+        if rng.random() < 0.05:
+            amount = _quantize(sale.amount * Decimal(str(rng.uniform(0.5, 0.95))))
+        else:
+            amount = sale.amount
+
+        entry_id = counters.next_entry()
+        entries.append(JournalEntry(
+            entry_id=entry_id,
+            date=receipt_date,
+            description=f"Cash receipt - {sale.customer}",
+            status=JournalStatus.POSTED,
+            created_by=rng.choice(USERS),
+        ))
+
+        # DR: Cash
+        cash_account = rng.choice(_CASH_ACCOUNTS)
+        lines.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id=cash_account,
+            debit=amount,
+            credit=Decimal("0.00"),
+        ))
+
+        # CR: AR
+        lines.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id=rng.choice(_AR_ACCOUNTS),
+            debit=Decimal("0.00"),
+            credit=amount,
+        ))
+
+        # Bank transaction (positive = credit/inflow)
+        bank_txns.append(BankTransaction(
+            txn_id=counters.next_bank_txn(),
+            date=receipt_date,
+            amount=amount,
+            reference=f"RCV-{rng.randint(100000, 999999)}",
+            counterparty=sale.customer,
+            reconciled=rng.random() < 0.90,
+        ))
+
+    return entries, lines, bank_txns
 
 
-# --- Invoices ---
+# --- Expenditure Cycle: Purchase Invoices → Vendor Payments ---
 
-def _generate_invoices(
+def _generate_purchase_invoices(
     rng: random.Random,
     fiscal_start: date,
     months: int,
+    counters: _Counters,
+    *,
     count: int = 3000,
-) -> list[Invoice]:
-    invoices: list[Invoice] = []
-    fiscal_end = date(fiscal_start.year, fiscal_start.month + months - 1, 28)
+) -> tuple[list[Invoice], list[JournalEntry], list[JournalLine]]:
+    """Generate vendor/purchase invoices with GL entries: DR Expense, CR AP."""
+    leaf = _get_leaf_accounts()
+    expense_accounts = leaf.get(AccountType.EXPENSE, [])
 
-    # 80/20 vendor concentration: 20% of vendors get 80% of invoices
+    invoices: list[Invoice] = []
+    entries: list[JournalEntry] = []
+    lines_out: list[JournalLine] = []
+
+    fiscal_end = _month_start_end(fiscal_start, months - 1)[1]
+
+    # 80/20 vendor concentration
     top_vendors = VENDOR_NAMES[:4]
     other_vendors = VENDOR_NAMES[4:]
 
-    terms_options = list(PaymentTerms)
     terms_days = {
         PaymentTerms.NET_30: 30,
         PaymentTerms.NET_60: 60,
@@ -295,7 +437,7 @@ def _generate_invoices(
 
     for i in range(count):
         inv_date = _random_date(rng, fiscal_start, fiscal_end)
-        terms = rng.choice(terms_options)
+        terms = rng.choice(list(PaymentTerms))
         due = inv_date + timedelta(days=terms_days[terms])
 
         if rng.random() < 0.80:
@@ -306,7 +448,7 @@ def _generate_invoices(
         vendor_id = f"V-{VENDOR_NAMES.index(vendor) + 1:04d}"
         amount = _benford_amount(rng, 100, 50000)
 
-        # Status depends on date relative to fiscal end
+        # Status depends on age relative to fiscal end
         days_since = (fiscal_end - inv_date).days
         if days_since > terms_days[terms] + 30:
             status = rng.choices(
@@ -324,8 +466,9 @@ def _generate_invoices(
                 weights=[60, 40],
             )[0]
 
+        invoice_id = counters.next_invoice()
         invoices.append(Invoice(
-            invoice_id=f"INV-{i + 1:06d}",
+            invoice_id=invoice_id,
             vendor_id=vendor_id,
             date=inv_date,
             due_date=due,
@@ -334,73 +477,409 @@ def _generate_invoices(
             payment_terms=terms,
         ))
 
-    return invoices
+        # GL entry: DR Expense, CR AP (only for non-cancelled invoices)
+        if status != InvoiceStatus.CANCELLED:
+            cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
+            entry_id = counters.next_entry()
 
-
-# --- Payments ---
-
-def _generate_payments(
-    rng: random.Random,
-    invoices: list[Invoice],
-) -> list[Payment]:
-    payments: list[Payment] = []
-    counter = 0
-    methods = list(PaymentMethod)
-
-    for inv in invoices:
-        if inv.status in (InvoiceStatus.PAID, InvoiceStatus.PARTIAL):
-            counter += 1
-            pay_date = inv.date + timedelta(days=rng.randint(1, 45))
-
-            if inv.status == InvoiceStatus.PARTIAL:
-                pay_amount = _quantize(inv.amount * Decimal(str(rng.uniform(0.3, 0.9))))
-            else:
-                pay_amount = inv.amount
-
-            payments.append(Payment(
-                payment_id=f"PAY-{counter:06d}",
-                invoice_id=inv.invoice_id,
-                date=pay_date,
-                amount=pay_amount,
-                currency=inv.currency,
-                method=rng.choice(methods),
+            entries.append(JournalEntry(
+                entry_id=entry_id,
+                date=inv_date,
+                description=f"Vendor invoice - {vendor} - {invoice_id}",
+                status=JournalStatus.POSTED,
+                created_by=rng.choice(USERS),
             ))
 
-    return payments
+            # DR: Expense (may split across 1-3 expense accounts)
+            n_exp = rng.choices([1, 2, 3], weights=[70, 25, 5])[0]
+            exp_amounts = _split_amount(rng, amount, n_exp)
+            for exp_amt in exp_amounts:
+                lines_out.append(JournalLine(
+                    line_id=counters.next_line(),
+                    entry_id=entry_id,
+                    account_id=rng.choice(expense_accounts),
+                    debit=exp_amt,
+                    credit=Decimal("0.00"),
+                    cost_center=cost_center,
+                ))
+
+            # CR: AP
+            lines_out.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=rng.choice(_AP_ACCOUNTS),
+                debit=Decimal("0.00"),
+                credit=amount,
+                cost_center=cost_center,
+            ))
+
+    return invoices, entries, lines_out
 
 
-# --- Bank Transactions ---
+def _generate_vendor_payments(
+    rng: random.Random,
+    invoices: list[Invoice],
+    counters: _Counters,
+) -> tuple[list[Payment], list[JournalEntry], list[JournalLine], list[BankTransaction]]:
+    """Generate vendor payment events: DR AP, CR Cash + Bank Txn (debit)."""
+    payments: list[Payment] = []
+    entries: list[JournalEntry] = []
+    lines_out: list[JournalLine] = []
+    bank_txns: list[BankTransaction] = []
 
-def _generate_bank_transactions(
+    methods = list(PaymentMethod)
+    vendor_name_by_id = {f"V-{i + 1:04d}": name for i, name in enumerate(VENDOR_NAMES)}
+
+    for inv in invoices:
+        if inv.status not in (InvoiceStatus.PAID, InvoiceStatus.PARTIAL):
+            continue
+
+        pay_date = inv.date + timedelta(days=rng.randint(1, 45))
+
+        if inv.status == InvoiceStatus.PARTIAL:
+            pay_amount = _quantize(inv.amount * Decimal(str(rng.uniform(0.3, 0.9))))
+        else:
+            pay_amount = inv.amount
+
+        payment_id = counters.next_payment()
+        payments.append(Payment(
+            payment_id=payment_id,
+            invoice_id=inv.invoice_id,
+            date=pay_date,
+            amount=pay_amount,
+            currency=inv.currency,
+            method=rng.choice(methods),
+        ))
+
+        # GL entry: DR AP, CR Cash
+        entry_id = counters.next_entry()
+        vendor_name = vendor_name_by_id.get(inv.vendor_id, inv.vendor_id)
+        entries.append(JournalEntry(
+            entry_id=entry_id,
+            date=pay_date,
+            description=f"Vendor payment - {vendor_name} - {inv.invoice_id}",
+            status=JournalStatus.POSTED,
+            created_by=rng.choice(USERS),
+        ))
+
+        # DR: AP
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id=rng.choice(_AP_ACCOUNTS),
+            debit=pay_amount,
+            credit=Decimal("0.00"),
+        ))
+
+        # CR: Cash
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id=rng.choice(_CASH_ACCOUNTS),
+            debit=Decimal("0.00"),
+            credit=pay_amount,
+        ))
+
+        # Bank transaction (negative = debit/outflow)
+        bank_txns.append(BankTransaction(
+            txn_id=counters.next_bank_txn(),
+            date=pay_date,
+            amount=-pay_amount,
+            reference=f"TXN-{rng.randint(100000, 999999)}",
+            counterparty=vendor_name,
+            reconciled=rng.random() < 0.90,
+        ))
+
+    return payments, entries, lines_out, bank_txns
+
+
+# --- Operating Events: Payroll, Depreciation, Rent, Misc ---
+
+def _generate_operating_events(
     rng: random.Random,
     fiscal_start: date,
     months: int,
-    count: int = 8000,
-) -> list[BankTransaction]:
-    transactions: list[BankTransaction] = []
-    fiscal_end = date(fiscal_start.year, fiscal_start.month + months - 1, 28)
+    counters: _Counters,
+) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
+    """Generate recurring operating events: payroll, depreciation, rent, etc."""
+    entries: list[JournalEntry] = []
+    lines_out: list[JournalLine] = []
+    bank_txns: list[BankTransaction] = []
 
-    for i in range(count):
-        txn_date = _random_date(rng, fiscal_start, fiscal_end)
-        # Mix of debits (60%) and credits (40%)
-        if rng.random() < 0.60:
-            amount = -_benford_amount(rng, 50, 30000)
-        else:
-            amount = _benford_amount(rng, 100, 80000)
+    for month_offset in range(months):
+        m_start, m_end = _month_start_end(fiscal_start, month_offset)
+        month_label = m_start.strftime("%B %Y")
 
-        counterparty = rng.choice(COUNTERPARTIES)
-        ref_prefix = "TXN" if amount < 0 else "RCV"
-
-        transactions.append(BankTransaction(
-            txn_id=f"BT-{i + 1:07d}",
-            date=txn_date,
-            amount=amount,
-            reference=f"{ref_prefix}-{rng.randint(100000, 999999)}",
-            counterparty=counterparty,
-            reconciled=rng.random() < 0.85,
+        # --- Payroll (last day of month, cash outflow) ---
+        payroll_amount = _benford_amount(rng, 30000, 75000)
+        entry_id = counters.next_entry()
+        entries.append(JournalEntry(
+            entry_id=entry_id,
+            date=m_end,
+            description=f"Payroll - {month_label}",
+            status=JournalStatus.POSTED,
+            created_by="system",
         ))
 
-    return transactions
+        # Split across salary/benefits/taxes
+        salary = _quantize(payroll_amount * Decimal("0.70"))
+        benefits = _quantize(payroll_amount * Decimal("0.20"))
+        taxes = _quantize(payroll_amount - salary - benefits)
+
+        for acct, amt in [("5210", salary), ("5220", benefits), ("5230", taxes)]:
+            lines_out.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=acct,
+                debit=amt,
+                credit=Decimal("0.00"),
+            ))
+
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="1110",  # Operating account
+            debit=Decimal("0.00"),
+            credit=payroll_amount,
+        ))
+
+        bank_txns.append(BankTransaction(
+            txn_id=counters.next_bank_txn(),
+            date=m_end,
+            amount=-payroll_amount,
+            reference=f"PAY-{m_start.strftime('%Y%m')}",
+            counterparty="ADP Payroll",
+            reconciled=True,
+        ))
+
+        # --- Rent (1st of month, cash outflow) ---
+        rent_amount = _benford_amount(rng, 5000, 15000)
+        entry_id = counters.next_entry()
+        entries.append(JournalEntry(
+            entry_id=entry_id,
+            date=m_start,
+            description=f"Rent payment - {month_label}",
+            status=JournalStatus.POSTED,
+            created_by="system",
+        ))
+
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="5310",  # Office Rent
+            debit=rent_amount,
+            credit=Decimal("0.00"),
+        ))
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="1110",  # Operating account
+            debit=Decimal("0.00"),
+            credit=rent_amount,
+        ))
+
+        bank_txns.append(BankTransaction(
+            txn_id=counters.next_bank_txn(),
+            date=m_start,
+            amount=-rent_amount,
+            reference=f"RENT-{m_start.strftime('%Y%m')}",
+            counterparty="Building Management",
+            reconciled=True,
+        ))
+
+        # --- Depreciation (end of month, non-cash) ---
+        depr_amount = _benford_amount(rng, 1000, 5000)
+        entry_id = counters.next_entry()
+        entries.append(JournalEntry(
+            entry_id=entry_id,
+            date=m_end,
+            description=f"Depreciation - {month_label}",
+            status=JournalStatus.POSTED,
+            created_by="system",
+        ))
+
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="5700",  # Depreciation expense
+            debit=depr_amount,
+            credit=Decimal("0.00"),
+        ))
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="1590",  # Accumulated Depreciation
+            debit=Decimal("0.00"),
+            credit=depr_amount,
+        ))
+
+        # --- Insurance (1st of month, cash outflow) ---
+        insurance = _benford_amount(rng, 1000, 5000)
+        entry_id = counters.next_entry()
+        entries.append(JournalEntry(
+            entry_id=entry_id,
+            date=m_start,
+            description=f"Insurance premium - {month_label}",
+            status=JournalStatus.POSTED,
+            created_by="system",
+        ))
+
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="5800",  # Insurance
+            debit=insurance,
+            credit=Decimal("0.00"),
+        ))
+        lines_out.append(JournalLine(
+            line_id=counters.next_line(),
+            entry_id=entry_id,
+            account_id="1110",
+            debit=Decimal("0.00"),
+            credit=insurance,
+        ))
+
+        bank_txns.append(BankTransaction(
+            txn_id=counters.next_bank_txn(),
+            date=m_start,
+            amount=-insurance,
+            reference=f"INS-{m_start.strftime('%Y%m')}",
+            counterparty="Insurance Corp",
+            reconciled=True,
+        ))
+
+        # --- Misc operating expenses (5-15 per month) ---
+        misc_templates = [
+            ("Office supplies", "5600"),
+            ("Travel expense", "5510"),
+            ("Meals and entertainment", "5520"),
+            ("Utilities", "5320"),
+            ("Bank fees", "5910"),
+            ("Legal fees", "5410"),
+            ("Audit fees", "5420"),
+        ]
+
+        n_misc = rng.randint(5, 15)
+        for _ in range(n_misc):
+            desc, account = rng.choice(misc_templates)
+            misc_date = _random_date(rng, m_start, m_end)
+            misc_amount = _benford_amount(rng, 50, 5000)
+            cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
+
+            entry_id = counters.next_entry()
+            entries.append(JournalEntry(
+                entry_id=entry_id,
+                date=misc_date,
+                description=f"{desc} - {month_label}",
+                status=JournalStatus.POSTED,
+                created_by=rng.choice(USERS),
+            ))
+
+            lines_out.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=account,
+                debit=misc_amount,
+                credit=Decimal("0.00"),
+                cost_center=cost_center,
+            ))
+            lines_out.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id="1110",
+                debit=Decimal("0.00"),
+                credit=misc_amount,
+                cost_center=cost_center,
+            ))
+
+            # 70% are cash payments, 30% are accruals (no bank txn)
+            if rng.random() < 0.70:
+                bank_txns.append(BankTransaction(
+                    txn_id=counters.next_bank_txn(),
+                    date=misc_date,
+                    amount=-misc_amount,
+                    reference=f"TXN-{rng.randint(100000, 999999)}",
+                    counterparty=rng.choice(VENDOR_NAMES),
+                    reconciled=rng.random() < 0.85,
+                ))
+
+    return entries, lines_out, bank_txns
+
+
+# --- Misc Bank Transactions (interest, transfers, unmatched) ---
+
+def _generate_misc_bank_transactions(
+    rng: random.Random,
+    fiscal_start: date,
+    months: int,
+    counters: _Counters,
+    *,
+    count_per_month: int = 20,
+) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
+    """Generate miscellaneous bank transactions with GL entries.
+
+    Covers interest income, bank fees, and unreconciled items.
+    """
+    entries: list[JournalEntry] = []
+    lines_out: list[JournalLine] = []
+    bank_txns: list[BankTransaction] = []
+
+    for month_offset in range(months):
+        m_start, m_end = _month_start_end(fiscal_start, month_offset)
+
+        for _ in range(count_per_month):
+            txn_date = _random_date(rng, m_start, m_end)
+
+            # 30% credits (interest, refunds), 70% debits (fees, misc charges)
+            if rng.random() < 0.30:
+                amount = _benford_amount(rng, 10, 2000)
+                ref = f"RCV-{rng.randint(100000, 999999)}"
+                counterparty = rng.choice(["First National Bank", "Wells Fargo", "JPMorgan Chase"])
+                gl_debit_account = rng.choice(_CASH_ACCOUNTS)
+                gl_credit_account = "4310"  # Interest Income
+            else:
+                amount = -_benford_amount(rng, 5, 500)
+                ref = f"FEE-{rng.randint(100000, 999999)}"
+                counterparty = rng.choice(["First National Bank", "Wells Fargo", "JPMorgan Chase"])
+                gl_debit_account = "5910"  # Bank Fees
+                gl_credit_account = rng.choice(_CASH_ACCOUNTS)
+
+            bank_txns.append(BankTransaction(
+                txn_id=counters.next_bank_txn(),
+                date=txn_date,
+                amount=amount,
+                reference=ref,
+                counterparty=counterparty,
+                reconciled=rng.random() < 0.80,
+            ))
+
+            # GL entry for the bank transaction
+            entry_id = counters.next_entry()
+            entries.append(JournalEntry(
+                entry_id=entry_id,
+                date=txn_date,
+                description=f"Bank {'credit' if amount > 0 else 'fee'} - {ref}",
+                status=JournalStatus.POSTED,
+                created_by="system",
+            ))
+
+            abs_amount = abs(amount)
+            lines_out.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=gl_debit_account,
+                debit=abs_amount,
+                credit=Decimal("0.00"),
+            ))
+            lines_out.append(JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=gl_credit_account,
+                debit=Decimal("0.00"),
+                credit=abs_amount,
+            ))
+
+    return entries, lines_out, bank_txns
 
 
 # --- FX Rates ---
@@ -425,17 +904,12 @@ def _generate_fx_rates(
     rates: list[FXRate] = []
 
     for month_offset in range(months):
-        month_start = date(fiscal_start.year, fiscal_start.month + month_offset, 1)
-        if month_start.month == 12:
-            month_end = date(month_start.year, 12, 31)
-        else:
-            month_end = date(month_start.year, month_start.month + 1, 1) - timedelta(days=1)
+        m_start, m_end = _month_start_end(fiscal_start, month_offset)
 
         # Weekly rates
-        current = month_start
-        while current <= month_end:
+        current = m_start
+        while current <= m_end:
             for (from_ccy, to_ccy), base_rate in _FX_BASE_RATES.items():
-                # Random walk around base rate (±3%)
                 drift = rng.gauss(0, 0.01)
                 rate_val = base_rate * (1 + drift)
                 rates.append(FXRate(
@@ -449,54 +923,62 @@ def _generate_fx_rates(
     return rates
 
 
-# --- Trial Balance ---
-
-def _generate_trial_balance(
-    journal_lines: list[JournalLine],
-    fiscal_start: date,
-    months: int,
-) -> list[TrialBalance]:
-    """Derive trial balance from journal lines (ensures consistency)."""
-    return _derive_trial_balance(journal_lines, fiscal_start, months)
-
+# --- Trial Balance (derived from actual GL) ---
 
 def _derive_trial_balance(
-    journal_lines: list[JournalLine],
+    all_entries: list[JournalEntry],
+    all_lines: list[JournalLine],
     fiscal_start: date,
     months: int,
 ) -> list[TrialBalance]:
-    """Build monthly trial balance from journal lines.
+    """Build monthly trial balance from actual cumulative GL entries.
 
-    Since journal lines don't carry dates directly, we use the entry_id
-    ordering (which is chronological) to assign periods.
+    Only includes POSTED entries. Groups by account and period,
+    accumulates balances cumulatively across months.
     """
-    # Group lines by account
-    account_debits: dict[str, Decimal] = {}
-    account_credits: dict[str, Decimal] = {}
+    # Build entry_id -> (date, status) mapping
+    entry_info = {e.entry_id: (e.date, e.status) for e in all_entries}
 
-    for line in journal_lines:
-        account_debits[line.account_id] = account_debits.get(line.account_id, Decimal("0")) + line.debit
-        account_credits[line.account_id] = account_credits.get(line.account_id, Decimal("0")) + line.credit
+    # Accumulate per-period debits/credits by account
+    period_movements: dict[tuple[str, str], tuple[Decimal, Decimal]] = {}
 
-    # Create one TB row per account per month (cumulative balances)
-    all_accounts = sorted(set(account_debits.keys()) | set(account_credits.keys()))
+    for line in all_lines:
+        info = entry_info.get(line.entry_id)
+        if info is None:
+            continue
+        entry_date, status = info
+        if status != JournalStatus.POSTED:
+            continue
+
+        period_str = entry_date.strftime("%Y-%m")
+        key = (line.account_id, period_str)
+        prev_d, prev_c = period_movements.get(key, (Decimal("0"), Decimal("0")))
+        period_movements[key] = (prev_d + line.debit, prev_c + line.credit)
+
+    # Build cumulative balances
     result: list[TrialBalance] = []
+    cumulative: dict[str, tuple[Decimal, Decimal]] = {}
+
+    # Collect all accounts that have any movement
+    all_accounts = sorted({acct for acct, _ in period_movements})
 
     for month_offset in range(months):
-        period = date(fiscal_start.year, fiscal_start.month + month_offset, 1)
-        period_str = period.strftime("%Y-%m")
-
-        # Scale balances proportionally by month (simplified: linear accumulation)
-        fraction = Decimal(str((month_offset + 1) / months))
+        m_start, _ = _month_start_end(fiscal_start, month_offset)
+        period_str = m_start.strftime("%Y-%m")
 
         for acct in all_accounts:
-            total_debit = _quantize(account_debits.get(acct, Decimal("0")) * fraction)
-            total_credit = _quantize(account_credits.get(acct, Decimal("0")) * fraction)
+            key = (acct, period_str)
+            month_d, month_c = period_movements.get(key, (Decimal("0"), Decimal("0")))
+            prev_d, prev_c = cumulative.get(acct, (Decimal("0"), Decimal("0")))
+            cum_d = prev_d + month_d
+            cum_c = prev_c + month_c
+            cumulative[acct] = (cum_d, cum_c)
+
             result.append(TrialBalance(
                 account_id=acct,
                 period=period_str,
-                debit_balance=total_debit,
-                credit_balance=total_credit,
+                debit_balance=_quantize(cum_d),
+                credit_balance=_quantize(cum_c),
             ))
 
     return result
@@ -509,59 +991,95 @@ def generate_finance_dataset(
     months: int = 12,
     fiscal_start: date | None = None,
     invoices_count: int | None = None,
-    bank_transactions_count: int | None = None,
-    journal_entries_per_month: int | None = None,
-    journal_entries_stddev: int | None = None,
     q4_seasonal_boost: float | None = None,
+    **_kwargs: object,
 ) -> FinanceDataset:
-    """Generate a complete clean finance dataset.
+    """Generate a complete finance dataset with closed-loop accounting.
+
+    Business events cascade across tables: sales create GL entries and AR,
+    payments settle AP and create bank transactions, trial balance is derived
+    from actual cumulative GL entries.
 
     Args:
         seed: Random seed for reproducibility.
         months: Number of months to generate (fiscal year).
         fiscal_start: First day of the fiscal year.
-        invoices_count: Number of invoices to generate.
-        bank_transactions_count: Number of bank transactions to generate.
-        journal_entries_per_month: Mean journal entries per month.
-        journal_entries_stddev: Std-dev of journal entries per month.
-        q4_seasonal_boost: Fractional boost applied to Q4 months.
+        invoices_count: Number of vendor/purchase invoices.
+        q4_seasonal_boost: Fractional boost applied to Q4 revenue months.
 
     Returns:
-        FinanceDataset with all 8 tables populated.
+        FinanceDataset with all 8 tables populated and numerically consistent.
     """
     rng = random.Random(seed)
     if fiscal_start is None:
         fiscal_start = date(2025, 1, 1)
 
-    je_kwargs: dict[str, int | float] = {}
-    if journal_entries_per_month is not None:
-        je_kwargs["entries_per_month"] = journal_entries_per_month
-    if journal_entries_stddev is not None:
-        je_kwargs["entries_stddev"] = journal_entries_stddev
-    if q4_seasonal_boost is not None:
-        je_kwargs["q4_seasonal_boost"] = q4_seasonal_boost
+    q4_boost = q4_seasonal_boost if q4_seasonal_boost is not None else 0.3
+    inv_count = invoices_count if invoices_count is not None else 3000
 
+    counters = _Counters()
+
+    # Static tables
     chart = generate_chart_of_accounts()
-    entries, lines = _generate_journal_entries(rng, fiscal_start, months, **je_kwargs)
-    invoices = _generate_invoices(
-        rng, fiscal_start, months,
-        **({"count": invoices_count} if invoices_count is not None else {}),
-    )
-    payments = _generate_payments(rng, invoices)
-    bank_txns = _generate_bank_transactions(
-        rng, fiscal_start, months,
-        **({"count": bank_transactions_count} if bank_transactions_count is not None else {}),
-    )
     fx_rates = _generate_fx_rates(rng, fiscal_start, months)
-    trial_bal = _generate_trial_balance(lines, fiscal_start, months)
+
+    # ── Revenue cycle ──
+    # Sales → GL entries (DR: AR, CR: Revenue)
+    sale_entries, sale_lines, sale_records = _generate_revenue_entries(
+        rng, fiscal_start, months, counters,
+        sales_per_month=250,
+        q4_seasonal_boost=q4_boost,
+    )
+
+    # Cash receipts → GL + Bank (DR: Cash, CR: AR)
+    receipt_entries, receipt_lines, receipt_bank = _generate_cash_receipts(
+        rng, sale_records, fiscal_start, months, counters,
+    )
+
+    # ── Expenditure cycle ──
+    # Purchase invoices → Invoice + GL (DR: Expense, CR: AP)
+    invoices, inv_entries, inv_lines = _generate_purchase_invoices(
+        rng, fiscal_start, months, counters,
+        count=inv_count,
+    )
+
+    # Vendor payments → Payment + GL + Bank (DR: AP, CR: Cash)
+    payments, pay_entries, pay_lines, pay_bank = _generate_vendor_payments(
+        rng, invoices, counters,
+    )
+
+    # ── Operating events ──
+    # Payroll, depreciation, rent, misc expenses
+    op_entries, op_lines, op_bank = _generate_operating_events(
+        rng, fiscal_start, months, counters,
+    )
+
+    # ── Misc bank transactions ──
+    # Interest, fees, unmatched items (with corresponding GL)
+    misc_entries, misc_lines, misc_bank = _generate_misc_bank_transactions(
+        rng, fiscal_start, months, counters,
+        count_per_month=20,
+    )
+
+    # ── Assembly ──
+    all_entries = sale_entries + receipt_entries + inv_entries + pay_entries + op_entries + misc_entries
+    all_lines = sale_lines + receipt_lines + inv_lines + pay_lines + op_lines + misc_lines
+    all_bank = receipt_bank + pay_bank + op_bank + misc_bank
+
+    # Sort by date for chronological ordering
+    all_entries.sort(key=lambda e: (e.date, e.entry_id))
+    all_bank.sort(key=lambda t: (t.date, t.txn_id))
+
+    # Derive trial balance from actual cumulative GL entries
+    trial_bal = _derive_trial_balance(all_entries, all_lines, fiscal_start, months)
 
     return FinanceDataset(
         chart_of_accounts=chart,
-        journal_entries=entries,
-        journal_lines=lines,
+        journal_entries=all_entries,
+        journal_lines=all_lines,
         invoices=invoices,
         payments=payments,
-        bank_transactions=bank_txns,
+        bank_transactions=all_bank,
         fx_rates=fx_rates,
         trial_balance=trial_bal,
     )
