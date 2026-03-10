@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -813,15 +813,15 @@ def _generate_misc_bank_transactions(
     fiscal_start: date,
     months: int,
     counters: _Counters,
-    entries_out: list[JournalEntry],
-    lines_out: list[JournalLine],
     *,
     count_per_month: int = 20,
-) -> list[BankTransaction]:
+) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
     """Generate miscellaneous bank transactions with GL entries.
 
     Covers interest income, bank fees, and unreconciled items.
     """
+    entries: list[JournalEntry] = []
+    lines_out: list[JournalLine] = []
     bank_txns: list[BankTransaction] = []
 
     for month_offset in range(months):
@@ -855,7 +855,7 @@ def _generate_misc_bank_transactions(
 
             # GL entry for the bank transaction
             entry_id = counters.next_entry()
-            entries_out.append(JournalEntry(
+            entries.append(JournalEntry(
                 entry_id=entry_id,
                 date=txn_date,
                 description=f"Bank {'credit' if amount > 0 else 'fee'} - {ref}",
@@ -879,7 +879,7 @@ def _generate_misc_bank_transactions(
                 credit=abs_amount,
             ))
 
-    return bank_txns
+    return entries, lines_out, bank_txns
 
 
 # --- FX Rates ---
@@ -1056,11 +1056,8 @@ def generate_finance_dataset(
 
     # ── Misc bank transactions ──
     # Interest, fees, unmatched items (with corresponding GL)
-    misc_entries: list[JournalEntry] = []
-    misc_lines: list[JournalLine] = []
-    misc_bank = _generate_misc_bank_transactions(
+    misc_entries, misc_lines, misc_bank = _generate_misc_bank_transactions(
         rng, fiscal_start, months, counters,
-        misc_entries, misc_lines,
         count_per_month=20,
     )
 

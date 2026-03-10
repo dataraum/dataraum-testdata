@@ -137,13 +137,13 @@ def test_trial_balance_derived_from_gl():
     tb_final = {tb.account_id: tb for tb in ds.trial_balance if tb.period == final_period}
 
     for acct in account_debits:
-        if acct in tb_final:
-            assert tb_final[acct].debit_balance == account_debits[acct].quantize(Decimal("0.01")), (
-                f"Account {acct}: TB debit {tb_final[acct].debit_balance} != GL debit {account_debits[acct]}"
-            )
-            assert tb_final[acct].credit_balance == account_credits.get(acct, Decimal("0")).quantize(Decimal("0.01")), (
-                f"Account {acct}: TB credit {tb_final[acct].credit_balance} != GL credit {account_credits.get(acct, Decimal('0'))}"
-            )
+        assert acct in tb_final, f"Account {acct} in GL but missing from TB final period"
+        assert tb_final[acct].debit_balance == account_debits[acct].quantize(Decimal("0.01")), (
+            f"Account {acct}: TB debit {tb_final[acct].debit_balance} != GL debit {account_debits[acct]}"
+        )
+        assert tb_final[acct].credit_balance == account_credits.get(acct, Decimal("0")).quantize(Decimal("0.01")), (
+            f"Account {acct}: TB credit {tb_final[acct].credit_balance} != GL credit {account_credits.get(acct, Decimal('0'))}"
+        )
 
 
 def test_trial_balance_balanced():
@@ -223,10 +223,14 @@ def test_cash_receipts_reduce_ar():
     ar_accounts = {"1210", "1220"}
     cash_accounts = {"1110", "1120"}
 
+    lines_by_entry: dict[str, list] = {}
+    for line in ds.journal_lines:
+        lines_by_entry.setdefault(line.entry_id, []).append(line)
+
     for entry in ds.journal_entries:
         if "Cash receipt" not in entry.description:
             continue
-        entry_lines = [l for l in ds.journal_lines if l.entry_id == entry.entry_id]
+        entry_lines = lines_by_entry.get(entry.entry_id, [])
         has_cash_debit = any(l.account_id in cash_accounts and l.debit > 0 for l in entry_lines)
         has_ar_credit = any(l.account_id in ar_accounts and l.credit > 0 for l in entry_lines)
         assert has_cash_debit, f"Cash receipt {entry.entry_id} has no Cash debit"
