@@ -1,14 +1,17 @@
 """Tests for deterministic finance data generators."""
 
+import functools
 from collections import Counter
+from datetime import date
 from decimal import Decimal
 
 from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.canonical.finance.models import JournalStatus
 
 
-def _dataset():
-    return generate_finance_dataset(seed=42, months=12)
+@functools.lru_cache(maxsize=4)
+def _dataset(seed: int = 42, months: int = 12):
+    return generate_finance_dataset(seed=seed, months=months)
 
 
 def test_deterministic_generation():
@@ -235,3 +238,33 @@ def test_cash_receipts_reduce_ar():
         has_ar_credit = any(line.account_id in ar_accounts and line.credit > 0 for line in entry_lines)
         assert has_cash_debit, f"Cash receipt {entry.entry_id} has no Cash debit"
         assert has_ar_credit, f"Cash receipt {entry.entry_id} has no AR credit"
+
+
+# --- Non-January fiscal start ---
+
+
+def test_non_january_fiscal_start():
+    """October fiscal year produces entries spanning two calendar years."""
+    ds = generate_finance_dataset(seed=42, months=12, fiscal_start=date(2025, 10, 1))
+
+    # Should cover Oct 2025 through Sep 2026
+    entry_dates = [e.date for e in ds.journal_entries]
+    assert min(entry_dates).month == 10
+    assert min(entry_dates).year == 2025
+    assert max(entry_dates).year >= 2026
+
+    # TB should have 12 periods starting from 2025-10
+    tb_periods = sorted({tb.period for tb in ds.trial_balance})
+    assert tb_periods[0] == "2025-10"
+    assert tb_periods[-1] == "2026-09"
+    assert len(tb_periods) == 12
+
+    # Balanced journals still hold
+    lines_by_entry: dict[str, list] = {}
+    for line in ds.journal_lines:
+        lines_by_entry.setdefault(line.entry_id, []).append(line)
+
+    for entry_id, lines in lines_by_entry.items():
+        total_debit = sum(line.debit for line in lines)
+        total_credit = sum(line.credit for line in lines)
+        assert total_debit == total_credit, f"Entry {entry_id} unbalanced"

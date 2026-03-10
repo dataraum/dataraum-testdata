@@ -145,6 +145,23 @@ injections:
       col_b: credit
       severity: low
 
+  # Cross-table consistency (aggressive)
+  - injector: break_gl_invoice_match
+    table: invoices
+    params:
+      col: amount
+      ratio: 0.15
+      factor_range: [0.5, 2.0]
+      severity: high
+
+  - injector: break_payment_bank_match
+    table: payments
+    params:
+      col: amount
+      ratio: 0.12
+      factor_range: [0.7, 1.5]
+      severity: high
+
   # Computational layer (aggressive)
   - injector: drift_formula
     table: trial_balance
@@ -165,3 +182,19 @@ injections:
         - period
       error_ratio: 0.08
       severity: high
+
+  - injector: break_trial_balance
+    table: trial_balance
+    params:
+      col: debit_balance
+      ratio: 0.10
+      error_range: [1.0, 10.0]
+      severity: critical
+
+  - injector: break_trial_balance
+    table: trial_balance
+    params:
+      col: credit_balance
+      ratio: 0.08
+      error_range: [1.0, 10.0]
+      severity: critical

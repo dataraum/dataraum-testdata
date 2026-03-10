@@ -48,10 +48,6 @@ CUSTOMER_NAMES = [
     "Alpine Ski House", "Trey Research", "Humongous Insurance", "Datum Corp",
     "A. Datum", "Coho Vineyard", "Lucerne Publishing", "Margie's Travel",
 ]
-COUNTERPARTIES = VENDOR_NAMES + CUSTOMER_NAMES + [
-    "First National Bank", "Wells Fargo", "JPMorgan Chase",
-]
-
 
 # --- Helpers ---
 

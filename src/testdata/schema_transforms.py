@@ -3,6 +3,12 @@
 Entropy injections run *before* these transforms, so injection specs use
 the original (fully-normalized) table names.  The transform returns a
 table-name mapping that ``run_scenario`` uses to update registry entries.
+
+Normalization levels:
+    full     — 8 tables, ERP schema export (identity transform)
+    partial  — 6 tables, merge parent-child pairs
+    flat     — 5 tables, inline lookups into journal/GL
+    single   — 1 mega-table, everything joined + pivoted
 """
 
 from __future__ import annotations
@@ -11,7 +17,139 @@ from typing import Literal
 
 import polars as pl
 
-NormalizationLevel = Literal["full", "partial", "flat"]
+NormalizationLevel = Literal["full", "partial", "flat", "single"]
+
+
+# --- Column naming styles ---
+
+ColumnStyle = Literal["snake_case", "camelCase", "PascalCase", "legacy"]
+
+_LEGACY_NAMES: dict[str, str] = {
+    "entry_id": "JRNL_ID",
+    "line_id": "LN_ID",
+    "account_id": "ACCT_NO",
+    "account_name": "ACCT_NM",
+    "account_type": "ACCT_TYP",
+    "parent_id": "PRNT_ACCT",
+    "parent_account_id": "PRNT_ACCT",
+    "debit": "DR_AMT",
+    "credit": "CR_AMT",
+    "debit_balance": "DR_BAL",
+    "credit_balance": "CR_BAL",
+    "cost_center": "CC",
+    "invoice_id": "INV_NO",
+    "vendor_id": "VNDR_ID",
+    "due_date": "DUE_DT",
+    "payment_terms": "PMT_TERMS",
+    "payment_id": "PMT_ID",
+    "payment_date": "PMT_DT",
+    "payment_amount": "PMT_AMT",
+    "payment_currency": "PMT_CCY",
+    "payment_method": "PMT_MTHD",
+    "txn_id": "TXN_ID",
+    "counterparty": "CNTRPRTY",
+    "reconciled": "RECON_FLG",
+    "from_ccy": "FROM_CCY",
+    "to_ccy": "TO_CCY",
+    "created_by": "CRTD_BY",
+    "date": "TXN_DT",
+    "amount": "AMT",
+    "currency": "CCY",
+    "description": "DESC",
+    "status": "STAT",
+    "reference": "REF",
+    "period": "PRD",
+    "rate": "FX_RATE",
+    "source": "SRC",
+    "method": "MTHD",
+    "account_currency": "ACCT_CCY",
+}
+
+
+def _to_camel(s: str) -> str:
+    parts = s.split("_")
+    return parts[0] + "".join(p.capitalize() for p in parts[1:])
+
+
+def _to_pascal(s: str) -> str:
+    return "".join(p.capitalize() for p in s.split("_"))
+
+
+def apply_column_style(
+    dataframes: dict[str, pl.DataFrame],
+    style: ColumnStyle,
+) -> dict[str, pl.DataFrame]:
+    """Rename columns across all DataFrames to the requested naming style.
+
+    snake_case is the identity (no-op). Other styles apply a transformation.
+    """
+    if style == "snake_case":
+        return dataframes
+
+    out: dict[str, pl.DataFrame] = {}
+    for name, df in dataframes.items():
+        if style == "camelCase":
+            mapping = {col: _to_camel(col) for col in df.columns}
+        elif style == "PascalCase":
+            mapping = {col: _to_pascal(col) for col in df.columns}
+        elif style == "legacy":
+            mapping = {col: _LEGACY_NAMES.get(col, col.upper()) for col in df.columns}
+        else:
+            mapping = {}
+        out[name] = df.rename(mapping)
+
+    return out
+
+
+# --- Pivots ---
+
+
+def pivot_trial_balance_wide(df: pl.DataFrame) -> pl.DataFrame:
+    """Pivot trial balance from tall (account × period rows) to wide (accounts as rows, periods as columns).
+
+    Returns a DataFrame with one row per account and columns for each period's
+    debit/credit balances: ``2025_01_debit``, ``2025_01_credit``, etc.
+    """
+    periods = sorted(df["period"].unique().to_list())
+
+    result = df.filter(pl.col("period") == periods[0]).select(
+        "account_id",
+        pl.col("debit_balance").alias(f"{periods[0].replace('-', '_')}_debit"),
+        pl.col("credit_balance").alias(f"{periods[0].replace('-', '_')}_credit"),
+    )
+
+    for period in periods[1:]:
+        period_df = df.filter(pl.col("period") == period).select(
+            "account_id",
+            pl.col("debit_balance").alias(f"{period.replace('-', '_')}_debit"),
+            pl.col("credit_balance").alias(f"{period.replace('-', '_')}_credit"),
+        )
+        result = result.join(period_df, on="account_id", how="left")
+
+    return result
+
+
+def pivot_journal_lines_wide(df: pl.DataFrame) -> pl.DataFrame:
+    """Pivot journal lines from separate debit/credit columns to a single amount + side column.
+
+    Converts: line_id, entry_id, account_id, debit, credit
+    To:        line_id, entry_id, account_id, amount, side
+    Where side is 'debit' or 'credit' and amount is the non-zero value.
+    """
+    debit_rows = df.filter(pl.col("debit") > 0).with_columns(
+        pl.col("debit").alias("amount"),
+        pl.lit("debit").alias("side"),
+    ).drop("debit", "credit")
+
+    credit_rows = df.filter(pl.col("credit") > 0).with_columns(
+        pl.col("credit").alias("amount"),
+        pl.lit("credit").alias("side"),
+    ).drop("debit", "credit")
+
+    return pl.concat([debit_rows, credit_rows]).sort("line_id")
+
+
+# --- Normalization ---
 
 
 def apply_normalization(
@@ -39,6 +177,12 @@ def apply_normalization(
 
     # flat: additionally inline lookups
     out, mapping = _inline_chart_of_accounts(out, mapping)
+
+    if level == "flat":
+        return out, mapping
+
+    # single: join everything into one mega-table
+    out, mapping = _build_single_table(out, mapping)
 
     return out, mapping
 
@@ -126,5 +270,56 @@ def _inline_chart_of_accounts(
     tb_enriched = tb.join(coa_renamed, on="account_id", how="left")
     dfs["trial_balance"] = tb_enriched
     # trial_balance keeps its name, so no mapping entry needed.
+
+    return dfs, mapping
+
+
+# ---------------------------------------------------------------------------
+# single helpers
+# ---------------------------------------------------------------------------
+
+def _build_single_table(
+    dfs: dict[str, pl.DataFrame],
+    mapping: dict[str, str],
+) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
+    """Combine general_ledger with invoice_data and bank_transactions into one table.
+
+    The mega-table uses the general_ledger as the spine and left-joins
+    invoice_data (on date + amount overlap) and bank_transactions.
+    Non-joinable tables (fx_rates, trial_balance) are dropped.
+    """
+    gl = dfs.pop("general_ledger")
+
+    # Add a source column to track provenance
+    gl = gl.with_columns(pl.lit("gl").alias("source_table"))
+
+    # Add invoice data as additional rows (different structure → vertical stack with nulls)
+    parts = [gl]
+
+    if "invoice_data" in dfs:
+        inv = dfs.pop("invoice_data")
+        inv = inv.with_columns(pl.lit("invoice").alias("source_table"))
+        parts.append(inv)
+
+    if "bank_transactions" in dfs:
+        bank = dfs.pop("bank_transactions")
+        bank = bank.with_columns(pl.lit("bank").alias("source_table"))
+        parts.append(bank)
+
+    # Vertical concat with diagonal join (fills missing columns with null)
+    mega = pl.concat(parts, how="diagonal")
+
+    # Drop non-joinable tables
+    dfs.pop("fx_rates", None)
+    dfs.pop("trial_balance", None)
+
+    dfs["mega_table"] = mega
+
+    # Map all original tables to mega_table
+    for old_name in list(mapping.keys()):
+        mapping[old_name] = "mega_table"
+    mapping["bank_transactions"] = "mega_table"
+    mapping["fx_rates"] = "mega_table"
+    mapping["trial_balance"] = "mega_table"
 
     return dfs, mapping

@@ -8,7 +8,12 @@ import pytest
 from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.entropy.registry import EntropyInjection, InjectionRegistry
 from testdata.export import dataset_to_dataframes
-from testdata.schema_transforms import apply_normalization
+from testdata.schema_transforms import (
+    apply_column_style,
+    apply_normalization,
+    pivot_journal_lines_wide,
+    pivot_trial_balance_wide,
+)
 
 
 @pytest.fixture(scope="module")
@@ -197,3 +202,103 @@ def test_registry_remap_flat():
     registry.remap_tables(mapping)
 
     assert registry.injections[0].target_file == "general_ledger.csv"
+
+
+# ---------------------------------------------------------------------------
+# single
+# ---------------------------------------------------------------------------
+
+def test_single_produces_one_table(base_dataframes):
+    """single normalization produces exactly 1 table."""
+    dfs, mapping = apply_normalization(dict(base_dataframes), "single")
+    assert len(dfs) == 1
+    assert "mega_table" in dfs
+
+
+def test_single_has_source_column(base_dataframes):
+    """mega_table has source_table column for provenance tracking."""
+    dfs, _ = apply_normalization(dict(base_dataframes), "single")
+    mega = dfs["mega_table"]
+    assert "source_table" in mega.columns
+    sources = set(mega["source_table"].unique().to_list())
+    assert "gl" in sources
+    assert "invoice" in sources
+    assert "bank" in sources
+
+
+def test_single_preserves_gl_rows(base_dataframes):
+    """mega_table GL rows >= original journal_lines count."""
+    dfs, _ = apply_normalization(dict(base_dataframes), "single")
+    mega = dfs["mega_table"]
+    gl_rows = mega.filter(pl.col("source_table") == "gl")
+    assert len(gl_rows) >= len(base_dataframes["journal_lines"])
+
+
+# ---------------------------------------------------------------------------
+# column naming styles
+# ---------------------------------------------------------------------------
+
+def test_snake_case_is_identity(base_dataframes):
+    """snake_case returns columns unchanged."""
+    result = apply_column_style(dict(base_dataframes), "snake_case")
+    for name, df in result.items():
+        assert df.columns == base_dataframes[name].columns
+
+
+def test_camel_case(base_dataframes):
+    """camelCase converts snake_case columns."""
+    result = apply_column_style(dict(base_dataframes), "camelCase")
+    je = result["journal_entries"]
+    assert "entryId" in je.columns
+    assert "createdBy" in je.columns
+
+
+def test_pascal_case(base_dataframes):
+    """PascalCase capitalizes each word."""
+    result = apply_column_style(dict(base_dataframes), "PascalCase")
+    je = result["journal_entries"]
+    assert "EntryId" in je.columns
+    assert "CreatedBy" in je.columns
+
+
+def test_legacy_style(base_dataframes):
+    """legacy uses abbreviated uppercase names."""
+    result = apply_column_style(dict(base_dataframes), "legacy")
+    jl = result["journal_lines"]
+    assert "DR_AMT" in jl.columns
+    assert "CR_AMT" in jl.columns
+    assert "ACCT_NO" in jl.columns
+    assert "CC" in jl.columns
+
+
+# ---------------------------------------------------------------------------
+# pivots
+# ---------------------------------------------------------------------------
+
+def test_trial_balance_wide_pivot(base_dataframes):
+    """Wide pivot creates period columns for trial balance."""
+    tb = base_dataframes["trial_balance"]
+    wide = pivot_trial_balance_wide(tb)
+    periods = sorted(tb["period"].unique().to_list())
+    # One row per account
+    accounts = tb["account_id"].unique()
+    assert len(wide) == len(accounts)
+    # Should have columns for each period
+    for period in periods:
+        col_prefix = period.replace("-", "_")
+        assert f"{col_prefix}_debit" in wide.columns
+        assert f"{col_prefix}_credit" in wide.columns
+
+
+def test_journal_lines_wide_pivot(base_dataframes):
+    """Wide pivot creates amount + side columns."""
+    jl = base_dataframes["journal_lines"]
+    wide = pivot_journal_lines_wide(jl)
+    assert "amount" in wide.columns
+    assert "side" in wide.columns
+    assert "debit" not in wide.columns
+    assert "credit" not in wide.columns
+    sides = set(wide["side"].unique().to_list())
+    assert sides == {"debit", "credit"}
+    # Row count should match non-zero lines
+    assert len(wide) == len(jl)  # Every line has exactly one non-zero side
