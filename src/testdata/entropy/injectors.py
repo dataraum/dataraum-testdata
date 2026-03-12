@@ -295,6 +295,9 @@ def corrupt_dates(
             values[i] = d.strftime("%Y%m%d")
         elif fmt == "Mon DD, YYYY":
             values[i] = d.strftime("%b %d, %Y")
+        elif fmt == "epoch":
+            import calendar
+            values[i] = str(calendar.timegm(d.timetuple()))
         else:
             values[i] = d.isoformat()
         affected.append(i)
