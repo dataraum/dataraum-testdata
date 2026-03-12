@@ -23,7 +23,7 @@ from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.config import get_config_dir
 from testdata.entropy import injectors
 from testdata.entropy.registry import InjectionRegistry
-from testdata.entropy.strategies import InjectionSpec, get_strategy
+from testdata.entropy.strategies import InjectionSpec, get_strategy, load_strategy
 from testdata.export import ExportFormat, dataset_to_dataframes, export_dataframes
 from testdata.ground_truth import (
     calculate_ground_truth,
@@ -142,11 +142,16 @@ def _apply_injection(
 
     dataframes[spec.table] = fn(df=df, **kwargs)
 
+    # Override detector_id if specified in the strategy YAML
+    if spec.detector_id is not None and len(registry) > 0:
+        registry._injections[-1].detector_id = spec.detector_id
+
 
 def run_scenario(
     scenario_name: str,
     *,
     strategy_name: str | None = None,
+    strategy_file: Path | None = None,
     seed: int | None = None,
     months: int | None = None,
     output_dir: Path | None = None,
@@ -159,7 +164,9 @@ def run_scenario(
 
     Args:
         scenario_name: Which scenario YAML to load (e.g. "month-end-close").
-        strategy_name: Override injection strategy.
+        strategy_name: Override injection strategy by name.
+        strategy_file: Override injection strategy from arbitrary YAML path.
+            Takes precedence over strategy_name.
         seed: Override random seed.
         months: Override month count.
         output_dir: Where to write output. If None, returns data only.
@@ -173,9 +180,13 @@ def run_scenario(
     # Resolve: CLI override → YAML default (no hardcoded fallbacks)
     seed = seed if seed is not None else config.seed
     months = months if months is not None else config.months
-    strategy_name = strategy_name if strategy_name is not None else config.strategy
 
-    strategy = get_strategy(strategy_name)
+    if strategy_file is not None:
+        strategy = load_strategy(strategy_file)
+        strategy_name = strategy.name
+    else:
+        strategy_name = strategy_name if strategy_name is not None else config.strategy
+        strategy = get_strategy(strategy_name)
     rng = random.Random(seed + 1000)  # Offset so injections differ from generation
 
     # Step 1: Generate clean data

@@ -26,6 +26,7 @@ class InjectionSpec:
     injector: str           # Function name from injectors module
     table: str              # Target table name
     kwargs: dict[str, Any] = field(default_factory=dict)
+    detector_id: str | None = None  # Override default detector_id in entropy_map
 
 
 @dataclass
@@ -52,6 +53,7 @@ def load_strategy(path: Path) -> Strategy:
             injector=entry["injector"],
             table=entry["table"],
             kwargs=entry.get("params", {}),
+            detector_id=entry.get("detector_id"),
         )
         for entry in (raw.get("injections") or [])
     ]
