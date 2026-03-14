@@ -277,8 +277,8 @@ def calculate_ground_truth(
         prev_revenue = revenue
 
     # --- Annual metrics ---
-    total_revenue = sum(m.revenue for m in monthly_metrics)
-    total_expenses = sum(m.expenses for m in monthly_metrics)
+    total_revenue = sum((m.revenue for m in monthly_metrics), Decimal("0"))
+    total_expenses = sum((m.expenses for m in monthly_metrics), Decimal("0"))
     last = monthly_metrics[-1] if monthly_metrics else None
 
     # FCF: sum of all bank transaction amounts (positive = inflow, negative = outflow)

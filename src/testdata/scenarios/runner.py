@@ -31,6 +31,9 @@ from testdata.ground_truth import (
     export_ground_truth,
 )
 from testdata.schema_transforms import (
+    ColumnStyle,
+    KeyStrategy,
+    NormalizationLevel,
     apply_column_style,
     apply_key_strategy,
     apply_normalization,
@@ -44,9 +47,9 @@ class SourceConfig:
     name: str
     description: str
     tables: list[str]
-    column_style: str  # snake_case, camelCase, PascalCase, legacy
-    key_strategy: str  # surrogate, natural, uuid, composite
-    format: str  # csv, parquet
+    column_style: ColumnStyle
+    key_strategy: KeyStrategy
+    format: ExportFormat
 
 
 @dataclass
@@ -61,7 +64,7 @@ class ScenarioConfig:
     months: int
     strategy: str
     # Generator parameters
-    normalization: str
+    normalization: NormalizationLevel
     fiscal_start: date
     generator_kwargs: dict
     # Multi-source (None for single-source scenarios)

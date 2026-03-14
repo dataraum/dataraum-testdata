@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import typer
 
+from testdata.export import ExportFormat
 from testdata.scenarios.runner import discover_scenarios, run_scenario
 
 app = typer.Typer(
@@ -49,7 +51,7 @@ def generate(
         seed=seed,
         months=months,
         output_dir=output,
-        fmt=fmt,
+        fmt=cast(ExportFormat, fmt),
     )
 
     registry = result["registry"]
