@@ -101,6 +101,7 @@ class Payment(BaseModel):
 
 class BankTransaction(BaseModel):
     txn_id: str
+    account_id: str = Field(description="FK to ChartOfAccounts (bank/cash account)")
     date: datetime.date
     amount: Decimal = Field(description="Positive=credit, negative=debit")
     currency: Currency = Currency.USD

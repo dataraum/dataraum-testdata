@@ -67,7 +67,7 @@ def test_payment():
 
 def test_bank_transaction():
     txn = BankTransaction(
-        txn_id="BT-001", date=date(2025, 1, 5),
+        txn_id="BT-001", account_id="1110", date=date(2025, 1, 5),
         amount=Decimal("-1500.00"), reference="TXN-123456",
         counterparty="Acme Corp",
     )

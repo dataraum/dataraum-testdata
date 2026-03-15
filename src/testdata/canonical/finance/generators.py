@@ -390,6 +390,7 @@ def _generate_cash_receipts(
         # Bank transaction (positive = credit/inflow)
         bank_txns.append(BankTransaction(
             txn_id=counters.next_bank_txn(),
+            account_id=cash_account,
             date=receipt_date,
             amount=amount,
             reference=f"RCV-{rng.randint(100000, 999999)}",
@@ -568,10 +569,11 @@ def _generate_vendor_payments(
         ))
 
         # CR: Cash
+        cash_account = rng.choice(_CASH_ACCOUNTS)
         lines_out.append(JournalLine(
             line_id=counters.next_line(),
             entry_id=entry_id,
-            account_id=rng.choice(_CASH_ACCOUNTS),
+            account_id=cash_account,
             debit=Decimal("0.00"),
             credit=pay_amount,
         ))
@@ -579,6 +581,7 @@ def _generate_vendor_payments(
         # Bank transaction (negative = debit/outflow)
         bank_txns.append(BankTransaction(
             txn_id=counters.next_bank_txn(),
+            account_id=cash_account,
             date=pay_date,
             amount=-pay_amount,
             reference=f"TXN-{rng.randint(100000, 999999)}",
@@ -641,6 +644,7 @@ def _generate_operating_events(
 
         bank_txns.append(BankTransaction(
             txn_id=counters.next_bank_txn(),
+            account_id="1110",
             date=m_end,
             amount=-payroll_amount,
             reference=f"PAY-{m_start.strftime('%Y%m')}",
@@ -676,6 +680,7 @@ def _generate_operating_events(
 
         bank_txns.append(BankTransaction(
             txn_id=counters.next_bank_txn(),
+            account_id="1110",
             date=m_start,
             amount=-rent_amount,
             reference=f"RENT-{m_start.strftime('%Y%m')}",
@@ -737,6 +742,7 @@ def _generate_operating_events(
 
         bank_txns.append(BankTransaction(
             txn_id=counters.next_bank_txn(),
+            account_id="1110",
             date=m_start,
             amount=-insurance,
             reference=f"INS-{m_start.strftime('%Y%m')}",
@@ -792,6 +798,7 @@ def _generate_operating_events(
             if rng.random() < 0.70:
                 bank_txns.append(BankTransaction(
                     txn_id=counters.next_bank_txn(),
+                    account_id="1110",
                     date=misc_date,
                     amount=-misc_amount,
                     reference=f"TXN-{rng.randint(100000, 999999)}",
@@ -827,21 +834,23 @@ def _generate_misc_bank_transactions(
             txn_date = _random_date(rng, m_start, m_end)
 
             # 30% credits (interest, refunds), 70% debits (fees, misc charges)
+            cash_account = rng.choice(_CASH_ACCOUNTS)
             if rng.random() < 0.30:
                 amount = _benford_amount(rng, 10, 2000)
                 ref = f"RCV-{rng.randint(100000, 999999)}"
                 counterparty = rng.choice(["First National Bank", "Wells Fargo", "JPMorgan Chase"])
-                gl_debit_account = rng.choice(_CASH_ACCOUNTS)
+                gl_debit_account = cash_account
                 gl_credit_account = "4310"  # Interest Income
             else:
                 amount = -_benford_amount(rng, 5, 500)
                 ref = f"FEE-{rng.randint(100000, 999999)}"
                 counterparty = rng.choice(["First National Bank", "Wells Fargo", "JPMorgan Chase"])
                 gl_debit_account = "5910"  # Bank Fees
-                gl_credit_account = rng.choice(_CASH_ACCOUNTS)
+                gl_credit_account = cash_account
 
             bank_txns.append(BankTransaction(
                 txn_id=counters.next_bank_txn(),
+                account_id=cash_account,
                 date=txn_date,
                 amount=amount,
                 reference=ref,
