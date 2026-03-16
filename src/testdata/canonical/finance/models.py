@@ -6,7 +6,7 @@ import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class AccountType(StrEnum):
@@ -77,6 +77,12 @@ class JournalLine(BaseModel):
     credit: Decimal = Field(default=Decimal("0.00"))
     currency: Currency = Currency.USD
     cost_center: str | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def net_amount(self) -> Decimal:
+        """Derived column: debit - credit. Enables correlation detection."""
+        return self.debit - self.credit
 
 
 class Invoice(BaseModel):
