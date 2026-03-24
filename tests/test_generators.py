@@ -113,39 +113,33 @@ def test_vendor_concentration():
 
 
 def test_trial_balance_derived_from_gl():
-    """Trial balance matches cumulative GL entries within the fiscal year."""
+    """Trial balance per-period activity sums to total GL entries."""
     ds = _dataset()
-    from datetime import date
 
-    fiscal_start = date(2025, 1, 1)
-    fiscal_end = date(2025, 12, 31)
-
-    # Only count entries within the fiscal year (some payments spill into next year)
-    entry_info = {}
-    for e in ds.journal_entries:
-        if e.status == JournalStatus.POSTED and fiscal_start <= e.date <= fiscal_end:
-            entry_info[e.entry_id] = e.date
-
-    # Compute expected final-period balance for each account from fiscal-year GL
+    # Compute total GL debits/credits per account (all POSTED entries)
+    entry_status = {e.entry_id: e.status for e in ds.journal_entries}
     account_debits: dict[str, Decimal] = {}
     account_credits: dict[str, Decimal] = {}
     for line in ds.journal_lines:
-        if line.entry_id not in entry_info:
+        if entry_status.get(line.entry_id) != JournalStatus.POSTED:
             continue
         account_debits[line.account_id] = account_debits.get(line.account_id, Decimal("0")) + line.debit
         account_credits[line.account_id] = account_credits.get(line.account_id, Decimal("0")) + line.credit
 
-    # Check final period TB matches total GL within fiscal year
-    final_period = "2025-12"
-    tb_final = {tb.account_id: tb for tb in ds.trial_balance if tb.period == final_period}
+    # Sum all TB periods per account — should match GL totals
+    tb_debits: dict[str, Decimal] = {}
+    tb_credits: dict[str, Decimal] = {}
+    for tb in ds.trial_balance:
+        tb_debits[tb.account_id] = tb_debits.get(tb.account_id, Decimal("0")) + tb.debit_balance
+        tb_credits[tb.account_id] = tb_credits.get(tb.account_id, Decimal("0")) + tb.credit_balance
 
     for acct in account_debits:
-        assert acct in tb_final, f"Account {acct} in GL but missing from TB final period"
-        assert tb_final[acct].debit_balance == account_debits[acct].quantize(Decimal("0.01")), (
-            f"Account {acct}: TB debit {tb_final[acct].debit_balance} != GL debit {account_debits[acct]}"
+        assert acct in tb_debits, f"Account {acct} in GL but missing from TB"
+        assert tb_debits[acct] == account_debits[acct].quantize(Decimal("0.01")), (
+            f"Account {acct}: TB debit {tb_debits[acct]} != GL debit {account_debits[acct]}"
         )
-        assert tb_final[acct].credit_balance == account_credits.get(acct, Decimal("0")).quantize(Decimal("0.01")), (
-            f"Account {acct}: TB credit {tb_final[acct].credit_balance} != GL credit {account_credits.get(acct, Decimal('0'))}"
+        assert tb_credits.get(acct, Decimal("0")) == account_credits.get(acct, Decimal("0")).quantize(Decimal("0.01")), (
+            f"Account {acct}: TB credit {tb_credits.get(acct, Decimal('0'))} != GL credit {account_credits.get(acct, Decimal('0'))}"
         )
 
 
@@ -253,11 +247,11 @@ def test_non_january_fiscal_start():
     assert min(entry_dates).year == 2025
     assert max(entry_dates).year >= 2026
 
-    # TB should have 12 periods starting from 2025-10
+    # TB should have periods starting from 2025-10, may extend past fiscal year
+    # due to late payments that spill into subsequent months
     tb_periods = sorted({tb.period for tb in ds.trial_balance})
     assert tb_periods[0] == "2025-10"
-    assert tb_periods[-1] == "2026-09"
-    assert len(tb_periods) == 12
+    assert len(tb_periods) >= 12
 
     # Balanced journals still hold
     lines_by_entry: dict[str, list] = {}

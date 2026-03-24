@@ -464,7 +464,7 @@ def _generate_purchase_invoices(
             )[0]
 
         invoice_id = counters.next_invoice()
-        invoices.append(Invoice(
+        inv = Invoice(
             invoice_id=invoice_id,
             vendor_id=vendor_id,
             date=inv_date,
@@ -472,12 +472,14 @@ def _generate_purchase_invoices(
             amount=amount,
             status=status,
             payment_terms=terms,
-        ))
+        )
+        invoices.append(inv)
 
         # GL entry: DR Expense, CR AP (only for non-cancelled invoices)
         if status != InvoiceStatus.CANCELLED:
             cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
             entry_id = counters.next_entry()
+            inv.entry_id = entry_id
 
             entries.append(JournalEntry(
                 entry_id=entry_id,
@@ -587,6 +589,7 @@ def _generate_vendor_payments(
             reference=f"TXN-{rng.randint(100000, 999999)}",
             counterparty=vendor_name,
             reconciled=rng.random() < 0.90,
+            payment_id=payment_id,
         ))
 
     return payments, entries, lines_out, bank_txns
@@ -936,10 +939,11 @@ def _derive_trial_balance(
     fiscal_start: date,
     months: int,
 ) -> list[TrialBalance]:
-    """Build monthly trial balance from actual cumulative GL entries.
+    """Build monthly trial balance from actual GL entries.
 
     Only includes POSTED entries. Groups by account and period,
-    accumulates balances cumulatively across months.
+    stores per-period activity (not cumulative) so that summing
+    all periods yields correct totals for the accounting equation.
     """
     # Build entry_id -> (date, status) mapping
     entry_info = {e.entry_id: (e.date, e.status) for e in all_entries}
@@ -960,31 +964,19 @@ def _derive_trial_balance(
         prev_d, prev_c = period_movements.get(key, (Decimal("0"), Decimal("0")))
         period_movements[key] = (prev_d + line.debit, prev_c + line.credit)
 
-    # Build cumulative balances
+    # Build per-period activity rows for every (account, period)
+    # that has any movement — including entries past fiscal year end.
     result: list[TrialBalance] = []
-    cumulative: dict[str, tuple[Decimal, Decimal]] = {}
 
-    # Collect all accounts that have any movement
-    all_accounts = sorted({acct for acct, _ in period_movements})
-
-    for month_offset in range(months):
-        m_start, _ = _month_start_end(fiscal_start, month_offset)
-        period_str = m_start.strftime("%Y-%m")
-
-        for acct in all_accounts:
-            key = (acct, period_str)
-            month_d, month_c = period_movements.get(key, (Decimal("0"), Decimal("0")))
-            prev_d, prev_c = cumulative.get(acct, (Decimal("0"), Decimal("0")))
-            cum_d = prev_d + month_d
-            cum_c = prev_c + month_c
-            cumulative[acct] = (cum_d, cum_c)
-
-            result.append(TrialBalance(
-                account_id=acct,
-                period=period_str,
-                debit_balance=_quantize(cum_d),
-                credit_balance=_quantize(cum_c),
-            ))
+    for (acct, period_str), (month_d, month_c) in sorted(period_movements.items()):
+        if month_d == 0 and month_c == 0:
+            continue
+        result.append(TrialBalance(
+            account_id=acct,
+            period=period_str,
+            debit_balance=_quantize(month_d),
+            credit_balance=_quantize(month_c),
+        ))
 
     return result
 

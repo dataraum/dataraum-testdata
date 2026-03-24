@@ -94,6 +94,7 @@ class Invoice(BaseModel):
     currency: Currency = Currency.USD
     status: InvoiceStatus = InvoiceStatus.OPEN
     payment_terms: PaymentTerms = PaymentTerms.NET_30
+    entry_id: str | None = Field(default=None, description="FK to JournalEntry (None for cancelled)")
 
 
 class Payment(BaseModel):
@@ -114,6 +115,7 @@ class BankTransaction(BaseModel):
     reference: str
     counterparty: str
     reconciled: bool = False
+    payment_id: str | None = Field(default=None, description="FK to Payment (vendor payments only)")
 
 
 class FXRate(BaseModel):
