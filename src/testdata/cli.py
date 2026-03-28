@@ -24,7 +24,7 @@ def generate(
     output: Path = typer.Option(..., help="Output directory"),
     seed: int = typer.Option(None, help="Random seed (default: from scenario YAML)"),
     months: int = typer.Option(None, help="Number of months (default: from scenario YAML)"),
-    fmt: str = typer.Option("csv", "--format", help="Export format: csv, parquet, both"),
+    fmt: str = typer.Option("csv", "--format", help="Export format: csv, parquet, json, jsonl, both"),
 ) -> None:
     """Generate synthetic test data with entropy injections."""
     scenarios = discover_scenarios()
@@ -32,8 +32,8 @@ def generate(
         typer.echo(f"Unknown scenario: {scenario!r}. Available: {list(scenarios.keys())}")
         raise typer.Exit(1)
 
-    if fmt not in ("csv", "parquet", "both"):
-        typer.echo(f"Unknown format: {fmt!r}. Available: csv, parquet, both")
+    if fmt not in ("csv", "parquet", "json", "jsonl", "both"):
+        typer.echo(f"Unknown format: {fmt!r}. Available: csv, parquet, json, jsonl, both")
         raise typer.Exit(1)
 
     # Resolve effective values for display (CLI override → YAML default)

@@ -1,4 +1,4 @@
-"""Export finance dataset to CSV/Parquet files + manifest YAML."""
+"""Export finance dataset to CSV/Parquet/JSON/JSONL files + manifest YAML."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import yaml
 from testdata.canonical.finance.models import FinanceDataset
 
 
-ExportFormat = Literal["csv", "parquet", "both"]
+ExportFormat = Literal["csv", "parquet", "json", "jsonl", "both"]
 
 # Table name -> model field name mapping
 TABLE_NAMES: dict[str, str] = {
@@ -79,6 +79,16 @@ def _write_table(
         parquet_path = output_dir / f"{table_name}.parquet"
         df.write_parquet(parquet_path)
         entries.append({"file": f"{table_name}.parquet", **base})
+
+    if fmt == "json":
+        json_path = output_dir / f"{table_name}.json"
+        df.write_json(json_path)
+        entries.append({"file": f"{table_name}.json", **base})
+
+    if fmt == "jsonl":
+        jsonl_path = output_dir / f"{table_name}.jsonl"
+        df.write_ndjson(jsonl_path)
+        entries.append({"file": f"{table_name}.jsonl", **base})
 
     return entries
 
