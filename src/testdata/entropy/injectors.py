@@ -61,6 +61,52 @@ def corrupt_types(
     return df
 
 
+def inject_null_tokens(
+    df: pl.DataFrame,
+    col: str,
+    ratio: float,
+    tokens: list[str],
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Replace numeric values with null-marker sentinel TOKENS from a parameterized pool.
+
+    Unlike ``corrupt_types``' fixed garbage list, the token pool is supplied by the
+    strategy — so the eval asserts recall on a *family* of variations (different
+    tokens / rates / seeds), never a memorized fixture (ADR-0009). The tokens fail
+    the column's numeric cast → quarantine → the ``null_semantics`` adjudication
+    pools quarantine / type / vocabulary witnesses per rejected token (is-null vs
+    is-value). Use tokens NOT in the base null vocabulary so the vocabulary witness
+    dissents and conflict fires (the novel-sentinel case); a ``null_value`` teach
+    of these tokens then closes the loop (conflict → 0).
+    """
+    n = len(df)
+    count = max(1, int(n * ratio))
+    indices = rng.sample(range(n), min(count, n))
+
+    mask = pl.Series("mask", [i in set(indices) for i in range(n)])
+    replacements = pl.Series("repl", [rng.choice(tokens) for _ in range(n)])
+    new_col = pl.when(mask).then(replacements).otherwise(df[col].cast(pl.Utf8)).alias(col)
+    df = df.with_columns(new_col)
+
+    registry.record(EntropyInjection(
+        injection_id=registry.next_id("NULLTOK"),
+        target_file=f"{table_name}.csv",
+        target_column=col,
+        target_rows=sorted(indices),
+        layer="value",
+        dimension="null_semantics",
+        sub_dimension="null_marker",
+        detector_id="null_semantics",
+        injection_type="inject_null_tokens",
+        parameters={"ratio": ratio, "tokens": list(tokens)},
+        severity=severity,
+    ))
+    return df
+
+
 def introduce_nulls(
     df: pl.DataFrame,
     col: str,
