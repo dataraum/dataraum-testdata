@@ -110,9 +110,15 @@ class NullTokenFamilyParams:
     """
 
     n_markers: tuple[int, int] = (2, 6)          # distinct sentinel tokens (small → cluster)
-    marker_ratio: tuple[float, float] = (0.06, 0.14)  # fraction of rows replaced by a marker
-    decoy_ratio: tuple[float, float] = (0.02, 0.06)   # fraction replaced by a genuine decoy
-    vocab_coverage: tuple[float, float] = (0.2, 0.8)  # fraction of markers in the curated vocab
+    # marker + decoy together are the column's cast-failure rate; the typing phase
+    # only infers a numeric type (and thus quarantines the tokens for null_semantics
+    # to adjudicate) when parse_success ≥ min_confidence (0.85, phases/typing.yaml).
+    # So the COMBINED ratio is capped well under 0.15 — else the column falls back to
+    # VARCHAR, never quarantines, and the adjudication never runs (live-run finding,
+    # DAT-450: at 16% corruption journal_lines.debit dropped to VARCHAR and was skipped).
+    marker_ratio: tuple[float, float] = (0.05, 0.075)  # fraction of rows replaced by a marker
+    decoy_ratio: tuple[float, float] = (0.015, 0.025)  # fraction replaced by a genuine decoy
+    vocab_coverage: tuple[float, float] = (0.2, 0.8)   # fraction of markers in the curated vocab
     decoy_style: str | None = None               # fixed style, or None → sampled per instance
 
 

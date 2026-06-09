@@ -41,8 +41,11 @@ def test_sample_is_well_formed() -> None:
         assert set(fam.in_vocab_markers) <= set(fam.markers)
         assert set(fam.in_vocab_markers) <= set(CURATED_VOCAB)
         assert 0.0 <= fam.vocab_coverage <= 1.0
-        assert 0.06 <= fam.marker_ratio <= 0.14
-        assert 0.02 <= fam.decoy_ratio <= 0.06
+        assert 0.05 <= fam.marker_ratio <= 0.075
+        assert 0.015 <= fam.decoy_ratio <= 0.025
+        # Combined cast-failure rate stays under the typing min_confidence margin
+        # (0.85) so the corrupted column still infers numeric and quarantines.
+        assert fam.marker_ratio + fam.decoy_ratio <= 0.10
 
 
 def test_params_override_the_space() -> None:

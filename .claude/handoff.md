@@ -20,6 +20,16 @@ two ground-truth-LABELLED classes:
 - **decoys** (`is-value`) — genuine amounts that merely fail a numeric cast
   (locale numbers, currency, unit-suffixed, annotated), distinct per row → smear.
 
+**Live-run constraint (DAT-450, learned from a real pipeline run):** marker + decoy
+together are the column's cast-failure rate, and the typing phase only infers a
+numeric type — and thus quarantines the tokens for `null_semantics` to adjudicate —
+when `parse_success ≥ min_confidence` (0.85, `phases/typing.yaml`). At ~16%
+corruption `journal_lines.debit` fell to **VARCHAR**, never quarantined, and the
+detector was correctly skipped. So the family's combined ratio is capped at ≤0.10
+(`marker_ratio (0.05,0.075)` + `decoy_ratio (0.015,0.025)`) — high enough to create
+a clear conflict, low enough to keep the column numeric. The isolated rig can't see
+this (it assumes the column quarantines); only the live run surfaced it.
+
 New injector **`inject_null_token_family(col, seed, …)`** (the generative successor
 to `inject_null_tokens`): its own seed-derived RNG (order-independent, reproducible),
 and it records the labels in `entropy_map` `parameters` — `markers`,
