@@ -10,6 +10,11 @@ import random
 
 import polars as pl
 
+from .families import (
+    NullTokenFamilyParams,
+    mint_decoy,
+    sample_null_token_family,
+)
 from .registry import EntropyInjection, InjectionRegistry
 
 
@@ -102,6 +107,99 @@ def inject_null_tokens(
         detector_id="null_semantics",
         injection_type="inject_null_tokens",
         parameters={"ratio": ratio, "tokens": list(tokens)},
+        severity=severity,
+    ))
+    return df
+
+
+def inject_null_token_family(
+    df: pl.DataFrame,
+    col: str,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    n_markers: list[int] | None = None,
+    marker_ratio: list[float] | None = None,
+    decoy_ratio: list[float] | None = None,
+    vocab_coverage: list[float] | None = None,
+    decoy_style: str | None = None,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Inject a SAMPLED null_tokens family (DAT-450) — two labelled classes.
+
+    The generative successor to ``inject_null_tokens``: instead of a fixed token
+    list, a recorded ``seed`` samples a family instance (markers + decoys + rates;
+    see :mod:`testdata.entropy.families`). Different seeds → different surface,
+    same semantics; the recorded seed reproduces exactly (AC1) and is independent
+    of injection order (its own RNG, not the shared stream).
+
+    Injects two ground-truth-labelled classes into ``col``:
+
+    * **markers** (``is-null``) — a small set of sentinel shapes, each repeated
+      across many rows so they cluster in the quarantine.
+    * **decoys** (``is-value``) — genuine amounts (locale/currency/unit/annotated),
+      distinct per row so they smear.
+
+    Both fail the numeric cast → quarantine → the ``null_semantics`` adjudication
+    pools its witnesses per token. The recorded ``parameters`` carry the marker
+    set, the minted decoys, and their row sets — the labels the calibration rig
+    scores each witness against (DAT-450).
+    """
+    overrides: dict[str, object] = {}
+    if n_markers is not None:
+        overrides["n_markers"] = tuple(n_markers)
+    if marker_ratio is not None:
+        overrides["marker_ratio"] = tuple(marker_ratio)
+    if decoy_ratio is not None:
+        overrides["decoy_ratio"] = tuple(decoy_ratio)
+    if vocab_coverage is not None:
+        overrides["vocab_coverage"] = tuple(vocab_coverage)
+    if decoy_style is not None:
+        overrides["decoy_style"] = decoy_style
+    sample = sample_null_token_family(seed, NullTokenFamilyParams(**overrides))  # type: ignore[arg-type]
+
+    n = len(df)
+    place = random.Random(f"null_token_family:{col}:{seed}")  # seed-derived, order-independent
+    marker_count = max(1, int(n * sample.marker_ratio))
+    decoy_count = int(n * sample.decoy_ratio)
+    chosen = place.sample(range(n), min(marker_count + decoy_count, n))
+    marker_rows = chosen[:marker_count]
+    decoy_rows = chosen[marker_count:]
+
+    new_values = df[col].cast(pl.Utf8).to_list()
+    for i in marker_rows:
+        new_values[i] = place.choice(sample.markers)
+    minted_decoys: list[str] = []
+    for i in decoy_rows:
+        decoy = mint_decoy(place, sample.decoy_style)
+        minted_decoys.append(decoy)
+        new_values[i] = decoy
+    df = df.with_columns(pl.Series(col, new_values))
+
+    registry.record(EntropyInjection(
+        injection_id=registry.next_id("NULLFAM"),
+        target_file=f"{table_name}.csv",
+        target_column=col,
+        target_rows=sorted(marker_rows + decoy_rows),
+        layer="value",
+        dimension="null_semantics",
+        sub_dimension="null_marker",
+        detector_id="null_semantics",
+        injection_type="inject_null_token_family",
+        parameters={
+            "family": "null_tokens",
+            "seed": seed,
+            "markers": list(sample.markers),
+            "in_vocab_markers": list(sample.in_vocab_markers),
+            "vocab_coverage": sample.vocab_coverage,
+            "decoy_style": sample.decoy_style,
+            "decoys": sorted(set(minted_decoys)),
+            "marker_ratio": sample.marker_ratio,
+            "decoy_ratio": sample.decoy_ratio,
+            "marker_rows": sorted(marker_rows),
+            "decoy_rows": sorted(decoy_rows),
+        },
         severity=severity,
     ))
     return df
