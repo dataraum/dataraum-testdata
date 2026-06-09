@@ -15,9 +15,10 @@ from testdata.entropy.families import (
     CURATED_VOCAB,
     NullTokenFamilyParams,
     mint_decoy,
+    sample_mixed_units_family,
     sample_null_token_family,
 )
-from testdata.entropy.injectors import inject_null_token_family
+from testdata.entropy.injectors import inject_null_token_family, inject_scale_mix
 from testdata.entropy.registry import InjectionRegistry
 
 
@@ -107,6 +108,36 @@ def test_injector_labels_markers_and_decoys() -> None:
     assert not (set(p["marker_rows"]) & set(p["decoy_rows"]))
     assert inj.detector_id == "null_semantics"
     assert p["seed"] == 20260609
+
+
+def test_mixed_units_family_reproduces_and_varies() -> None:
+    assert sample_mixed_units_family(7) == sample_mixed_units_family(7)  # recorded seed reproduces
+    for s in range(30):
+        fam = sample_mixed_units_family(s)
+        assert fam.scale_factor in (100, 1000, 10000)  # a clean decade, not a ×1.1 currency
+        assert 0.15 <= fam.mix_ratio <= 0.40
+    surfaces = {(sample_mixed_units_family(s).scale_factor, sample_mixed_units_family(s).mix_ratio) for s in range(30)}
+    assert len(surfaces) > 10  # different seeds → different surface
+
+
+def test_inject_scale_mix_records_and_scales() -> None:
+    base = [float(100 + i) for i in range(200)]  # one scale (~100–300)
+    df = pl.DataFrame({"amount": base})
+    reg = InjectionRegistry()
+    out = inject_scale_mix(
+        df, col="amount", seed=42, registry=reg, table_name="invoices", rng=random.Random(0)
+    )
+    (inj,) = reg.injections
+    assert inj.detector_id == "unit_consistency"
+    assert inj.injection_type == "inject_scale_mix"
+    scale = inj.parameters["scale_factor"]
+    col = out["amount"].to_list()
+    # the recorded rows are the base value × the scale factor; the rest are untouched.
+    assert inj.target_rows
+    for i in inj.target_rows:
+        assert abs(col[i] - base[i] * scale) < 0.01
+    untouched = set(range(200)) - set(inj.target_rows)
+    assert all(col[i] == base[i] for i in untouched)
 
 
 def test_injection_is_reproducible_from_the_seed() -> None:

@@ -207,3 +207,47 @@ def sample_null_token_family(
 # exactly the markers the vertical's null list would know. Exposed so the rig and
 # the injector agree on what "in-vocab" means without importing engine config.
 CURATED_VOCAB: tuple[str, ...] = _VOCAB_MARKERS
+
+
+# --- the mixed_units family ------------------------------------------------
+#
+# Feeds unit_consistency (DAT-428): a numeric column secretly mixing SCALES under one
+# declared unit (some values in kEUR among EUR). A SCALE factor (a power of ten), NOT
+# a ×1.1 currency factor — a 10% shift is undetectable from values; a 1000× shift is a
+# clean second mode in log-magnitude that the bimodality witness reads.
+
+_SCALE_FACTORS: tuple[int, ...] = (100, 1000, 10000)
+
+
+@dataclass(frozen=True)
+class MixedUnitsFamilyParams:
+    """The parameter space the mixed_units (scale-mix) generator samples from."""
+
+    scale_factors: tuple[int, ...] = _SCALE_FACTORS  # the alternate scale (a clean decade)
+    mix_ratio: tuple[float, float] = (0.15, 0.40)     # fraction of rows pushed to that scale
+
+
+@dataclass(frozen=True)
+class MixedUnitsFamilySample:
+    """One concrete draw: which scale, how much of the column lands on it."""
+
+    seed: int
+    scale_factor: int
+    mix_ratio: float
+
+
+def sample_mixed_units_family(
+    seed: int, params: MixedUnitsFamilyParams | None = None
+) -> MixedUnitsFamilySample:
+    """Sample one labelled mixed_units instance — deterministic in ``seed``.
+
+    Different seeds → different scale factor + ratio (surface varies); the recorded
+    seed reproduces exactly (AC1).
+    """
+    p = params or MixedUnitsFamilyParams()
+    rng = random.Random(f"mixed_units:{seed}")
+    return MixedUnitsFamilySample(
+        seed=seed,
+        scale_factor=rng.choice(p.scale_factors),
+        mix_ratio=round(rng.uniform(*p.mix_ratio), 4),
+    )

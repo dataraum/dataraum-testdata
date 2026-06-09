@@ -13,6 +13,7 @@ import polars as pl
 from .families import (
     NullTokenFamilyParams,
     mint_decoy,
+    sample_mixed_units_family,
     sample_null_token_family,
 )
 from .registry import EntropyInjection, InjectionRegistry
@@ -199,6 +200,55 @@ def inject_null_token_family(
             "decoy_ratio": sample.decoy_ratio,
             "marker_rows": sorted(marker_rows),
             "decoy_rows": sorted(decoy_rows),
+        },
+        severity=severity,
+    ))
+    return df
+
+
+def inject_scale_mix(
+    df: pl.DataFrame,
+    col: str,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Push a SAMPLED fraction of a numeric column to a different SCALE (DAT-450/428).
+
+    The generative mixed-units family: a recorded ``seed`` samples a scale factor (a
+    power of ten — kEUR among EUR) and a mix ratio, then multiplies that fraction of
+    the column's values by the factor. The values now span two log-magnitude modes
+    under one (still-declared) unit — the conflict ``unit_consistency`` adjudicates.
+    Deliberately a SCALE mix, not a ×1.1 currency mix (undetectable from values).
+    """
+    sample = sample_mixed_units_family(seed)
+    n = len(df)
+    place = random.Random(f"scale_mix:{col}:{seed}")  # seed-derived, order-independent
+    count = max(1, int(n * sample.mix_ratio))
+    rows = place.sample(range(n), min(count, n))
+
+    values = df[col].to_list()
+    for i in rows:
+        if values[i] is not None:
+            values[i] = round(float(values[i]) * sample.scale_factor, 2)
+    df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    registry.record(EntropyInjection(
+        injection_id=registry.next_id("SCALEMIX"),
+        target_file=f"{table_name}.csv",
+        target_column=col,
+        target_rows=sorted(rows),
+        layer="semantic",
+        dimension="units",
+        sub_dimension="unit_consistency",
+        detector_id="unit_consistency",
+        injection_type="inject_scale_mix",
+        parameters={
+            "seed": seed,
+            "scale_factor": sample.scale_factor,
+            "mix_ratio": sample.mix_ratio,
         },
         severity=severity,
     ))
