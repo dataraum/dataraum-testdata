@@ -3,6 +3,21 @@
 Changes in dataraum-testdata that need attention in other repos (dataraum-eval
 calibration, dataraum-context engine). Newest first.
 
+## 2026-06-09: null_tokens family hardening — guard + clustered-decoy stress (DAT-450)
+
+Two follow-ups on the family below:
+- **Enforced ratio guard.** `NullTokenFamilyParams.__post_init__` now RAISES when
+  `marker_ratio[1] + decoy_ratio[1] > 0.12` — a strategy override can no longer
+  silently push a column below typing `min_confidence` (0.85) into VARCHAR, the way
+  the original 16% corruption did. The cap is the enforced version of the live-run
+  finding below.
+- **Clustered-decoy stress mode.** New `decoy_cluster_size` param: when set, decoys
+  are a small REPEATED is-value set (they cluster like markers) instead of distinct.
+  This lets the eval rig finally measure `quarantine_clustering`'s false-positive
+  rate — it votes is-null on any cluster, so it mistakes a recurring genuine value
+  for a sentinel (measured specificity 0). The live recall strategy leaves it unset
+  (distinct decoys); only the calibration corpus uses it.
+
 ## 2026-06-09: generative injection families — the family framework (DAT-450)
 
 ADR-0009: "fixed fixtures are dead." A strategy now declares a **family** + a

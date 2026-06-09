@@ -101,6 +101,15 @@ def mint_decoy(rng: random.Random, style: str) -> str:
 # --- the null_tokens family ------------------------------------------------
 
 
+# A corrupted column only infers a numeric type — and thus quarantines its tokens
+# for null_semantics to adjudicate — when parse_success ≥ min_confidence (0.85,
+# phases/typing.yaml). parse_success ≈ 1 − (marker + decoy ratio), so the COMBINED
+# upper bound is capped here, leaving ≥0.88 parse (a margin over 0.85). Enforced,
+# not just documented: at 16% corruption journal_lines.debit fell to VARCHAR and the
+# adjudication was silently skipped (DAT-450 live-run finding).
+_MAX_COMBINED_RATIO = 0.12
+
+
 @dataclass(frozen=True)
 class NullTokenFamilyParams:
     """The parameter space the null_tokens generator samples from.
@@ -110,16 +119,24 @@ class NullTokenFamilyParams:
     """
 
     n_markers: tuple[int, int] = (2, 6)          # distinct sentinel tokens (small → cluster)
-    # marker + decoy together are the column's cast-failure rate; the typing phase
-    # only infers a numeric type (and thus quarantines the tokens for null_semantics
-    # to adjudicate) when parse_success ≥ min_confidence (0.85, phases/typing.yaml).
-    # So the COMBINED ratio is capped well under 0.15 — else the column falls back to
-    # VARCHAR, never quarantines, and the adjudication never runs (live-run finding,
-    # DAT-450: at 16% corruption journal_lines.debit dropped to VARCHAR and was skipped).
     marker_ratio: tuple[float, float] = (0.05, 0.075)  # fraction of rows replaced by a marker
     decoy_ratio: tuple[float, float] = (0.015, 0.025)  # fraction replaced by a genuine decoy
     vocab_coverage: tuple[float, float] = (0.2, 0.8)   # fraction of markers in the curated vocab
     decoy_style: str | None = None               # fixed style, or None → sampled per instance
+    # None → decoys are minted DISTINCT (count 1, they smear). A (lo, hi) range →
+    # decoys are a small CLUSTERED is-value set of that many distinct values,
+    # repeated — the stress mode that lets the rig measure quarantine_clustering's
+    # false-positive rate (does it mistake a recurring genuine value for a sentinel?).
+    decoy_cluster_size: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        worst = self.marker_ratio[1] + self.decoy_ratio[1]
+        if worst > _MAX_COMBINED_RATIO:
+            raise ValueError(
+                f"null_tokens family: combined marker+decoy upper bound {worst:.3f} exceeds "
+                f"{_MAX_COMBINED_RATIO} — the corrupted column would parse below typing "
+                "min_confidence (0.85) and fall back to VARCHAR, so null_semantics never runs."
+            )
 
 
 @dataclass(frozen=True)
@@ -137,6 +154,9 @@ class NullTokenFamilySample:
     decoy_style: str
     marker_ratio: float
     decoy_ratio: float
+    # 0 → decoys are distinct (smear); >0 → a clustered is-value set of this many
+    # distinct decoys, repeated (the quarantine-specificity stress mode).
+    decoy_cluster_size: int = 0
 
     @property
     def vocab_coverage(self) -> float:
@@ -171,6 +191,7 @@ def sample_null_token_family(
 
     markers = tuple(in_vocab) + tuple(novel)
     decoy_style = p.decoy_style or _DECOY_STYLES[rng.randrange(len(_DECOY_STYLES))]
+    cluster_size = rng.randint(*p.decoy_cluster_size) if p.decoy_cluster_size else 0
     return NullTokenFamilySample(
         seed=seed,
         markers=markers,
@@ -178,6 +199,7 @@ def sample_null_token_family(
         decoy_style=decoy_style,
         marker_ratio=round(rng.uniform(*p.marker_ratio), 4),
         decoy_ratio=round(rng.uniform(*p.decoy_ratio), 4),
+        decoy_cluster_size=cluster_size,
     )
 
 

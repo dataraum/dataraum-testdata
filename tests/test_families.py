@@ -9,6 +9,7 @@ the calibration rig scores witnesses against.
 import random
 
 import polars as pl
+import pytest
 
 from testdata.entropy.families import (
     CURATED_VOCAB,
@@ -46,6 +47,21 @@ def test_sample_is_well_formed() -> None:
         # Combined cast-failure rate stays under the typing min_confidence margin
         # (0.85) so the corrupted column still infers numeric and quarantines.
         assert fam.marker_ratio + fam.decoy_ratio <= 0.10
+
+
+def test_combined_ratio_guard_rejects_over_the_typing_threshold() -> None:
+    # A strategy override that would push the corrupted column below typing
+    # min_confidence (0.85) — and thus to VARCHAR, never quarantined — is rejected
+    # at construction, not silently shipped (the DAT-450 live-run failure mode).
+    with pytest.raises(ValueError, match="min_confidence"):
+        NullTokenFamilyParams(marker_ratio=(0.05, 0.12), decoy_ratio=(0.02, 0.05))  # upper 0.17
+    NullTokenFamilyParams()  # defaults (0.075 + 0.025 = 0.10) are safe → no raise
+
+
+def test_decoy_cluster_size_zero_by_default_and_sampled_when_set() -> None:
+    assert sample_null_token_family(5).decoy_cluster_size == 0  # distinct decoys (smear)
+    stress = sample_null_token_family(5, NullTokenFamilyParams(decoy_cluster_size=(2, 4)))
+    assert 2 <= stress.decoy_cluster_size <= 4  # clustered is-value stress mode
 
 
 def test_params_override_the_space() -> None:
