@@ -15,6 +15,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from .models import (
     AccountType,
+    BalanceSheet,
     BankTransaction,
     ChartOfAccounts,
     Currency,
@@ -981,6 +982,68 @@ def _derive_trial_balance(
     return result
 
 
+def _derive_balance_sheet(
+    all_entries: list[JournalEntry],
+    all_lines: list[JournalLine],
+    chart: list[ChartOfAccounts],
+) -> list[BalanceSheet]:
+    """Build point-in-time balances for balance-sheet accounts — a STOCK.
+
+    For each balance-sheet account (asset/liability/equity) the ``ending_balance``
+    is the running cumulative net movement (debit − credit), carried forward across
+    EVERY period from the account's first activity onward — including periods with
+    no movement (the balance persists). This is the carry-forward level that makes
+    the column a stock, the structural opposite of ``trial_balance`` (per-period flow).
+    """
+    balance_sheet_accounts = {
+        c.account_id
+        for c in chart
+        if c.account_type in (AccountType.ASSET, AccountType.LIABILITY, AccountType.EQUITY)
+    }
+
+    entry_info = {e.entry_id: (e.date, e.status) for e in all_entries}
+
+    # Per-period NET movement (debit − credit) by account, posted entries only.
+    period_net: dict[tuple[str, str], Decimal] = {}
+    all_periods: set[str] = set()
+    for line in all_lines:
+        info = entry_info.get(line.entry_id)
+        if info is None:
+            continue
+        entry_date, status = info
+        if status != JournalStatus.POSTED:
+            continue
+        if line.account_id not in balance_sheet_accounts:
+            continue
+        period_str = entry_date.strftime("%Y-%m")
+        all_periods.add(period_str)
+        key = (line.account_id, period_str)
+        period_net[key] = period_net.get(key, Decimal("0")) + line.debit - line.credit
+
+    periods_sorted = sorted(all_periods)
+
+    result: list[BalanceSheet] = []
+    for acct in sorted(balance_sheet_accounts):
+        # Skip accounts with no activity at all.
+        first_idx = next(
+            (i for i, p in enumerate(periods_sorted) if (acct, p) in period_net),
+            None,
+        )
+        if first_idx is None:
+            continue
+        running = Decimal("0")
+        # Carry forward across every period from first activity onward (dense).
+        for period_str in periods_sorted[first_idx:]:
+            running += period_net.get((acct, period_str), Decimal("0"))
+            result.append(BalanceSheet(
+                account_id=acct,
+                period=period_str,
+                ending_balance=_quantize(running),
+            ))
+
+    return result
+
+
 # --- Main Generator ---
 
 def generate_finance_dataset(
@@ -1067,8 +1130,10 @@ def generate_finance_dataset(
     all_entries.sort(key=lambda e: (e.date, e.entry_id))
     all_bank.sort(key=lambda t: (t.date, t.txn_id))
 
-    # Derive trial balance from actual cumulative GL entries
+    # Derive trial balance (per-period movement, a flow) from actual GL entries
     trial_bal = _derive_trial_balance(all_entries, all_lines, fiscal_start, months)
+    # Derive balance sheet (carry-forward ending balance, a stock) for BS accounts
+    balance_sheet = _derive_balance_sheet(all_entries, all_lines, chart)
 
     return FinanceDataset(
         chart_of_accounts=chart,
@@ -1079,4 +1144,5 @@ def generate_finance_dataset(
         bank_transactions=all_bank,
         fx_rates=fx_rates,
         trial_balance=trial_bal,
+        balance_sheet=balance_sheet,
     )

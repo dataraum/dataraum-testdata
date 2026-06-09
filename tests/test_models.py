@@ -95,6 +95,6 @@ def test_finance_dataset_container():
     ds = FinanceDataset(
         chart_of_accounts=[], journal_entries=[], journal_lines=[],
         invoices=[], payments=[], bank_transactions=[],
-        fx_rates=[], trial_balance=[],
+        fx_rates=[], trial_balance=[], balance_sheet=[],
     )
     assert len(ds.chart_of_accounts) == 0

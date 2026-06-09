@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 
 from testdata.canonical.finance.generators import generate_finance_dataset
-from testdata.canonical.finance.models import JournalStatus
+from testdata.canonical.finance.models import AccountType, JournalStatus
 
 
 @functools.lru_cache(maxsize=4)
@@ -141,6 +141,67 @@ def test_trial_balance_derived_from_gl():
         assert tb_credits.get(acct, Decimal("0")) == account_credits.get(acct, Decimal("0")).quantize(Decimal("0.01")), (
             f"Account {acct}: TB credit {tb_credits.get(acct, Decimal('0'))} != GL credit {account_credits.get(acct, Decimal('0'))}"
         )
+
+
+def test_balance_sheet_is_carry_forward_stock():
+    """balance_sheet.ending_balance is a STOCK: Δ per period == GL net movement.
+
+    The defining property the temporal_behavior reconciliation witness keys on —
+    the change in the carried-forward level equals that period's net movement
+    (debit − credit), so the column reconciles as a stock (not a per-period flow).
+    """
+    ds = _dataset()
+    assert ds.balance_sheet, "balance_sheet must be populated"
+
+    # Only balance-sheet accounts (asset/liability/equity) appear.
+    bs_accounts = {
+        c.account_id
+        for c in ds.chart_of_accounts
+        if c.account_type in (AccountType.ASSET, AccountType.LIABILITY, AccountType.EQUITY)
+    }
+    assert {b.account_id for b in ds.balance_sheet} <= bs_accounts
+
+    # Independent per-period net movement (debit − credit) from POSTED GL.
+    entry_period = {
+        e.entry_id: (e.date.strftime("%Y-%m"), e.status) for e in ds.journal_entries
+    }
+    gl_net: dict[tuple[str, str], Decimal] = {}
+    for line in ds.journal_lines:
+        info = entry_period.get(line.entry_id)
+        if info is None or info[1] != JournalStatus.POSTED:
+            continue
+        period, _ = info
+        key = (line.account_id, period)
+        gl_net[key] = gl_net.get(key, Decimal("0")) + line.debit - line.credit
+
+    # Per account, ending_balance must carry forward: ending[t] − ending[t-1] == net[t].
+    by_acct: dict[str, list] = {}
+    for b in ds.balance_sheet:
+        by_acct.setdefault(b.account_id, []).append(b)
+    checked = 0
+    for acct, rows in by_acct.items():
+        rows.sort(key=lambda b: b.period)
+        prev = Decimal("0")
+        for b in rows:
+            delta = b.ending_balance - prev
+            expected = gl_net.get((acct, b.period), Decimal("0")).quantize(Decimal("0.01"))
+            assert delta == expected, (
+                f"{acct} {b.period}: Δending {delta} != GL net {expected} (not carry-forward)"
+            )
+            prev = b.ending_balance
+            checked += 1
+    assert checked >= 50
+
+
+def test_balance_sheet_persists_across_no_activity_periods():
+    """A stock carries forward even when a period has no movement (dense periods)."""
+    ds = _dataset()
+    by_acct: dict[str, list] = {}
+    for b in ds.balance_sheet:
+        by_acct.setdefault(b.account_id, []).append(b)
+    # At least one account must span contiguous periods with no gaps (dense carry-forward).
+    spanned = max(len(rows) for rows in by_acct.values())
+    assert spanned >= 6, "expected dense per-period balances for active BS accounts"
 
 
 def test_trial_balance_balanced():

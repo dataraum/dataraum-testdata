@@ -133,6 +133,23 @@ class TrialBalance(BaseModel):
     credit_balance: Decimal = Field(default=Decimal("0.00"))
 
 
+class BalanceSheet(BaseModel):
+    """Point-in-time net balances for balance-sheet accounts — a STOCK.
+
+    Unlike ``TrialBalance`` (per-period movement, a flow), ``ending_balance`` is a
+    carry-forward level: ``ending_balance[period] = ending_balance[period-1] +
+    net movement[period]`` (cumulative debit − credit). It persists across
+    no-activity periods. Balance-sheet accounts only (asset/liability/equity).
+    """
+
+    account_id: str = Field(description="FK to ChartOfAccounts (balance-sheet accounts only)")
+    period: str = Field(description="Period identifier, e.g. '2025-01'")
+    ending_balance: Decimal = Field(
+        default=Decimal("0.00"),
+        description="Cumulative net balance (debit − credit) carried forward across periods",
+    )
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -144,3 +161,4 @@ class FinanceDataset(BaseModel):
     bank_transactions: list[BankTransaction]
     fx_rates: list[FXRate]
     trial_balance: list[TrialBalance]
+    balance_sheet: list[BalanceSheet]
