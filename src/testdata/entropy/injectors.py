@@ -928,6 +928,7 @@ def inject_stock_flow_probes(
     rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
     n_columns: list[int] | None = None,
     stock_fraction: list[float] | None = None,
+    ambiguity: list[float] | None = None,
     severity: str = "medium",
 ) -> pl.DataFrame:
     """Add SAMPLED clearly-named stock/flow measure columns to the probe table (DAT-445).
@@ -945,6 +946,8 @@ def inject_stock_flow_probes(
         overrides["n_columns"] = tuple(n_columns)
     if stock_fraction is not None:
         overrides["stock_fraction"] = tuple(stock_fraction)
+    if ambiguity is not None:
+        overrides["ambiguity"] = tuple(ambiguity)
     sample = sample_stock_flow_family(seed, StockFlowFamilyParams(**overrides))  # type: ignore[arg-type]
 
     n = len(df)
