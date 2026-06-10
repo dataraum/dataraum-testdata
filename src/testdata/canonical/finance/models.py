@@ -150,6 +150,19 @@ class BalanceSheet(BaseModel):
     )
 
 
+class MeasureProbe(BaseModel):
+    """Skeleton grain for the stock/flow probe table (DAT-445).
+
+    A synthetic measures-over-time table: ``series_id`` × ``period`` rows that
+    ``inject_stock_flow_probes`` fills with clearly-named stock/flow measure columns
+    (the corpus for the temporal_behavior ``llm_claim`` witness + recall). Generated
+    only when a strategy injects into it; empty otherwise.
+    """
+
+    series_id: str = Field(description="Probe series identifier")
+    period: str = Field(description="Period identifier, e.g. '2025-01'")
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -162,3 +175,4 @@ class FinanceDataset(BaseModel):
     fx_rates: list[FXRate]
     trial_balance: list[TrialBalance]
     balance_sheet: list[BalanceSheet]
+    measure_probes: list[MeasureProbe] = []

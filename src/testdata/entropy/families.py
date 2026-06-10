@@ -251,3 +251,103 @@ def sample_mixed_units_family(
         scale_factor=rng.choice(p.scale_factors),
         mix_ratio=round(rng.uniform(*p.mix_ratio), 4),
     )
+
+
+# --- the stock/flow family (DAT-445) ---------------------------------------
+#
+# Feeds temporal_behavior (DAT-445): the two-witness stock/flow adjudication
+# (ontology prior vs LLM claim). Unlike the value-corruption families, the LABEL is
+# the column's semantics, not an injected token — each sample is a set of measure
+# columns, each (clear_name, is_stock). A STOCK is a carried-forward point-in-time
+# level (a balance/position that must NOT be summed across periods); a FLOW is a
+# per-period movement (a transaction amount that accumulates). The clear name carries
+# the signal — the LLM's job is to read the behaviour from it (kill-gate v3: the LLM
+# is name-anchored, so a clear name yields the true read), and the rig scores that
+# read to measure the llm_claim witness's reliability. The two name vocabularies are
+# DELIBERATELY DISJOINT (no shared word like "total"/"net") so a clear name is
+# genuinely clear; the e2e measures the LLM's accuracy on exactly these.
+
+# Stock name pieces — a carried-forward LEVEL.
+_STOCK_NOUNS: tuple[str, ...] = (
+    "inventory", "cash", "receivables", "payables", "debt", "equity",
+    "reserve", "headcount", "asset", "provision",
+)
+_STOCK_TEMPLATES: tuple[str, ...] = (
+    "{n}_balance", "closing_{n}", "ending_{n}", "opening_{n}", "{n}_on_hand",
+    "outstanding_{n}", "{n}_level", "{n}_position",
+)
+# Flow name pieces — a per-period MOVEMENT.
+_FLOW_NOUNS: tuple[str, ...] = (
+    "revenue", "sales", "units", "interest", "expense", "deposits",
+    "withdrawals", "spend", "shipments", "payouts",
+)
+_FLOW_TEMPLATES: tuple[str, ...] = (
+    "monthly_{n}", "weekly_{n}", "period_{n}", "{n}_paid", "{n}_sold",
+    "{n}_movement", "{n}_volume", "{n}_amount",
+)
+
+
+@dataclass(frozen=True)
+class StockFlowFamilyParams:
+    """The parameter space the stock/flow generator samples from."""
+
+    n_columns: tuple[int, int] = (8, 14)  # measure columns per probe table
+    stock_fraction: tuple[float, float] = (0.4, 0.6)  # fraction that are stocks
+
+
+@dataclass(frozen=True)
+class ProbeColumn:
+    """One labelled measure column: a clear name + its true temporal behaviour."""
+
+    name: str
+    is_stock: bool  # True → stock (point_in_time), False → flow (additive)
+
+
+@dataclass(frozen=True)
+class StockFlowFamilySample:
+    """One concrete, fully-labelled draw: the measure columns for a probe table."""
+
+    seed: int
+    columns: tuple[ProbeColumn, ...]
+
+
+def _probe_name(rng: random.Random, *, is_stock: bool) -> str:
+    nouns, templates = (
+        (_STOCK_NOUNS, _STOCK_TEMPLATES) if is_stock else (_FLOW_NOUNS, _FLOW_TEMPLATES)
+    )
+    return templates[rng.randrange(len(templates))].format(n=nouns[rng.randrange(len(nouns))])
+
+
+def sample_stock_flow_family(
+    seed: int, params: StockFlowFamilyParams | None = None
+) -> StockFlowFamilySample:
+    """Sample one labelled stock/flow instance — deterministic in ``seed``.
+
+    Draws ``n_columns`` measure columns, ``stock_fraction`` of them stocks, each with a
+    UNIQUE clear name from the disjoint stock/flow vocabularies. Different seeds → a
+    different name set (surface varies, no memorizable fixture); the same seed
+    reproduces exactly (AC1). The label (``is_stock``) is the ground truth the rig
+    scores the LLM's stock/flow read against.
+    """
+    p = params or StockFlowFamilyParams()
+    rng = random.Random(f"stock_flow:{seed}")
+
+    n = rng.randint(*p.n_columns)
+    n_stock = max(1, min(n - 1, round(n * rng.uniform(*p.stock_fraction))))
+    flags = [True] * n_stock + [False] * (n - n_stock)
+    rng.shuffle(flags)
+
+    columns: list[ProbeColumn] = []
+    seen: set[str] = set()
+    for is_stock in flags:
+        name = _probe_name(rng, is_stock=is_stock)
+        guard = 0
+        while name in seen and guard < 50:
+            name = _probe_name(rng, is_stock=is_stock)
+            guard += 1
+        if name in seen:  # vocabulary exhausted for this label — skip the dup
+            continue
+        seen.add(name)
+        columns.append(ProbeColumn(name=name, is_stock=is_stock))
+
+    return StockFlowFamilySample(seed=seed, columns=tuple(columns))

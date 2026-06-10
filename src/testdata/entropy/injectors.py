@@ -12,9 +12,11 @@ import polars as pl
 
 from .families import (
     NullTokenFamilyParams,
+    StockFlowFamilyParams,
     mint_decoy,
     sample_mixed_units_family,
     sample_null_token_family,
+    sample_stock_flow_family,
 )
 from .registry import EntropyInjection, InjectionRegistry
 
@@ -894,3 +896,84 @@ def create_mutual_exclusivity(
         severity=severity,
     ))
     return df
+
+
+def _stock_values(series: list[str], rng: random.Random) -> list[float]:
+    """A carried-forward LEVEL: per series, a running cumulative across its ordered rows.
+
+    Relies on the probe table being in ``(series, period)`` row order (the skeleton
+    generator guarantees it), so each series accumulates in period order — the
+    structural signature of a stock that must not be summed across periods.
+    """
+    running: dict[str, float] = {}
+    out: list[float] = []
+    for sid in series:
+        base = running.get(sid, round(rng.uniform(500, 5000), 2))  # opening level
+        base = round(base + rng.uniform(-200, 300), 2)  # carry forward + small net movement
+        running[sid] = base
+        out.append(base)
+    return out
+
+
+def _flow_values(n: int, rng: random.Random) -> list[float]:
+    """A per-period MOVEMENT: independent positive per-row amounts (summable across periods)."""
+    return [round(rng.uniform(10, 2000), 2) for _ in range(n)]
+
+
+def inject_stock_flow_probes(
+    df: pl.DataFrame,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    n_columns: list[int] | None = None,
+    stock_fraction: list[float] | None = None,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Add SAMPLED clearly-named stock/flow measure columns to the probe table (DAT-445).
+
+    Each sampled ``ProbeColumn`` becomes one measure column: a STOCK is a carried-forward
+    level (a per-series running cumulative across periods), a FLOW is a per-period
+    movement (independent per-row amounts). The clear name carries the stock/flow signal
+    — the LLM's job is to read the behaviour from it — and each column is recorded with
+    its ``is_stock`` label, the ground truth the temporal_behavior ``llm_claim`` witness
+    is scored against (DAT-450 rig). Surface varies by ``seed``; the recorded seed
+    reproduces exactly and is independent of injection order (its own RNG).
+    """
+    overrides: dict[str, object] = {}
+    if n_columns is not None:
+        overrides["n_columns"] = tuple(n_columns)
+    if stock_fraction is not None:
+        overrides["stock_fraction"] = tuple(stock_fraction)
+    sample = sample_stock_flow_family(seed, StockFlowFamilyParams(**overrides))  # type: ignore[arg-type]
+
+    n = len(df)
+    series = df["series_id"].to_list() if "series_id" in df.columns else ["S000"] * n
+    place = random.Random(f"stock_flow_values:{seed}")  # seed-derived, order-independent
+
+    additions: list[pl.Series] = []
+    for col in sample.columns:
+        values = _stock_values(series, place) if col.is_stock else _flow_values(n, place)
+        additions.append(pl.Series(col.name, values))
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("STOCKFLOW"),
+                target_file=f"{table_name}.csv",
+                target_column=col.name,
+                target_rows=list(range(n)),
+                layer="semantic",
+                dimension="temporal",
+                sub_dimension="temporal_behavior",
+                detector_id="temporal_behavior",
+                injection_type="inject_stock_flow_probes",
+                parameters={
+                    "family": "stock_flow",
+                    "seed": seed,
+                    "name": col.name,
+                    "is_stock": col.is_stock,
+                    "true_behavior": "stock" if col.is_stock else "flow",
+                },
+                severity=severity,
+            )
+        )
+    return df.with_columns(*additions)

@@ -48,7 +48,7 @@ def test_export_creates_files():
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
         assert manifest["generator"] == "dataraum-testdata"
-        assert len(manifest["files"]) == 8
+        assert len(manifest["files"]) == 9  # 8 canonical tables + balance_sheet
 
         # Verify entropy map has injections
         with open(output / "entropy_map.yaml") as f:

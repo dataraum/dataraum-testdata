@@ -35,7 +35,7 @@ def test_erp_uses_partial_normalization():
     assert "journal_entries" not in tables
     assert "invoices" not in tables
     assert "payments" not in tables
-    assert len(tables) == 6  # partial produces 6 tables
+    assert len(tables) == 7  # partial: 6 + balance_sheet (a standalone period table)
 
 
 def test_erp_export_creates_files():
@@ -54,7 +54,7 @@ def test_erp_export_creates_files():
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
         assert manifest["parameters"]["scenario"] == "erp-migration"
-        assert len(manifest["files"]) == 6  # partial normalization
+        assert len(manifest["files"]) == 7  # partial normalization + balance_sheet
 
 
 def test_erp_deterministic():

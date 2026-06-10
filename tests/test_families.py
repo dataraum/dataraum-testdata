@@ -14,11 +14,17 @@ import pytest
 from testdata.entropy.families import (
     CURATED_VOCAB,
     NullTokenFamilyParams,
+    StockFlowFamilyParams,
     mint_decoy,
     sample_mixed_units_family,
     sample_null_token_family,
+    sample_stock_flow_family,
 )
-from testdata.entropy.injectors import inject_null_token_family, inject_scale_mix
+from testdata.entropy.injectors import (
+    inject_null_token_family,
+    inject_scale_mix,
+    inject_stock_flow_probes,
+)
 from testdata.entropy.registry import InjectionRegistry
 
 
@@ -151,3 +157,79 @@ def test_injection_is_reproducible_from_the_seed() -> None:
 
     # The shared `rng` differs between runs; the family seed fixes the result.
     assert run() == run()
+
+
+# --- stock/flow family (DAT-445) -------------------------------------------
+
+
+def test_stock_flow_family_reproduces_and_varies() -> None:
+    assert sample_stock_flow_family(7) == sample_stock_flow_family(7)  # recorded seed reproduces
+    name_sets = {
+        tuple(c.name for c in sample_stock_flow_family(s).columns) for s in range(40)
+    }
+    assert len(name_sets) > 30  # different seeds → a different name surface
+
+
+def test_stock_flow_sample_is_well_formed() -> None:
+    for s in range(40):
+        fam = sample_stock_flow_family(s)
+        names = [c.name for c in fam.columns]
+        assert names == list(dict.fromkeys(names))  # names unique within a draw
+        labels = {c.is_stock for c in fam.columns}
+        assert labels == {True, False}  # both classes present (n>=2, mixed)
+        # The disjoint vocabularies make a label readable from the name: every stock
+        # name contains a stock noun, every flow name a flow noun, never the other.
+        for c in fam.columns:
+            stocky = any(w in c.name for w in ("balance", "inventory", "cash", "on_hand",
+                                               "outstanding", "level", "position", "closing",
+                                               "ending", "opening", "headcount", "reserve"))
+            flowy = any(w in c.name for w in ("monthly", "weekly", "period", "paid", "sold",
+                                              "movement", "volume", "amount", "revenue",
+                                              "sales", "deposits", "withdrawals"))
+            if c.is_stock:
+                assert stocky and not flowy, f"stock name leaked a flow word: {c.name}"
+            else:
+                assert flowy and not stocky, f"flow name leaked a stock word: {c.name}"
+
+
+def test_stock_flow_params_override_the_space() -> None:
+    fam = sample_stock_flow_family(3, StockFlowFamilyParams(n_columns=(20, 20), stock_fraction=(0.5, 0.5)))
+    assert len(fam.columns) <= 20  # may dedup below n; never above
+    n_stock = sum(c.is_stock for c in fam.columns)
+    assert 0 < n_stock < len(fam.columns)  # mixed
+
+
+def test_inject_stock_flow_probes_adds_labelled_columns() -> None:
+    df = pl.DataFrame(
+        {
+            "series_id": [f"S{(i // 6):03d}" for i in range(18)],
+            "period": [f"2025-{(i % 6) + 1:02d}" for i in range(18)],
+        }
+    )
+    reg = InjectionRegistry()
+    out = inject_stock_flow_probes(
+        df, seed=20260610, registry=reg, table_name="measure_probes", rng=random.Random(0)
+    )
+    assert reg.injections
+    for inj in reg.injections:
+        assert inj.detector_id == "temporal_behavior"
+        assert inj.injection_type == "inject_stock_flow_probes"
+        assert inj.parameters["true_behavior"] in ("stock", "flow")
+        assert inj.target_column in out.columns  # the measure column was added
+        assert inj.target_column not in ("series_id", "period")  # grain preserved
+    assert {"series_id", "period"} <= set(out.columns)
+    behaviours = {inj.parameters["true_behavior"] for inj in reg.injections}
+    assert behaviours == {"stock", "flow"}  # both classes present
+
+
+def test_inject_stock_flow_probes_is_reproducible_from_the_seed() -> None:
+    df = pl.DataFrame({"series_id": ["S000"] * 12, "period": [f"2025-{m + 1:02d}" for m in range(12)]})
+
+    def run(shared_seed: int) -> pl.DataFrame:
+        return inject_stock_flow_probes(
+            df, seed=42, registry=InjectionRegistry(), table_name="measure_probes",
+            rng=random.Random(shared_seed),
+        )
+
+    # The shared rng differs; the family seed fixes the columns AND the values.
+    assert run(1).equals(run(2))

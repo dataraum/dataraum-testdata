@@ -26,6 +26,7 @@ from .models import (
     JournalEntry,
     JournalLine,
     JournalStatus,
+    MeasureProbe,
     Payment,
     PaymentMethod,
     PaymentTerms,
@@ -1044,6 +1045,26 @@ def _derive_balance_sheet(
     return result
 
 
+def _generate_measure_probes(
+    months: int, fiscal_start: date, n_series: int
+) -> list[MeasureProbe]:
+    """Skeleton ``(series_id, period)`` grain for the stock/flow probe table (DAT-445).
+
+    ``n_series`` synthetic series × ``months`` periods — the grain that
+    ``inject_stock_flow_probes`` fills with stock/flow measure columns. Rows are in
+    ``(series, period)`` order so a stock column's per-series running total accumulates
+    in row order. Empty when ``n_series == 0`` (no stock/flow strategy active).
+    """
+    if n_series <= 0:
+        return []
+    periods = [_month_start_end(fiscal_start, m)[0].strftime("%Y-%m") for m in range(months)]
+    return [
+        MeasureProbe(series_id=f"S{s:03d}", period=period)
+        for s in range(n_series)
+        for period in periods
+    ]
+
+
 # --- Main Generator ---
 
 def generate_finance_dataset(
@@ -1052,6 +1073,7 @@ def generate_finance_dataset(
     fiscal_start: date | None = None,
     invoices_count: int | None = None,
     q4_seasonal_boost: float | None = None,
+    probe_series: int = 0,
     **_kwargs: object,
 ) -> FinanceDataset:
     """Generate a complete finance dataset with closed-loop accounting.
@@ -1134,6 +1156,8 @@ def generate_finance_dataset(
     trial_bal = _derive_trial_balance(all_entries, all_lines, fiscal_start, months)
     # Derive balance sheet (carry-forward ending balance, a stock) for BS accounts
     balance_sheet = _derive_balance_sheet(all_entries, all_lines, chart)
+    # Skeleton grain for the stock/flow probe table — empty unless a strategy needs it.
+    measure_probes = _generate_measure_probes(months, fiscal_start, probe_series)
 
     return FinanceDataset(
         chart_of_accounts=chart,
@@ -1145,4 +1169,5 @@ def generate_finance_dataset(
         fx_rates=fx_rates,
         trial_balance=trial_bal,
         balance_sheet=balance_sheet,
+        measure_probes=measure_probes,
     )

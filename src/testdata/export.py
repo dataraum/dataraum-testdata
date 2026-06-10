@@ -26,6 +26,7 @@ TABLE_NAMES: dict[str, str] = {
     "fx_rates": "fx_rates",
     "trial_balance": "trial_balance",
     "balance_sheet": "balance_sheet",
+    "measure_probes": "measure_probes",
 }
 
 
@@ -49,7 +50,8 @@ def dataset_to_dataframes(dataset: FinanceDataset) -> dict[str, pl.DataFrame]:
     for table_name, field_name in TABLE_NAMES.items():
         records = getattr(dataset, field_name)
         if not records:
-            result[table_name] = pl.DataFrame()
+            # An empty table (e.g. measure_probes when no stock/flow strategy is
+            # active) is omitted entirely rather than emitted as a headerless CSV.
             continue
 
         rows = [
