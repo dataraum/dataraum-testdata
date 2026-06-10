@@ -972,6 +972,7 @@ def inject_stock_flow_probes(
                     "name": col.name,
                     "is_stock": col.is_stock,
                     "true_behavior": "stock" if col.is_stock else "flow",
+                    "ambiguous": col.ambiguous,  # hard (conflicting-cue) vs clear regime
                 },
                 severity=severity,
             )

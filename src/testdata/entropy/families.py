@@ -293,14 +293,21 @@ class StockFlowFamilyParams:
 
     n_columns: tuple[int, int] = (8, 14)  # measure columns per probe table
     stock_fraction: tuple[float, float] = (0.4, 0.6)  # fraction that are stocks
+    # Fraction of columns given an AMBIGUOUS (conflicting-cue) name instead of a clear
+    # one — the debit_balance archetype: one stock cue + one flow cue, so the name does
+    # NOT reliably signal the behaviour. Default 0 = clear-only (the existing corpus); a
+    # strategy opts in to measure the llm_claim witness's reliability in the HARD regime
+    # (DAT-450) — where it genuinely fails, the boundary with the DAT-491 reality witness.
+    ambiguity: tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass(frozen=True)
 class ProbeColumn:
-    """One labelled measure column: a clear name + its true temporal behaviour."""
+    """One labelled measure column: a name + its true temporal behaviour."""
 
     name: str
     is_stock: bool  # True → stock (point_in_time), False → flow (additive)
+    ambiguous: bool = False  # True → a conflicting-cue (hard) name, not a clear one
 
 
 @dataclass(frozen=True)
@@ -311,11 +318,34 @@ class StockFlowFamilySample:
     columns: tuple[ProbeColumn, ...]
 
 
-def _probe_name(rng: random.Random, *, is_stock: bool) -> str:
+def _clear_name(rng: random.Random, *, is_stock: bool) -> str:
+    """A clear name: a noun + a structural template, both from one concern's vocabulary."""
     nouns, templates = (
         (_STOCK_NOUNS, _STOCK_TEMPLATES) if is_stock else (_FLOW_NOUNS, _FLOW_TEMPLATES)
     )
     return templates[rng.randrange(len(templates))].format(n=nouns[rng.randrange(len(nouns))])
+
+
+# Conflicting cues for AMBIGUOUS names: one stock-flavoured word + one flow-flavoured
+# word, so the name carries BOTH and signals neither (the debit_balance archetype).
+_STOCK_CUES: tuple[str, ...] = (
+    *_STOCK_NOUNS, "balance", "level", "position", "closing", "opening", "outstanding",
+)
+_FLOW_CUES: tuple[str, ...] = (*_FLOW_NOUNS, "monthly", "weekly", "movement", "volume", "paid")
+
+
+def _ambiguous_name(rng: random.Random) -> str:
+    """A conflicting-cue name, INDEPENDENT of the true behaviour — the hard regime.
+
+    One stock cue + one flow cue in random order (e.g. ``inventory_movement``,
+    ``sales_balance``): the name does not reliably indicate stock vs flow, so a
+    name-anchored LLM is right roughly by chance. The true behaviour is carried by the
+    VALUES, not the name — exactly the case where the ``llm_claim`` witness should be
+    UNreliable, which the rig then measures (rather than the best-case clear regime).
+    """
+    parts = [rng.choice(_STOCK_CUES), rng.choice(_FLOW_CUES)]
+    rng.shuffle(parts)
+    return f"{parts[0]}_{parts[1]}"
 
 
 def sample_stock_flow_family(
@@ -337,17 +367,21 @@ def sample_stock_flow_family(
     flags = [True] * n_stock + [False] * (n - n_stock)
     rng.shuffle(flags)
 
+    n_ambig = round(n * rng.uniform(*p.ambiguity))
+    ambig = [True] * n_ambig + [False] * (n - n_ambig)
+    rng.shuffle(ambig)
+
     columns: list[ProbeColumn] = []
     seen: set[str] = set()
-    for is_stock in flags:
-        name = _probe_name(rng, is_stock=is_stock)
-        guard = 0
-        while name in seen and guard < 50:
-            name = _probe_name(rng, is_stock=is_stock)
-            guard += 1
+    for is_stock, is_ambig in zip(flags, ambig, strict=True):
+        name = ""
+        for _ in range(50):
+            name = _ambiguous_name(rng) if is_ambig else _clear_name(rng, is_stock=is_stock)
+            if name not in seen:
+                break
         if name in seen:  # vocabulary exhausted for this label — skip the dup
             continue
         seen.add(name)
-        columns.append(ProbeColumn(name=name, is_stock=is_stock))
+        columns.append(ProbeColumn(name=name, is_stock=is_stock, ambiguous=is_ambig))
 
     return StockFlowFamilySample(seed=seed, columns=tuple(columns))

@@ -233,3 +233,26 @@ def test_inject_stock_flow_probes_is_reproducible_from_the_seed() -> None:
 
     # The shared rng differs; the family seed fixes the columns AND the values.
     assert run(1).equals(run(2))
+
+
+def test_stock_flow_ambiguity_produces_conflicting_cue_names() -> None:
+    fam = sample_stock_flow_family(5, StockFlowFamilyParams(n_columns=(20, 20), ambiguity=(0.5, 0.5)))
+    ambiguous = [c for c in fam.columns if c.ambiguous]
+    clear = [c for c in fam.columns if not c.ambiguous]
+    assert ambiguous and clear  # a mix of hard + clear columns
+    _STOCK_CUES = {
+        "balance", "level", "position", "closing", "opening", "outstanding",
+        "inventory", "cash", "receivables", "payables", "debt", "equity",
+        "reserve", "headcount", "asset", "provision",
+    }
+    _FLOW_CUES = {
+        "monthly", "weekly", "movement", "volume", "paid", "revenue", "sales",
+        "units", "interest", "expense", "deposits", "withdrawals", "spend",
+        "shipments", "payouts",
+    }
+    # An ambiguous name carries BOTH a stock cue and a flow cue → it signals neither.
+    for c in ambiguous:
+        parts = set(c.name.split("_"))
+        assert parts & _STOCK_CUES and parts & _FLOW_CUES, f"name not conflicting: {c.name}"
+    # Default params stay clear-only — the shipped corpus + its 100% clear-name result.
+    assert all(not c.ambiguous for c in sample_stock_flow_family(5).columns)
