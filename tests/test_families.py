@@ -569,7 +569,7 @@ def test_stock_flow_ambiguity_produces_conflicting_cue_names() -> None:
 # --- formula_divergence family (DAT-442, ADR-0009 derived-value) ------------
 
 
-def _probe_frame(n: int = 240) -> pl.DataFrame:
+def _formula_frame(n: int = 240) -> pl.DataFrame:
     return pl.DataFrame({"probe_id": [f"FP{i:05d}" for i in range(n)]})
 
 
@@ -633,7 +633,7 @@ def test_formula_divergence_guards_reject_degenerate_spaces() -> None:
 def test_inject_formula_divergence_values_follow_the_labels() -> None:
     reg = InjectionRegistry()
     out = inject_formula_divergence(
-        _probe_frame(), seed=20260611, registry=reg, table_name="formula_probes", rng=random.Random(0)
+        _formula_frame(), seed=20260611, registry=reg, table_name="formula_probes", rng=random.Random(0)
     )
     assert reg.injections
     modes = set()
@@ -671,7 +671,7 @@ def test_inject_formula_divergence_values_follow_the_labels() -> None:
 def test_inject_formula_divergence_preserves_grain_and_labels_targets_only() -> None:
     reg = InjectionRegistry()
     out = inject_formula_divergence(
-        _probe_frame(40), seed=9, registry=reg, table_name="formula_probes", rng=random.Random(0)
+        _formula_frame(40), seed=9, registry=reg, table_name="formula_probes", rng=random.Random(0)
     )
     assert "probe_id" in out.columns  # grain preserved
     targets = {inj.target_column for inj in reg.injections}
@@ -690,7 +690,7 @@ def test_inject_formula_divergence_preserves_grain_and_labels_targets_only() -> 
 def test_inject_formula_divergence_is_reproducible_from_the_seed() -> None:
     def run(shared_seed: int) -> pl.DataFrame:
         return inject_formula_divergence(
-            _probe_frame(60),
+            _formula_frame(60),
             seed=42,
             registry=InjectionRegistry(),
             table_name="formula_probes",
