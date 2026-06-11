@@ -163,14 +163,10 @@ def apply_key_strategy(
                 remap[col] = {v: rng.next() for v in unique_vals}
             elif strategy == "natural":
                 prefix = _NATURAL_KEYS.get(col, col.upper())
-                remap[col] = {
-                    v: _to_natural_key(v, prefix) for v in unique_vals
-                }
+                remap[col] = {v: _to_natural_key(v, prefix) for v in unique_vals}
             elif strategy == "composite":
                 # Composite: prefix with table context
-                remap[col] = {
-                    v: f"{table_name}::{v}" for v in unique_vals
-                }
+                remap[col] = {v: f"{table_name}::{v}" for v in unique_vals}
 
     # Apply remapping to all tables (both PK and FK columns)
     out: dict[str, pl.DataFrame] = {}
@@ -179,9 +175,12 @@ def apply_key_strategy(
             if col in remap:
                 mapping = remap[col]
                 df = df.with_columns(
-                    pl.col(col).replace_strict(
-                        mapping, default=pl.col(col),
-                    ).alias(col)
+                    pl.col(col)
+                    .replace_strict(
+                        mapping,
+                        default=pl.col(col),
+                    )
+                    .alias(col)
                 )
         out[table_name] = df
 
@@ -245,15 +244,23 @@ def pivot_journal_lines_wide(df: pl.DataFrame) -> pl.DataFrame:
     To:        line_id, entry_id, account_id, amount, side
     Where side is 'debit' or 'credit' and amount is the non-zero value.
     """
-    debit_rows = df.filter(pl.col("debit") > 0).with_columns(
-        pl.col("debit").alias("amount"),
-        pl.lit("debit").alias("side"),
-    ).drop("debit", "credit")
+    debit_rows = (
+        df.filter(pl.col("debit") > 0)
+        .with_columns(
+            pl.col("debit").alias("amount"),
+            pl.lit("debit").alias("side"),
+        )
+        .drop("debit", "credit")
+    )
 
-    credit_rows = df.filter(pl.col("credit") > 0).with_columns(
-        pl.col("credit").alias("amount"),
-        pl.lit("credit").alias("side"),
-    ).drop("debit", "credit")
+    credit_rows = (
+        df.filter(pl.col("credit") > 0)
+        .with_columns(
+            pl.col("credit").alias("amount"),
+            pl.lit("credit").alias("side"),
+        )
+        .drop("debit", "credit")
+    )
 
     return pl.concat([debit_rows, credit_rows]).sort("line_id")
 
@@ -300,6 +307,7 @@ def apply_normalization(
 # partial helpers
 # ---------------------------------------------------------------------------
 
+
 def _merge_journal_data(
     dfs: dict[str, pl.DataFrame],
     mapping: dict[str, str],
@@ -329,12 +337,14 @@ def _merge_invoice_data(
     payments = dfs.pop("payments")
 
     # Rename conflicting + ambiguous payment columns before join.
-    payments = payments.rename({
-        "date": "payment_date",
-        "amount": "payment_amount",
-        "currency": "payment_currency",
-        "method": "payment_method",
-    })
+    payments = payments.rename(
+        {
+            "date": "payment_date",
+            "amount": "payment_amount",
+            "currency": "payment_currency",
+            "method": "payment_method",
+        }
+    )
 
     invoice_data = invoices.join(payments, on="invoice_id", how="left")
 
@@ -348,6 +358,7 @@ def _merge_invoice_data(
 # flat helpers
 # ---------------------------------------------------------------------------
 
+
 def _inline_chart_of_accounts(
     dfs: dict[str, pl.DataFrame],
     mapping: dict[str, str],
@@ -358,11 +369,13 @@ def _inline_chart_of_accounts(
     coa = dfs.pop("chart_of_accounts")
 
     # Prepare CoA columns: rename to avoid conflicts.
-    coa_renamed = coa.rename({
-        "name": "account_name",
-        "parent_id": "parent_account_id",
-        "currency": "account_currency",
-    })
+    coa_renamed = coa.rename(
+        {
+            "name": "account_name",
+            "parent_id": "parent_account_id",
+            "currency": "account_currency",
+        }
+    )
 
     # general_ledger = journal_data LEFT JOIN coa ON account_id
     journal_data = dfs.pop("journal_data")
@@ -386,6 +399,7 @@ def _inline_chart_of_accounts(
 # ---------------------------------------------------------------------------
 # single helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_single_table(
     dfs: dict[str, pl.DataFrame],
@@ -427,9 +441,9 @@ def _build_single_table(
 
     # Drop the non-joinable period/lookup tables — they fold into the single table
     # conceptually (fx_rates, trial_balance, balance_sheet, and the stock/flow
-    # measure_probes when a strategy generated it). Without this, balance_sheet
-    # dangled and "single" produced two tables.
-    for name in ("fx_rates", "trial_balance", "balance_sheet", "measure_probes"):
+    # measure_probes + probe_events when a strategy generated them). Without this,
+    # balance_sheet dangled and "single" produced two tables.
+    for name in ("fx_rates", "trial_balance", "balance_sheet", "measure_probes", "probe_events"):
         if name in dfs:
             dfs.pop(name)
             mapping[name] = "mega_table"

@@ -35,22 +35,43 @@ are framework-ready but deferred until their witnesses land (DAT-446/428/445/473
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # --- marker grammar (is-null sentinels) ------------------------------------
 
 # Curated null markers — values the vertical's null vocabulary already knows.
 # Drawing in-vocab markers from this pool makes the vocabulary witness HIT them.
 _VOCAB_MARKERS: tuple[str, ...] = (
-    "N/A", "NA", "n/a", "NULL", "NONE", "NIL", "TBD", "-", "--", "?",
+    "N/A",
+    "NA",
+    "n/a",
+    "NULL",
+    "NONE",
+    "NIL",
+    "TBD",
+    "-",
+    "--",
+    "?",
 )
 
 # Novel-sentinel shapes the curated vocabulary has NOT seen — composed from
 # templates so the surface varies by seed (no memorizable fixed list).
 _STATUS_WORDS: tuple[str, ...] = (
-    "PENDING", "WITHHELD", "DISPUTED", "REDACTED", "UNKNOWN", "MISSING", "VOID",
-    "REVIEW", "UNCONFIRMED", "ONHOLD", "RESTRICTED", "DEFERRED", "QUERIED",
-    "SUPPRESSED", "OUTSTANDING",
+    "PENDING",
+    "WITHHELD",
+    "DISPUTED",
+    "REDACTED",
+    "UNKNOWN",
+    "MISSING",
+    "VOID",
+    "REVIEW",
+    "UNCONFIRMED",
+    "ONHOLD",
+    "RESTRICTED",
+    "DEFERRED",
+    "QUERIED",
+    "SUPPRESSED",
+    "OUTSTANDING",
 )
 _STATUS_TEMPLATES: tuple[str, ...] = ("{w}", "{w}...", "[{w}]", "({w})", "{w}*", "<{w}>")
 _ERR_CODES: tuple[str, ...] = ("ERR", "VALUE", "REF", "DIV/0", "CALC", "NAME")
@@ -66,9 +87,7 @@ def _novel_marker(rng: random.Random) -> str:
             w=_STATUS_WORDS[rng.randrange(len(_STATUS_WORDS))]
         )
     if kind == "err":
-        return _ERR_TEMPLATES[rng.randrange(len(_ERR_TEMPLATES))].format(
-            c=_ERR_CODES[rng.randrange(len(_ERR_CODES))]
-        )
+        return _ERR_TEMPLATES[rng.randrange(len(_ERR_TEMPLATES))].format(c=_ERR_CODES[rng.randrange(len(_ERR_CODES))])
     return _PUNCT_CHARS[rng.randrange(len(_PUNCT_CHARS))] * rng.randint(2, 5)
 
 
@@ -118,11 +137,11 @@ class NullTokenFamilyParams:
     A strategy may override any field; unset fields use these defaults.
     """
 
-    n_markers: tuple[int, int] = (2, 6)          # distinct sentinel tokens (small → cluster)
+    n_markers: tuple[int, int] = (2, 6)  # distinct sentinel tokens (small → cluster)
     marker_ratio: tuple[float, float] = (0.05, 0.075)  # fraction of rows replaced by a marker
     decoy_ratio: tuple[float, float] = (0.015, 0.025)  # fraction replaced by a genuine decoy
-    vocab_coverage: tuple[float, float] = (0.2, 0.8)   # fraction of markers in the curated vocab
-    decoy_style: str | None = None               # fixed style, or None → sampled per instance
+    vocab_coverage: tuple[float, float] = (0.2, 0.8)  # fraction of markers in the curated vocab
+    decoy_style: str | None = None  # fixed style, or None → sampled per instance
     # None → decoys are minted DISTINCT (count 1, they smear). A (lo, hi) range →
     # decoys are a small CLUSTERED is-value set of that many distinct values,
     # repeated — the stress mode that lets the rig measure quarantine_clustering's
@@ -163,9 +182,7 @@ class NullTokenFamilySample:
         return len(self.in_vocab_markers) / len(self.markers) if self.markers else 0.0
 
 
-def sample_null_token_family(
-    seed: int, params: NullTokenFamilyParams | None = None
-) -> NullTokenFamilySample:
+def sample_null_token_family(seed: int, params: NullTokenFamilyParams | None = None) -> NullTokenFamilySample:
     """Sample one labelled null_tokens instance — deterministic in ``seed``.
 
     Different seeds → different markers/decoys/rates (surface varies); the same
@@ -224,7 +241,7 @@ class MixedUnitsFamilyParams:
     """The parameter space the mixed_units (scale-mix) generator samples from."""
 
     scale_factors: tuple[int, ...] = _SCALE_FACTORS  # the alternate scale (a clean decade)
-    mix_ratio: tuple[float, float] = (0.15, 0.40)     # fraction of rows pushed to that scale
+    mix_ratio: tuple[float, float] = (0.15, 0.40)  # fraction of rows pushed to that scale
 
 
 @dataclass(frozen=True)
@@ -236,9 +253,7 @@ class MixedUnitsFamilySample:
     mix_ratio: float
 
 
-def sample_mixed_units_family(
-    seed: int, params: MixedUnitsFamilyParams | None = None
-) -> MixedUnitsFamilySample:
+def sample_mixed_units_family(seed: int, params: MixedUnitsFamilyParams | None = None) -> MixedUnitsFamilySample:
     """Sample one labelled mixed_units instance — deterministic in ``seed``.
 
     Different seeds → different scale factor + ratio (surface varies); the recorded
@@ -269,22 +284,69 @@ def sample_mixed_units_family(
 
 # Stock name pieces — a carried-forward LEVEL.
 _STOCK_NOUNS: tuple[str, ...] = (
-    "inventory", "cash", "receivables", "payables", "debt", "equity",
-    "reserve", "headcount", "asset", "provision",
+    "inventory",
+    "cash",
+    "receivables",
+    "payables",
+    "debt",
+    "equity",
+    "reserve",
+    "headcount",
+    "asset",
+    "provision",
 )
 _STOCK_TEMPLATES: tuple[str, ...] = (
-    "{n}_balance", "closing_{n}", "ending_{n}", "opening_{n}", "{n}_on_hand",
-    "outstanding_{n}", "{n}_level", "{n}_position",
+    "{n}_balance",
+    "closing_{n}",
+    "ending_{n}",
+    "opening_{n}",
+    "{n}_on_hand",
+    "outstanding_{n}",
+    "{n}_level",
+    "{n}_position",
 )
 # Flow name pieces — a per-period MOVEMENT.
 _FLOW_NOUNS: tuple[str, ...] = (
-    "revenue", "sales", "units", "interest", "expense", "deposits",
-    "withdrawals", "spend", "shipments", "payouts",
+    "revenue",
+    "sales",
+    "units",
+    "interest",
+    "expense",
+    "deposits",
+    "withdrawals",
+    "spend",
+    "shipments",
+    "payouts",
 )
 _FLOW_TEMPLATES: tuple[str, ...] = (
-    "monthly_{n}", "weekly_{n}", "period_{n}", "{n}_paid", "{n}_sold",
-    "{n}_movement", "{n}_volume", "{n}_amount",
+    "monthly_{n}",
+    "weekly_{n}",
+    "period_{n}",
+    "{n}_paid",
+    "{n}_sold",
+    "{n}_movement",
+    "{n}_volume",
+    "{n}_amount",
 )
+
+
+# Engine cap on event-side convention columns (dataraum.analysis.lineage.processor
+# MAX_CONVENTION_COLUMNS): an events table's numeric columns beyond the first 8
+# (sorted) are never enumerated as conventions, so a backed stock past the cap could
+# never reconcile. The sampler caps the backed set here so every backed label is
+# actually measurable.
+_MAX_BACKED_COLUMNS = 8
+
+
+def stock_flow_events_column(name: str) -> str:
+    """The probe_events column backing one stock measure column.
+
+    One numeric movements column per backed stock — the signed convention the engine's
+    aggregation-lineage discovery should find (``Σ events ≈ Δ stock`` per series/period).
+    Shared by the injector (which writes it) and recorded in the registry parameters
+    (``events_column``) as the rig's ground truth.
+    """
+    return f"{name}_delta"
 
 
 @dataclass(frozen=True)
@@ -299,6 +361,42 @@ class StockFlowFamilyParams:
     # strategy opts in to measure the llm_claim witness's reliability in the HARD regime
     # (DAT-450) — where it genuinely fails, the boundary with the DAT-491 reality witness.
     ambiguity: tuple[float, float] = (0.0, 0.0)
+    # --- events backing (DAT-491) --------------------------------------------------
+    # Fraction of STOCK columns backed by a probe_events movements table whose
+    # per-(series, period) sums reconcile to the stock's period-over-period deltas
+    # (opening + Σ events = closing) — the exact identity the temporal_behavior
+    # ``structural_reconciliation`` witness reads. Default 0 = no events table (the
+    # existing corpus); a calibration strategy opts in to measure that witness's
+    # reliability (its 0.85 in reliabilities.yaml is an uncalibrated placeholder
+    # precisely because the DAT-450 corpus has no events). Orthogonal to the name
+    # axes: backing changes the EVENTS, never the measure column's values or name.
+    backed_fraction: tuple[float, float] = (0.0, 0.0)
+    # Fraction of BACKED columns whose reconciliation is BROKEN: a sampled fraction of
+    # series gets per-period event sums perturbed off the stock's deltas — measures the
+    # witness's behaviour when the identity fails (it must degrade or abstain, never
+    # confidently confirm).
+    broken_fraction: tuple[float, float] = (0.0, 0.0)
+    # Per broken column: fraction of its series broken (≥1 series). Intact series still
+    # reconcile, so the engine's per-entity vote fraction (match_rate) degrades with it.
+    break_ratio: tuple[float, float] = (0.5, 1.0)
+    # Per broken column: relative size of the per-period perturbation, in units of the
+    # series' mean absolute movement — i.e. ≈ the per-entity stock residual R_stock the
+    # engine measures. The default range straddles the engine's FIRE_RESIDUAL_MAX = 0.5
+    # abstain gate (reconcile.py) from both sides, so the rig traces the full response:
+    # sub-gate breaks (entity still votes, residual elevated) through clear abstentions.
+    break_magnitude: tuple[float, float] = (0.3, 1.2)
+    # Events per (series, period) cell. Lower bound 2 keeps the events side STRICTLY
+    # finer-grained than the probe table (one row per cell), which the engine's
+    # lineage direction gate requires (event rows > measure rows over paired cells).
+    events_per_cell: tuple[int, int] = (2, 6)
+
+    def __post_init__(self) -> None:
+        if self.events_per_cell[0] < 2:
+            raise ValueError(
+                "stock_flow family: events_per_cell lower bound must be >= 2 — the engine's "
+                "aggregation-lineage direction gate needs the events side strictly finer-grained "
+                "than the probe table (one probe row per (series, period) cell)."
+            )
 
 
 @dataclass(frozen=True)
@@ -308,6 +406,11 @@ class ProbeColumn:
     name: str
     is_stock: bool  # True → stock (point_in_time), False → flow (additive)
     ambiguous: bool = False  # True → a conflicting-cue (hard) name, not a clear one
+    # --- events backing (DAT-491): the structural_reconciliation rig's ground truth ---
+    backed: bool = False  # True → probe_events carries this column's movements
+    broken: bool = False  # True → a sampled fraction of series does NOT reconcile
+    break_ratio: float = 0.0  # fraction of series broken (0.0 when not broken)
+    break_magnitude: float = 0.0  # perturbation in mean-|movement| units (≈ R_stock)
 
 
 @dataclass(frozen=True)
@@ -320,16 +423,20 @@ class StockFlowFamilySample:
 
 def _clear_name(rng: random.Random, *, is_stock: bool) -> str:
     """A clear name: a noun + a structural template, both from one concern's vocabulary."""
-    nouns, templates = (
-        (_STOCK_NOUNS, _STOCK_TEMPLATES) if is_stock else (_FLOW_NOUNS, _FLOW_TEMPLATES)
-    )
+    nouns, templates = (_STOCK_NOUNS, _STOCK_TEMPLATES) if is_stock else (_FLOW_NOUNS, _FLOW_TEMPLATES)
     return templates[rng.randrange(len(templates))].format(n=nouns[rng.randrange(len(nouns))])
 
 
 # Conflicting cues for AMBIGUOUS names: one stock-flavoured word + one flow-flavoured
 # word, so the name carries BOTH and signals neither (the debit_balance archetype).
 _STOCK_CUES: tuple[str, ...] = (
-    *_STOCK_NOUNS, "balance", "level", "position", "closing", "opening", "outstanding",
+    *_STOCK_NOUNS,
+    "balance",
+    "level",
+    "position",
+    "closing",
+    "opening",
+    "outstanding",
 )
 _FLOW_CUES: tuple[str, ...] = (*_FLOW_NOUNS, "monthly", "weekly", "movement", "volume", "paid")
 
@@ -348,9 +455,7 @@ def _ambiguous_name(rng: random.Random) -> str:
     return f"{parts[0]}_{parts[1]}"
 
 
-def sample_stock_flow_family(
-    seed: int, params: StockFlowFamilyParams | None = None
-) -> StockFlowFamilySample:
+def sample_stock_flow_family(seed: int, params: StockFlowFamilyParams | None = None) -> StockFlowFamilySample:
     """Sample one labelled stock/flow instance — deterministic in ``seed``.
 
     Draws ``n_columns`` measure columns, ``stock_fraction`` of them stocks, each with a
@@ -383,5 +488,24 @@ def sample_stock_flow_family(
             continue
         seen.add(name)
         columns.append(ProbeColumn(name=name, is_stock=is_stock, ambiguous=is_ambig))
+
+    # Events backing (DAT-491) — assigned on the FINAL column set (after name dedup),
+    # AFTER all name/label draws, so a recorded seed's name surface is unchanged by
+    # turning backing on. Only stocks can be backed (the witness's identity is
+    # opening + Σ events = closing); flows stay as they are.
+    stock_idx = [i for i, c in enumerate(columns) if c.is_stock]
+    n_backed = min(round(len(stock_idx) * rng.uniform(*p.backed_fraction)), _MAX_BACKED_COLUMNS)
+    backed_idx = sorted(rng.sample(stock_idx, n_backed)) if n_backed else []
+    n_broken = round(len(backed_idx) * rng.uniform(*p.broken_fraction))
+    broken_idx = set(rng.sample(backed_idx, n_broken)) if n_broken else set()
+    for i in backed_idx:
+        broken = i in broken_idx
+        columns[i] = replace(
+            columns[i],
+            backed=True,
+            broken=broken,
+            break_ratio=round(rng.uniform(*p.break_ratio), 4) if broken else 0.0,
+            break_magnitude=round(rng.uniform(*p.break_magnitude), 4) if broken else 0.0,
+        )
 
     return StockFlowFamilySample(seed=seed, columns=tuple(columns))
