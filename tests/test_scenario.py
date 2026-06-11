@@ -175,3 +175,42 @@ def test_baseline_strategies_skip_relationship_probes():
     result = run_scenario(strategy_name="medium", seed=42, months=3)
     assert "ref_entities" not in result["dataframes"]
     assert "ref_activity" not in result["dataframes"]
+
+
+_OVERRIDE_STRATEGY = """\
+name: override-multi-record-test
+level: high
+description: detector_id override must label EVERY record of a multi-record injection
+injections:
+  - injector: introduce_nulls
+    table: journal_lines
+    detector_id: null_ratio
+    params:
+      col: cost_center
+      ratio: 0.2
+  - injector: inject_stock_flow_probes
+    table: measure_probes
+    detector_id: custom_temporal_check
+    params:
+      seed: 7
+      n_columns: [8, 8]
+"""
+
+
+def test_detector_id_override_labels_every_record_of_the_injection():
+    """The strategy-YAML override applies to ALL records the injection produced —
+    the old [-1] patch labelled only the last probe column (lane F2 finding)."""
+    from testdata.scenarios.runner import run_scenario as run_any
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        strategy_path = Path(tmpdir) / "override.yaml"
+        strategy_path.write_text(_OVERRIDE_STRATEGY)
+        result = run_any("month-end-close", strategy_file=strategy_path, seed=7, months=3)
+
+    by_type: dict[str, set[str]] = {}
+    for inj in result["registry"].injections:
+        by_type.setdefault(inj.injection_type, set()).add(inj.detector_id)
+    assert by_type["inject_stock_flow_probes"] == {"custom_temporal_check"}
+    assert len([i for i in result["registry"].injections if i.injection_type == "inject_stock_flow_probes"]) == 8
+    # The earlier single-record injection keeps its own label untouched.
+    assert by_type["introduce_nulls"] == {"null_ratio"}

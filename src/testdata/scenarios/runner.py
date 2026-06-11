@@ -151,11 +151,16 @@ def _apply_injection(
     accepted = set(sig.parameters.keys()) - {"df"}
     kwargs = {k: v for k, v in all_kwargs.items() if k in accepted}
 
+    recorded_before = len(registry)
     dataframes[spec.table] = fn(df=df, **kwargs)
 
-    # Override detector_id if specified in the strategy YAML
-    if spec.detector_id is not None and len(registry) > 0:
-        registry._injections[-1].detector_id = spec.detector_id
+    # Override detector_id if specified in the strategy YAML — on EVERY record this
+    # injection produced. The old [-1] patch silently mislabelled multi-record
+    # injectors (one record per probe column/pair) and could clobber an unrelated
+    # injection's record when an injector recorded nothing (lane F2 finding).
+    if spec.detector_id is not None:
+        for injection in registry._injections[recorded_before:]:
+            injection.detector_id = spec.detector_id
 
 
 def run_scenario(
