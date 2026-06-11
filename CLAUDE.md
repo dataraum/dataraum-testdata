@@ -10,7 +10,7 @@ Synthetic test data generator with known entropy injections for calibrating data
 uv sync
 ```
 
-Requires Python 3.14+ (free-threaded). Uses `uv` as package manager.
+Requires Python 3.14+. Uses `uv` as package manager.
 
 ## Common commands
 
