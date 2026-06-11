@@ -13,10 +13,7 @@ def _find_project_root() -> Path:
     for parent in (current, *current.parents):
         if (parent / "config").is_dir():
             return parent
-    raise FileNotFoundError(
-        "Cannot locate project root — no 'config/' directory found "
-        f"above {current}"
-    )
+    raise FileNotFoundError(f"Cannot locate project root — no 'config/' directory found above {current}")
 
 
 def get_config_dir() -> Path:

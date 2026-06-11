@@ -14,16 +14,16 @@ class EntropyInjection:
     """Record of a single entropy injection applied to the dataset."""
 
     injection_id: str
-    target_file: str              # e.g., "journal_lines.csv"
+    target_file: str  # e.g., "journal_lines.csv"
     target_column: str
-    target_rows: list[int]        # Row indices affected
-    layer: str                    # structural | semantic | value | computational
+    target_rows: list[int]  # Row indices affected
+    layer: str  # structural | semantic | value | computational
     dimension: str
     sub_dimension: str
-    detector_id: str              # Which dataraum detector should catch this
-    injection_type: str           # e.g., "corrupt_type", "introduce_nulls"
+    detector_id: str  # Which dataraum detector should catch this
+    injection_type: str  # e.g., "corrupt_type", "introduce_nulls"
     parameters: dict[str, Any] = field(default_factory=dict)
-    severity: str = "medium"      # low | medium | high | critical
+    severity: str = "medium"  # low | medium | high | critical
 
 
 class InjectionRegistry:

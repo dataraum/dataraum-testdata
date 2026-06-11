@@ -126,9 +126,7 @@ def calculate_ground_truth(
         fiscal_start = date(2025, 1, 1)
 
     # Build entry lookup: entry_id -> (date, status)
-    entry_info = {
-        e.entry_id: (e.date, e.status) for e in dataset.journal_entries
-    }
+    entry_info = {e.entry_id: (e.date, e.status) for e in dataset.journal_entries}
 
     # Build period list
     periods: list[str] = []
@@ -155,12 +153,8 @@ def calculate_ground_truth(
             continue  # Outside fiscal year
 
         key = (period_str, line.account_id)
-        period_account_debits[key] = (
-            period_account_debits.get(key, Decimal("0")) + line.debit
-        )
-        period_account_credits[key] = (
-            period_account_credits.get(key, Decimal("0")) + line.credit
-        )
+        period_account_debits[key] = period_account_debits.get(key, Decimal("0")) + line.debit
+        period_account_credits[key] = period_account_credits.get(key, Decimal("0")) + line.credit
 
     # --- Monthly metrics ---
     cumulative_ar = Decimal("0")
@@ -195,67 +189,37 @@ def calculate_ground_truth(
 
         # Revenue: credits to revenue accounts
         revenue = Decimal("0")
-        for acct_id in _all_accounts_with_prefix(
-            period_account_credits, period_str, _REVENUE_PREFIX
-        ):
-            revenue += period_account_credits.get(
-                (period_str, acct_id), Decimal("0")
-            )
+        for acct_id in _all_accounts_with_prefix(period_account_credits, period_str, _REVENUE_PREFIX):
+            revenue += period_account_credits.get((period_str, acct_id), Decimal("0"))
 
         # Expenses: debits to expense accounts
         expenses = Decimal("0")
-        for acct_id in _all_accounts_with_prefix(
-            period_account_debits, period_str, _EXPENSE_PREFIX
-        ):
-            expenses += period_account_debits.get(
-                (period_str, acct_id), Decimal("0")
-            )
+        for acct_id in _all_accounts_with_prefix(period_account_debits, period_str, _EXPENSE_PREFIX):
+            expenses += period_account_debits.get((period_str, acct_id), Decimal("0"))
 
         # Balance sheet: cumulative
         for acct in _AR_ACCOUNTS:
-            cumulative_ar += period_account_debits.get(
-                (period_str, acct), Decimal("0")
-            )
-            cumulative_ar -= period_account_credits.get(
-                (period_str, acct), Decimal("0")
-            )
+            cumulative_ar += period_account_debits.get((period_str, acct), Decimal("0"))
+            cumulative_ar -= period_account_credits.get((period_str, acct), Decimal("0"))
 
         for acct in _AP_ACCOUNTS:
-            cumulative_ap += period_account_credits.get(
-                (period_str, acct), Decimal("0")
-            )
-            cumulative_ap -= period_account_debits.get(
-                (period_str, acct), Decimal("0")
-            )
+            cumulative_ap += period_account_credits.get((period_str, acct), Decimal("0"))
+            cumulative_ap -= period_account_debits.get((period_str, acct), Decimal("0"))
 
         for acct in _CASH_ACCOUNTS:
-            cumulative_cash += period_account_debits.get(
-                (period_str, acct), Decimal("0")
-            )
-            cumulative_cash -= period_account_credits.get(
-                (period_str, acct), Decimal("0")
-            )
+            cumulative_cash += period_account_debits.get((period_str, acct), Decimal("0"))
+            cumulative_cash -= period_account_credits.get((period_str, acct), Decimal("0"))
 
         # DSO: (AR / Revenue) × days_in_period (avoid div by zero)
-        dso = (
-            float(cumulative_ar / revenue * days_in_period)
-            if revenue > 0
-            else 0.0
-        )
+        dso = float(cumulative_ar / revenue * days_in_period) if revenue > 0 else 0.0
 
         # DPO: (AP / Expenses) × days_in_period
-        dpo = (
-            float(cumulative_ap / expenses * days_in_period)
-            if expenses > 0
-            else 0.0
-        )
+        dpo = float(cumulative_ap / expenses * days_in_period) if expenses > 0 else 0.0
 
         # Revenue growth MoM
         growth: float | None = None
         if prev_revenue is not None and prev_revenue > 0:
-            growth = round(
-                float((revenue - prev_revenue) / prev_revenue * 100), 2
-            )
+            growth = round(float((revenue - prev_revenue) / prev_revenue * 100), 2)
 
         monthly_metrics.append(
             PeriodMetrics(
@@ -288,19 +252,9 @@ def calculate_ground_truth(
         if bt_period in periods:
             fcf += bt.amount
 
-    total_days = sum(
-        calendar.monthrange(int(p[:4]), int(p[5:7]))[1] for p in periods
-    )
-    annual_dso = (
-        float(last.ar_balance / total_revenue * total_days)
-        if last and total_revenue > 0
-        else 0.0
-    )
-    annual_dpo = (
-        float(last.ap_balance / total_expenses * total_days)
-        if last and total_expenses > 0
-        else 0.0
-    )
+    total_days = sum(calendar.monthrange(int(p[:4]), int(p[5:7]))[1] for p in periods)
+    annual_dso = float(last.ar_balance / total_revenue * total_days) if last and total_revenue > 0 else 0.0
+    annual_dpo = float(last.ap_balance / total_expenses * total_days) if last and total_expenses > 0 else 0.0
 
     annual = AnnualMetrics(
         total_revenue=_q(total_revenue),
@@ -334,9 +288,7 @@ def _all_accounts_with_prefix(
     prefix: str,
 ) -> set[str]:
     """Find all account IDs with a given prefix that have movements in a period."""
-    return {
-        acct for (p, acct) in movements if p == period and acct.startswith(prefix)
-    }
+    return {acct for (p, acct) in movements if p == period and acct.startswith(prefix)}
 
 
 def _check_invariants(
@@ -361,17 +313,10 @@ def _check_invariants(
     tb_balanced = all(d == c for d, c in tb_by_period.values())
 
     # 3. Every PAID invoice has a payment with matching amount
-    paid_invoices = {
-        inv.invoice_id: inv.amount
-        for inv in dataset.invoices
-        if inv.status == InvoiceStatus.PAID
-    }
-    payment_by_invoice = {
-        pay.invoice_id: pay.amount for pay in dataset.payments
-    }
+    paid_invoices = {inv.invoice_id: inv.amount for inv in dataset.invoices if inv.status == InvoiceStatus.PAID}
+    payment_by_invoice = {pay.invoice_id: pay.amount for pay in dataset.payments}
     invoice_matched = all(
-        inv_id in payment_by_invoice
-        and payment_by_invoice[inv_id] == amount
+        inv_id in payment_by_invoice and payment_by_invoice[inv_id] == amount
         for inv_id, amount in paid_invoices.items()
     )
 

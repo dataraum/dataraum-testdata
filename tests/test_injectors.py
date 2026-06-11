@@ -122,8 +122,13 @@ def test_add_duplicate_fk_paths():
     df = pl.DataFrame({"entry_id": [f"JE-{i:04d}" for i in range(100)]})
     reg = _make_registry()
     result = add_duplicate_fk_paths(
-        df, "entry_id", "je_ref", registry=reg, table_name="test",
-        rng=_make_rng(), noise_ratio=0.10,
+        df,
+        "entry_id",
+        "je_ref",
+        registry=reg,
+        table_name="test",
+        rng=_make_rng(),
+        noise_ratio=0.10,
     )
     assert "je_ref" in result.columns
     # Most values should match
@@ -135,8 +140,13 @@ def test_drift_formula():
     df = pl.DataFrame({"debit_balance": [1000.0] * 100})
     reg = _make_registry()
     result = drift_formula(
-        df, "debit_balance", source_cols=["account_id"], error_ratio=0.05,
-        registry=reg, table_name="test", rng=_make_rng(),
+        df,
+        "debit_balance",
+        source_cols=["account_id"],
+        error_ratio=0.05,
+        registry=reg,
+        table_name="test",
+        rng=_make_rng(),
     )
     values = result["debit_balance"].to_list()
     drifted = [v for v in values if abs(v - 1000.0) > 0.001]
@@ -145,14 +155,21 @@ def test_drift_formula():
 
 
 def test_inject_temporal_drift():
-    df = pl.DataFrame({
-        "amount": [100.0] * 10,
-        "date": [f"2025-{m:02d}-15" for m in range(1, 11)],
-    })
+    df = pl.DataFrame(
+        {
+            "amount": [100.0] * 10,
+            "date": [f"2025-{m:02d}-15" for m in range(1, 11)],
+        }
+    )
     reg = _make_registry()
     result = inject_temporal_drift(
-        df, "amount", "date", shift_date="2025-06-01", shift_factor=2.0,
-        registry=reg, table_name="test",
+        df,
+        "amount",
+        "date",
+        shift_date="2025-06-01",
+        shift_factor=2.0,
+        registry=reg,
+        table_name="test",
     )
     values = result["amount"].to_list()
     # First 5 months (Jan-May) should be unchanged
@@ -162,10 +179,12 @@ def test_inject_temporal_drift():
 
 
 def test_create_mutual_exclusivity():
-    df = pl.DataFrame({
-        "debit": [100.0, 0.0, 50.0, 0.0, 200.0],
-        "credit": [0.0, 100.0, 50.0, 200.0, 0.0],
-    })
+    df = pl.DataFrame(
+        {
+            "debit": [100.0, 0.0, 50.0, 0.0, 200.0],
+            "credit": [0.0, 100.0, 50.0, 200.0, 0.0],
+        }
+    )
     reg = _make_registry()
     result = create_mutual_exclusivity(df, "debit", "credit", registry=reg, table_name="test", rng=_make_rng())
     # Row 2 had both non-zero: one should now be zero
@@ -179,7 +198,12 @@ def test_break_gl_invoice_match():
     df = pl.DataFrame({"amount": [1000.0] * 100})
     reg = _make_registry()
     result = break_gl_invoice_match(
-        df, "amount", ratio=0.10, registry=reg, table_name="invoices", rng=_make_rng(),
+        df,
+        "amount",
+        ratio=0.10,
+        registry=reg,
+        table_name="invoices",
+        rng=_make_rng(),
     )
     values = result["amount"].to_list()
     changed = [v for v in values if abs(v - 1000.0) > 0.01]
@@ -193,7 +217,12 @@ def test_break_payment_bank_match():
     df = pl.DataFrame({"amount": [500.0] * 100})
     reg = _make_registry()
     result = break_payment_bank_match(
-        df, "amount", ratio=0.08, registry=reg, table_name="payments", rng=_make_rng(),
+        df,
+        "amount",
+        ratio=0.08,
+        registry=reg,
+        table_name="payments",
+        rng=_make_rng(),
     )
     values = result["amount"].to_list()
     changed = [v for v in values if abs(v - 500.0) > 0.01]
@@ -207,7 +236,12 @@ def test_break_trial_balance():
     df = pl.DataFrame({"debit_balance": [10000.0] * 100})
     reg = _make_registry()
     result = break_trial_balance(
-        df, "debit_balance", ratio=0.10, registry=reg, table_name="trial_balance", rng=_make_rng(),
+        df,
+        "debit_balance",
+        ratio=0.10,
+        registry=reg,
+        table_name="trial_balance",
+        rng=_make_rng(),
     )
     values = result["debit_balance"].to_list()
     changed = [v for v in values if abs(v - 10000.0) > 0.01]

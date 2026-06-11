@@ -23,8 +23,8 @@ class StrategyLevel(StrEnum):
 class InjectionSpec:
     """Specification for a single injection to apply."""
 
-    injector: str           # Function name from injectors module
-    table: str              # Target table name
+    injector: str  # Function name from injectors module
+    table: str  # Target table name
     kwargs: dict[str, Any] = field(default_factory=dict)
     detector_id: str | None = None  # Override default detector_id in entropy_map
 
@@ -42,6 +42,7 @@ class Strategy:
 # ---------------------------------------------------------------------------
 # YAML loading
 # ---------------------------------------------------------------------------
+
 
 def load_strategy(path: Path) -> Strategy:
     """Parse a single strategy YAML file into a Strategy dataclass."""
@@ -87,8 +88,5 @@ def get_strategy(name: str) -> Strategy:
     if _STRATEGIES is None:
         _STRATEGIES = load_all_strategies()
     if name not in _STRATEGIES:
-        raise ValueError(
-            f"Unknown strategy: {name!r}. "
-            f"Available: {list(_STRATEGIES.keys())}"
-        )
+        raise ValueError(f"Unknown strategy: {name!r}. Available: {list(_STRATEGIES.keys())}")
     return _STRATEGIES[name]

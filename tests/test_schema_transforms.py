@@ -28,6 +28,7 @@ def base_dataframes() -> dict[str, pl.DataFrame]:
 # full
 # ---------------------------------------------------------------------------
 
+
 def test_full_is_identity(base_dataframes):
     """'full' returns all 8 tables unchanged."""
     dfs, mapping = apply_normalization(dict(base_dataframes), "full")
@@ -40,6 +41,7 @@ def test_full_is_identity(base_dataframes):
 # ---------------------------------------------------------------------------
 # partial
 # ---------------------------------------------------------------------------
+
 
 def test_partial_merges_journals(base_dataframes):
     """partial produces journal_data with entry + line fields."""
@@ -103,6 +105,7 @@ def test_partial_table_count(base_dataframes):
 # flat
 # ---------------------------------------------------------------------------
 
+
 def test_flat_inlines_accounts(base_dataframes):
     """flat inlines chart_of_accounts into general_ledger."""
     dfs, _ = apply_normalization(dict(base_dataframes), "flat")
@@ -144,31 +147,36 @@ def test_flat_table_count(base_dataframes):
 # registry remap
 # ---------------------------------------------------------------------------
 
+
 def test_registry_remap():
     """remap_tables updates target_file entries correctly."""
     registry = InjectionRegistry()
-    registry.record(EntropyInjection(
-        injection_id="INJ-0001",
-        target_file="journal_lines.csv",
-        target_column="debit",
-        target_rows=[0, 1],
-        layer="value",
-        dimension="accuracy",
-        sub_dimension="type_corruption",
-        detector_id="type_detector",
-        injection_type="corrupt_types",
-    ))
-    registry.record(EntropyInjection(
-        injection_id="INJ-0002",
-        target_file="bank_transactions.csv",
-        target_column="amount",
-        target_rows=[5],
-        layer="value",
-        dimension="distribution",
-        sub_dimension="benford",
-        detector_id="benford_detector",
-        injection_type="break_benford",
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id="INJ-0001",
+            target_file="journal_lines.csv",
+            target_column="debit",
+            target_rows=[0, 1],
+            layer="value",
+            dimension="accuracy",
+            sub_dimension="type_corruption",
+            detector_id="type_detector",
+            injection_type="corrupt_types",
+        )
+    )
+    registry.record(
+        EntropyInjection(
+            injection_id="INJ-0002",
+            target_file="bank_transactions.csv",
+            target_column="amount",
+            target_rows=[5],
+            layer="value",
+            dimension="distribution",
+            sub_dimension="benford",
+            detector_id="benford_detector",
+            injection_type="break_benford",
+        )
+    )
 
     mapping = {"journal_lines": "journal_data", "journal_entries": "journal_data"}
     registry.remap_tables(mapping)
@@ -181,17 +189,19 @@ def test_registry_remap():
 def test_registry_remap_flat():
     """Flat mapping chains journal_lines → general_ledger."""
     registry = InjectionRegistry()
-    registry.record(EntropyInjection(
-        injection_id="INJ-0001",
-        target_file="journal_lines.csv",
-        target_column="debit",
-        target_rows=[0],
-        layer="value",
-        dimension="accuracy",
-        sub_dimension="type_corruption",
-        detector_id="type_detector",
-        injection_type="corrupt_types",
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id="INJ-0001",
+            target_file="journal_lines.csv",
+            target_column="debit",
+            target_rows=[0],
+            layer="value",
+            dimension="accuracy",
+            sub_dimension="type_corruption",
+            detector_id="type_detector",
+            injection_type="corrupt_types",
+        )
+    )
 
     # flat mapping goes directly from original name to final name
     mapping = {
@@ -208,6 +218,7 @@ def test_registry_remap_flat():
 # ---------------------------------------------------------------------------
 # single
 # ---------------------------------------------------------------------------
+
 
 def test_single_produces_one_table(base_dataframes):
     """single normalization produces exactly 1 table."""
@@ -238,6 +249,7 @@ def test_single_preserves_gl_rows(base_dataframes):
 # ---------------------------------------------------------------------------
 # column naming styles
 # ---------------------------------------------------------------------------
+
 
 def test_snake_case_is_identity(base_dataframes):
     """snake_case returns columns unchanged."""
@@ -276,6 +288,7 @@ def test_legacy_style(base_dataframes):
 # pivots
 # ---------------------------------------------------------------------------
 
+
 def test_trial_balance_wide_pivot(base_dataframes):
     """Wide pivot creates period columns for trial balance."""
     tb = base_dataframes["trial_balance"]
@@ -308,6 +321,7 @@ def test_journal_lines_wide_pivot(base_dataframes):
 # ---------------------------------------------------------------------------
 # key strategies
 # ---------------------------------------------------------------------------
+
 
 def test_surrogate_is_identity(base_dataframes):
     """surrogate returns DataFrames unchanged."""

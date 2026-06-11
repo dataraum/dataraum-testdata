@@ -102,9 +102,7 @@ def test_revenue_growth_subsequent_months():
 def test_invoice_counts_present():
     """Monthly metrics include invoice counts by status."""
     truth = _truth()
-    total_invoices = sum(
-        sum(m.invoice_count.values()) for m in truth.monthly
-    )
+    total_invoices = sum(sum(m.invoice_count.values()) for m in truth.monthly)
     assert total_invoices > 0
 
 
