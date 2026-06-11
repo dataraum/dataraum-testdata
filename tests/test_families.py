@@ -13,15 +13,20 @@ import pytest
 
 from testdata.entropy.families import (
     CURATED_VOCAB,
+    REL_CHILD_TABLE,
+    REL_PARENT_TABLE,
     NullTokenFamilyParams,
+    RelationshipFamilyParams,
     StockFlowFamilyParams,
     mint_decoy,
     sample_mixed_units_family,
     sample_null_token_family,
+    sample_relationship_family,
     sample_stock_flow_family,
 )
 from testdata.entropy.injectors import (
     inject_null_token_family,
+    inject_relationship_pairs,
     inject_scale_mix,
     inject_stock_flow_probes,
 )
@@ -256,3 +261,165 @@ def test_stock_flow_ambiguity_produces_conflicting_cue_names() -> None:
         assert parts & _STOCK_CUES and parts & _FLOW_CUES, f"name not conflicting: {c.name}"
     # Default params stay clear-only — the shipped corpus + its 100% clear-name result.
     assert all(not c.ambiguous for c in sample_stock_flow_family(5).columns)
+
+
+# --- relationship_pairs family (DAT-408 / DAT-450) ---------------------------
+
+
+def _probe_frames(n_parents: int = 200, n_children: int = 800) -> dict[str, pl.DataFrame]:
+    """The two skeleton grains the scenario runner would generate."""
+    return {
+        REL_PARENT_TABLE: pl.DataFrame({"entity_seq": [f"RE-{i:04d}" for i in range(n_parents)]}),
+        REL_CHILD_TABLE: pl.DataFrame({"activity_seq": [f"RA-{i:05d}" for i in range(n_children)]}),
+    }
+
+
+def _run_relationship_injection(seed: int = 11, shared_seed: int = 0):
+    frames = _probe_frames()
+    reg = InjectionRegistry()
+    child = inject_relationship_pairs(
+        frames[REL_CHILD_TABLE],
+        seed=seed,
+        registry=reg,
+        table_name=REL_CHILD_TABLE,
+        rng=random.Random(shared_seed),
+        dataframes=frames,
+    )
+    frames[REL_CHILD_TABLE] = child
+    return frames, reg
+
+
+def test_relationship_family_reproduces_and_varies() -> None:
+    assert sample_relationship_family(7) == sample_relationship_family(7)  # recorded seed reproduces
+    surfaces = {
+        tuple((p.parent_column, p.child_column, p.pool_prefix) for p in sample_relationship_family(s).pairs)
+        for s in range(40)
+    }
+    assert len(surfaces) > 30  # different seeds → a different pair surface
+
+
+def test_relationship_sample_is_well_formed() -> None:
+    for s in range(30):
+        fam = sample_relationship_family(s)
+        strata = {p.stratum for p in fam.pairs}
+        assert strata == {"genuine_clean", "genuine_broken", "spurious_overlap"}
+        # Column names unique per table side; pool namespaces disjoint across pairs.
+        parent_cols = [p.parent_column for p in fam.pairs]
+        child_cols = [p.child_column for p in fam.pairs]
+        prefixes = [p.pool_prefix for p in fam.pairs]
+        assert len(set(parent_cols)) == len(parent_cols)
+        assert len(set(child_cols)) == len(child_cols)
+        assert len(set(prefixes)) == len(prefixes)
+        for p in fam.pairs:
+            if p.label == "genuine":
+                # The same entity noun on both sides — the name honestly signals an FK.
+                noun = p.parent_column.removesuffix("_id")
+                assert p.child_column.startswith(noun), f"genuine pair name mismatch: {p}"
+                assert p.referenced_fraction is not None and 0.7 <= p.referenced_fraction <= 0.9
+                if p.stratum == "genuine_broken":
+                    assert 0.05 <= p.orphan_ratio <= 0.35
+                    assert p.orphan_pool_fraction is not None
+                else:
+                    assert p.orphan_ratio == 0.0
+            else:
+                # Two DIFFERENT code nouns — the name honestly signals no relation.
+                assert p.parent_column.split("_")[0] != p.child_column.split("_")[0]
+                assert p.designed_jaccard is not None and 0.55 <= p.designed_jaccard <= 0.85
+                assert p.orphan_ratio == 0.0
+
+
+def test_relationship_params_guard_the_candidate_floor() -> None:
+    # A spurious overlap below the relationship phase's candidate threshold (0.5)
+    # never becomes a candidate row → the params refuse to sample it.
+    with pytest.raises(ValueError, match="spurious_jaccard"):
+        RelationshipFamilyParams(spurious_jaccard=(0.3, 0.6))
+    # A broken pair whose worst-case Jaccard falls under the floor is refused too.
+    with pytest.raises(ValueError, match="broken-pair"):
+        RelationshipFamilyParams(referenced_fraction=(0.4, 0.9))
+    # referenced_fraction = 1.0 would let full containment mask a broken FK.
+    with pytest.raises(ValueError, match="referenced_fraction"):
+        RelationshipFamilyParams(referenced_fraction=(0.7, 1.0))
+
+
+def test_inject_relationship_pairs_fills_both_tables_and_registry() -> None:
+    frames, reg = _run_relationship_injection(seed=11)
+    parent, child = frames[REL_PARENT_TABLE], frames[REL_CHILD_TABLE]
+    assert reg.injections  # one record per pair
+    assert "entity_seq" in parent.columns and "activity_seq" in child.columns  # grain preserved
+    for inj in reg.injections:
+        assert inj.detector_id == "relationship_discovery"
+        assert inj.injection_type == "inject_relationship_pairs"
+        params = inj.parameters
+        assert params["label"] in ("genuine", "spurious")
+        assert params["stratum"] in ("genuine_clean", "genuine_broken", "spurious_overlap")
+        assert params["parent_column"] in parent.columns
+        assert params["child_column"] in child.columns
+        assert inj.target_column == params["child_column"]
+        assert params["pair"] == (
+            f"{REL_CHILD_TABLE}.{params['child_column']} -> {REL_PARENT_TABLE}.{params['parent_column']}"
+        )
+    labels = {inj.parameters["stratum"] for inj in reg.injections}
+    assert labels == {"genuine_clean", "genuine_broken", "spurious_overlap"}
+
+
+def test_inject_relationship_pairs_orphan_arithmetic() -> None:
+    frames, reg = _run_relationship_injection(seed=23)
+    parent, child = frames[REL_PARENT_TABLE], frames[REL_CHILD_TABLE]
+    n_child = len(child)
+    for inj in reg.injections:
+        if inj.parameters["label"] != "genuine":
+            continue
+        parent_pool = set(parent[inj.parameters["parent_column"]].to_list())
+        child_values = child[inj.parameters["child_column"]].to_list()
+        orphans = [i for i, v in enumerate(child_values) if v not in parent_pool]
+        actual = len(orphans) / n_child
+        # The recorded ground truth matches a recount from the data...
+        assert actual == inj.parameters["actual_orphan_fraction"]
+        assert orphans == inj.target_rows
+        # ...and the realized fraction tracks the sampled ratio (int truncation < 1/n).
+        assert abs(actual - inj.parameters["orphan_ratio"]) < 1.5 / n_child
+        if inj.parameters["stratum"] == "genuine_clean":
+            assert not orphans  # clean FK holds completely
+
+
+def test_inject_relationship_pairs_spurious_overlap_by_design() -> None:
+    frames, reg = _run_relationship_injection(seed=37)
+    parent, child = frames[REL_PARENT_TABLE], frames[REL_CHILD_TABLE]
+    spurious = [inj for inj in reg.injections if inj.parameters["label"] == "spurious"]
+    assert spurious
+    for inj in spurious:
+        a = set(parent[inj.parameters["parent_column"]].to_list())
+        b = set(child[inj.parameters["child_column"]].to_list())
+        jaccard = len(a & b) / len(a | b)
+        # High overlap by shared POOL construction, matching the sampled design...
+        assert abs(jaccard - inj.parameters["designed_jaccard"]) < 0.05
+        # ...and recorded as the expected data-witness statistic (4-decimal rounding).
+        assert inj.parameters["expected_join_confidence"] == pytest.approx(jaccard, abs=1e-4)
+        # ...but never copied columns and never full containment (no FK semantics).
+        assert a != b
+        assert not a <= b and not b <= a
+
+
+def test_inject_relationship_pairs_reproducible_from_the_seed() -> None:
+    frames1, _ = _run_relationship_injection(seed=42, shared_seed=1)
+    frames2, _ = _run_relationship_injection(seed=42, shared_seed=2)
+    # The shared dispatch rng differs; the family seed fixes pairs AND values.
+    assert frames1[REL_PARENT_TABLE].equals(frames2[REL_PARENT_TABLE])
+    assert frames1[REL_CHILD_TABLE].equals(frames2[REL_CHILD_TABLE])
+
+
+def test_relationship_pairs_stay_above_candidate_floor_and_isolated() -> None:
+    frames, reg = _run_relationship_injection(seed=5)
+    parent, child = frames[REL_PARENT_TABLE], frames[REL_CHILD_TABLE]
+    # Every designed pair stays a discoverable candidate (min_confidence 0.5 + margin).
+    for inj in reg.injections:
+        assert inj.parameters["expected_join_confidence"] >= 0.55
+    # Cross-pair namespaces never overlap: the labelled pairs are the ONLY designed
+    # overlaps; everything else is clean negative space (no accidental candidates).
+    by_pair = {inj.parameters["child_column"]: inj.parameters["parent_column"] for inj in reg.injections}
+    for child_col, parent_col in by_pair.items():
+        child_vals = set(child[child_col].to_list())
+        for other_parent_col in by_pair.values():
+            if other_parent_col == parent_col:
+                continue
+            assert not (child_vals & set(parent[other_parent_col].to_list()))

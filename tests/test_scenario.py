@@ -73,3 +73,58 @@ def test_low_strategy():
     low = run_scenario(strategy_name="low", seed=42, months=12)
     medium = run_scenario(strategy_name="medium", seed=42, months=12)
     assert len(low["registry"]) < len(medium["registry"])
+
+
+def test_relationship_probe_strategy_dispatch(tmp_path: Path):
+    """A strategy targeting the child probe table reaches inject_relationship_pairs
+    end-to-end: skeleton grains generated, parent filled via the dataframes
+    pass-through, pair ground truth exported in entropy_map.yaml."""
+    from testdata.scenarios.runner import run_scenario as run_any
+
+    strategy = {
+        "name": "relationship-cal-test",
+        "level": "high",
+        "description": "relationship_pairs dispatch test",
+        "injections": [
+            {
+                "injector": "inject_relationship_pairs",
+                "table": "ref_activity",
+                "params": {"seed": 7, "severity": "high"},
+            }
+        ],
+    }
+    strategy_file = tmp_path / "relationship_cal_test.yaml"
+    with open(strategy_file, "w") as f:
+        yaml.dump(strategy, f)
+
+    output = tmp_path / "out"
+    result = run_any("month-end-close", strategy_file=strategy_file, seed=7, months=3, output_dir=output)
+
+    dfs = result["dataframes"]
+    assert len(dfs["ref_entities"]) == 300 and len(dfs["ref_activity"]) == 1200
+    records = [inj for inj in result["registry"].injections]
+    assert records and all(inj.detector_id == "relationship_discovery" for inj in records)
+    # Every sampled pair landed as columns on BOTH probe tables.
+    for inj in records:
+        assert inj.parameters["parent_column"] in dfs["ref_entities"].columns
+        assert inj.parameters["child_column"] in dfs["ref_activity"].columns
+    assert {inj.parameters["stratum"] for inj in records} == {
+        "genuine_clean",
+        "genuine_broken",
+        "spurious_overlap",
+    }
+
+    # The exported ground truth carries the pair-level labels the rig reads.
+    assert (output / "ref_entities.csv").exists() and (output / "ref_activity.csv").exists()
+    with open(output / "entropy_map.yaml") as f:
+        emap = yaml.safe_load(f)
+    pairs = [i for i in emap["injections"] if i["injection_type"] == "inject_relationship_pairs"]
+    assert len(pairs) == len(records)
+    assert all(i["parameters"]["label"] in ("genuine", "spurious") for i in pairs)
+
+
+def test_baseline_strategies_skip_relationship_probes():
+    """Without a relationship stanza the probe tables do not exist at all."""
+    result = run_scenario(strategy_name="medium", seed=42, months=3)
+    assert "ref_entities" not in result["dataframes"]
+    assert "ref_activity" not in result["dataframes"]

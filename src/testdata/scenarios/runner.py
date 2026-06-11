@@ -22,6 +22,7 @@ import yaml
 from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.config import get_config_dir
 from testdata.entropy import injectors
+from testdata.entropy.families import REL_CHILD_TABLE
 from testdata.entropy.registry import InjectionRegistry
 from testdata.entropy.strategies import InjectionSpec, get_strategy, load_strategy
 from testdata.export import ExportFormat, dataset_to_dataframes, export_dataframes
@@ -138,6 +139,10 @@ def _apply_injection(
     all_kwargs["registry"] = registry
     all_kwargs["table_name"] = spec.table
     all_kwargs["rng"] = rng
+    # Multi-table families (e.g. relationship_pairs filling parent + child probe
+    # tables) declare a ``dataframes`` parameter and receive the live dict; the
+    # signature filter below keeps single-table injectors untouched.
+    all_kwargs["dataframes"] = dataframes
 
     sig = inspect.signature(fn)
     accepted = set(sig.parameters.keys()) - {"df"}
@@ -195,6 +200,9 @@ def run_scenario(
     # Generate the stock/flow probe table's grain only when a strategy injects into it,
     # so non-stock/flow strategies (the baseline) are untouched (DAT-445).
     probe_series = 15 if any(s.table == "measure_probes" for s in strategy.injections) else 0
+    # Same gate for the relationship probe grains (DAT-408/450): parent ids + child
+    # rows exist only when a strategy targets the child probe table.
+    needs_relationship_probes = any(s.table == REL_CHILD_TABLE for s in strategy.injections)
 
     # Step 1: Generate clean data
     dataset = generate_finance_dataset(
@@ -202,6 +210,8 @@ def run_scenario(
         months=months,
         fiscal_start=config.fiscal_start,
         probe_series=probe_series,
+        relation_parents=300 if needs_relationship_probes else 0,
+        relation_children=1200 if needs_relationship_probes else 0,
         **config.generator_kwargs,
     )
 

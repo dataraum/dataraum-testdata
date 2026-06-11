@@ -163,6 +163,30 @@ class MeasureProbe(BaseModel):
     period: str = Field(description="Period identifier, e.g. '2025-01'")
 
 
+class RefEntity(BaseModel):
+    """Skeleton row for the relationship-pairs PARENT probe table (DAT-408/450).
+
+    A reference/master grain: one row per entity that ``inject_relationship_pairs``
+    fills with labelled key/code columns (the genuine-FK pools and the spurious
+    shared-code pools). Generated only when a strategy injects into the child
+    probe table; empty otherwise.
+    """
+
+    entity_seq: str = Field(description="Probe parent row identifier")
+
+
+class RefActivity(BaseModel):
+    """Skeleton row for the relationship-pairs CHILD probe table (DAT-408/450).
+
+    An activity grain referencing :class:`RefEntity` pools: one row per event that
+    ``inject_relationship_pairs`` fills with labelled FK/code columns across the
+    clean / orphan-broken / spurious-overlap strata. Generated only when a
+    strategy injects into it; empty otherwise.
+    """
+
+    activity_seq: str = Field(description="Probe child row identifier")
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -176,3 +200,5 @@ class FinanceDataset(BaseModel):
     trial_balance: list[TrialBalance]
     balance_sheet: list[BalanceSheet]
     measure_probes: list[MeasureProbe] = []
+    ref_entities: list[RefEntity] = []
+    ref_activity: list[RefActivity] = []

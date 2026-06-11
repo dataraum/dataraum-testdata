@@ -426,10 +426,10 @@ def _build_single_table(
     mapping["bank_transactions"] = "mega_table"
 
     # Drop the non-joinable period/lookup tables — they fold into the single table
-    # conceptually (fx_rates, trial_balance, balance_sheet, and the stock/flow
-    # measure_probes when a strategy generated it). Without this, balance_sheet
-    # dangled and "single" produced two tables.
-    for name in ("fx_rates", "trial_balance", "balance_sheet", "measure_probes"):
+    # conceptually (fx_rates, trial_balance, balance_sheet, and the stock/flow +
+    # relationship probe tables when a strategy generated them). Without this,
+    # balance_sheet dangled and "single" produced two tables.
+    for name in ("fx_rates", "trial_balance", "balance_sheet", "measure_probes", "ref_entities", "ref_activity"):
         if name in dfs:
             dfs.pop(name)
             mapping[name] = "mega_table"

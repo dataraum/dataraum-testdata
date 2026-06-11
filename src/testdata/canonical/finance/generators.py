@@ -30,6 +30,8 @@ from .models import (
     Payment,
     PaymentMethod,
     PaymentTerms,
+    RefActivity,
+    RefEntity,
     TrialBalance,
 )
 
@@ -1065,6 +1067,21 @@ def _generate_measure_probes(
     ]
 
 
+def _generate_relationship_probes(n_parents: int, n_children: int) -> tuple[list[RefEntity], list[RefActivity]]:
+    """Skeleton grains for the relationship-pairs probe tables (DAT-408/450).
+
+    ``n_parents`` parent rows + ``n_children`` child rows — the grains that
+    ``inject_relationship_pairs`` fills with labelled FK/code column pairs
+    (genuine clean / orphan-broken / spurious-overlap strata). Empty when either
+    count is 0 (no relationship strategy active).
+    """
+    if n_parents <= 0 or n_children <= 0:
+        return [], []
+    parents = [RefEntity(entity_seq=f"RE-{i:04d}") for i in range(n_parents)]
+    children = [RefActivity(activity_seq=f"RA-{i:05d}") for i in range(n_children)]
+    return parents, children
+
+
 # --- Main Generator ---
 
 def generate_finance_dataset(
@@ -1074,6 +1091,8 @@ def generate_finance_dataset(
     invoices_count: int | None = None,
     q4_seasonal_boost: float | None = None,
     probe_series: int = 0,
+    relation_parents: int = 0,
+    relation_children: int = 0,
     **_kwargs: object,
 ) -> FinanceDataset:
     """Generate a complete finance dataset with closed-loop accounting.
@@ -1158,6 +1177,8 @@ def generate_finance_dataset(
     balance_sheet = _derive_balance_sheet(all_entries, all_lines, chart)
     # Skeleton grain for the stock/flow probe table — empty unless a strategy needs it.
     measure_probes = _generate_measure_probes(months, fiscal_start, probe_series)
+    # Skeleton grains for the relationship probe tables — empty unless a strategy needs them.
+    ref_entities, ref_activity = _generate_relationship_probes(relation_parents, relation_children)
 
     return FinanceDataset(
         chart_of_accounts=chart,
@@ -1170,4 +1191,6 @@ def generate_finance_dataset(
         trial_balance=trial_bal,
         balance_sheet=balance_sheet,
         measure_probes=measure_probes,
+        ref_entities=ref_entities,
+        ref_activity=ref_activity,
     )
