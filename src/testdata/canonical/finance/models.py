@@ -163,6 +163,18 @@ class MeasureProbe(BaseModel):
     period: str = Field(description="Period identifier, e.g. '2025-01'")
 
 
+class FormulaProbe(BaseModel):
+    """Skeleton grain for the formula-divergence probe table (DAT-442, ADR-0009).
+
+    A synthetic per-record table: ``probe_id`` rows that ``inject_formula_divergence``
+    fills with labelled (source_a, source_b, target) formula groups — the calibration
+    corpus for the derived_value witnesses (formula_discovery + llm_hypothesis).
+    Generated only when a strategy injects into it; empty otherwise.
+    """
+
+    probe_id: str = Field(description="Probe record identifier")
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -176,3 +188,4 @@ class FinanceDataset(BaseModel):
     trial_balance: list[TrialBalance]
     balance_sheet: list[BalanceSheet]
     measure_probes: list[MeasureProbe] = []
+    formula_probes: list[FormulaProbe] = []

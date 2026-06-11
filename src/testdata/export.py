@@ -27,6 +27,7 @@ TABLE_NAMES: dict[str, str] = {
     "trial_balance": "trial_balance",
     "balance_sheet": "balance_sheet",
     "measure_probes": "measure_probes",
+    "formula_probes": "formula_probes",
 }
 
 
@@ -54,10 +55,7 @@ def dataset_to_dataframes(dataset: FinanceDataset) -> dict[str, pl.DataFrame]:
             # active) is omitted entirely rather than emitted as a headerless CSV.
             continue
 
-        rows = [
-            {k: _serialize_value(v) for k, v in rec.model_dump().items()}
-            for rec in records
-        ]
+        rows = [{k: _serialize_value(v) for k, v in rec.model_dump().items()} for rec in records]
         result[table_name] = pl.DataFrame(rows)
 
     return result

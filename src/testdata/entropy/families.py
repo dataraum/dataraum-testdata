@@ -42,15 +42,36 @@ from dataclasses import dataclass
 # Curated null markers — values the vertical's null vocabulary already knows.
 # Drawing in-vocab markers from this pool makes the vocabulary witness HIT them.
 _VOCAB_MARKERS: tuple[str, ...] = (
-    "N/A", "NA", "n/a", "NULL", "NONE", "NIL", "TBD", "-", "--", "?",
+    "N/A",
+    "NA",
+    "n/a",
+    "NULL",
+    "NONE",
+    "NIL",
+    "TBD",
+    "-",
+    "--",
+    "?",
 )
 
 # Novel-sentinel shapes the curated vocabulary has NOT seen — composed from
 # templates so the surface varies by seed (no memorizable fixed list).
 _STATUS_WORDS: tuple[str, ...] = (
-    "PENDING", "WITHHELD", "DISPUTED", "REDACTED", "UNKNOWN", "MISSING", "VOID",
-    "REVIEW", "UNCONFIRMED", "ONHOLD", "RESTRICTED", "DEFERRED", "QUERIED",
-    "SUPPRESSED", "OUTSTANDING",
+    "PENDING",
+    "WITHHELD",
+    "DISPUTED",
+    "REDACTED",
+    "UNKNOWN",
+    "MISSING",
+    "VOID",
+    "REVIEW",
+    "UNCONFIRMED",
+    "ONHOLD",
+    "RESTRICTED",
+    "DEFERRED",
+    "QUERIED",
+    "SUPPRESSED",
+    "OUTSTANDING",
 )
 _STATUS_TEMPLATES: tuple[str, ...] = ("{w}", "{w}...", "[{w}]", "({w})", "{w}*", "<{w}>")
 _ERR_CODES: tuple[str, ...] = ("ERR", "VALUE", "REF", "DIV/0", "CALC", "NAME")
@@ -66,9 +87,7 @@ def _novel_marker(rng: random.Random) -> str:
             w=_STATUS_WORDS[rng.randrange(len(_STATUS_WORDS))]
         )
     if kind == "err":
-        return _ERR_TEMPLATES[rng.randrange(len(_ERR_TEMPLATES))].format(
-            c=_ERR_CODES[rng.randrange(len(_ERR_CODES))]
-        )
+        return _ERR_TEMPLATES[rng.randrange(len(_ERR_TEMPLATES))].format(c=_ERR_CODES[rng.randrange(len(_ERR_CODES))])
     return _PUNCT_CHARS[rng.randrange(len(_PUNCT_CHARS))] * rng.randint(2, 5)
 
 
@@ -118,11 +137,11 @@ class NullTokenFamilyParams:
     A strategy may override any field; unset fields use these defaults.
     """
 
-    n_markers: tuple[int, int] = (2, 6)          # distinct sentinel tokens (small → cluster)
+    n_markers: tuple[int, int] = (2, 6)  # distinct sentinel tokens (small → cluster)
     marker_ratio: tuple[float, float] = (0.05, 0.075)  # fraction of rows replaced by a marker
     decoy_ratio: tuple[float, float] = (0.015, 0.025)  # fraction replaced by a genuine decoy
-    vocab_coverage: tuple[float, float] = (0.2, 0.8)   # fraction of markers in the curated vocab
-    decoy_style: str | None = None               # fixed style, or None → sampled per instance
+    vocab_coverage: tuple[float, float] = (0.2, 0.8)  # fraction of markers in the curated vocab
+    decoy_style: str | None = None  # fixed style, or None → sampled per instance
     # None → decoys are minted DISTINCT (count 1, they smear). A (lo, hi) range →
     # decoys are a small CLUSTERED is-value set of that many distinct values,
     # repeated — the stress mode that lets the rig measure quarantine_clustering's
@@ -163,9 +182,7 @@ class NullTokenFamilySample:
         return len(self.in_vocab_markers) / len(self.markers) if self.markers else 0.0
 
 
-def sample_null_token_family(
-    seed: int, params: NullTokenFamilyParams | None = None
-) -> NullTokenFamilySample:
+def sample_null_token_family(seed: int, params: NullTokenFamilyParams | None = None) -> NullTokenFamilySample:
     """Sample one labelled null_tokens instance — deterministic in ``seed``.
 
     Different seeds → different markers/decoys/rates (surface varies); the same
@@ -224,7 +241,7 @@ class MixedUnitsFamilyParams:
     """The parameter space the mixed_units (scale-mix) generator samples from."""
 
     scale_factors: tuple[int, ...] = _SCALE_FACTORS  # the alternate scale (a clean decade)
-    mix_ratio: tuple[float, float] = (0.15, 0.40)     # fraction of rows pushed to that scale
+    mix_ratio: tuple[float, float] = (0.15, 0.40)  # fraction of rows pushed to that scale
 
 
 @dataclass(frozen=True)
@@ -236,9 +253,7 @@ class MixedUnitsFamilySample:
     mix_ratio: float
 
 
-def sample_mixed_units_family(
-    seed: int, params: MixedUnitsFamilyParams | None = None
-) -> MixedUnitsFamilySample:
+def sample_mixed_units_family(seed: int, params: MixedUnitsFamilyParams | None = None) -> MixedUnitsFamilySample:
     """Sample one labelled mixed_units instance — deterministic in ``seed``.
 
     Different seeds → different scale factor + ratio (surface varies); the recorded
@@ -269,21 +284,49 @@ def sample_mixed_units_family(
 
 # Stock name pieces — a carried-forward LEVEL.
 _STOCK_NOUNS: tuple[str, ...] = (
-    "inventory", "cash", "receivables", "payables", "debt", "equity",
-    "reserve", "headcount", "asset", "provision",
+    "inventory",
+    "cash",
+    "receivables",
+    "payables",
+    "debt",
+    "equity",
+    "reserve",
+    "headcount",
+    "asset",
+    "provision",
 )
 _STOCK_TEMPLATES: tuple[str, ...] = (
-    "{n}_balance", "closing_{n}", "ending_{n}", "opening_{n}", "{n}_on_hand",
-    "outstanding_{n}", "{n}_level", "{n}_position",
+    "{n}_balance",
+    "closing_{n}",
+    "ending_{n}",
+    "opening_{n}",
+    "{n}_on_hand",
+    "outstanding_{n}",
+    "{n}_level",
+    "{n}_position",
 )
 # Flow name pieces — a per-period MOVEMENT.
 _FLOW_NOUNS: tuple[str, ...] = (
-    "revenue", "sales", "units", "interest", "expense", "deposits",
-    "withdrawals", "spend", "shipments", "payouts",
+    "revenue",
+    "sales",
+    "units",
+    "interest",
+    "expense",
+    "deposits",
+    "withdrawals",
+    "spend",
+    "shipments",
+    "payouts",
 )
 _FLOW_TEMPLATES: tuple[str, ...] = (
-    "monthly_{n}", "weekly_{n}", "period_{n}", "{n}_paid", "{n}_sold",
-    "{n}_movement", "{n}_volume", "{n}_amount",
+    "monthly_{n}",
+    "weekly_{n}",
+    "period_{n}",
+    "{n}_paid",
+    "{n}_sold",
+    "{n}_movement",
+    "{n}_volume",
+    "{n}_amount",
 )
 
 
@@ -320,16 +363,20 @@ class StockFlowFamilySample:
 
 def _clear_name(rng: random.Random, *, is_stock: bool) -> str:
     """A clear name: a noun + a structural template, both from one concern's vocabulary."""
-    nouns, templates = (
-        (_STOCK_NOUNS, _STOCK_TEMPLATES) if is_stock else (_FLOW_NOUNS, _FLOW_TEMPLATES)
-    )
+    nouns, templates = (_STOCK_NOUNS, _STOCK_TEMPLATES) if is_stock else (_FLOW_NOUNS, _FLOW_TEMPLATES)
     return templates[rng.randrange(len(templates))].format(n=nouns[rng.randrange(len(nouns))])
 
 
 # Conflicting cues for AMBIGUOUS names: one stock-flavoured word + one flow-flavoured
 # word, so the name carries BOTH and signals neither (the debit_balance archetype).
 _STOCK_CUES: tuple[str, ...] = (
-    *_STOCK_NOUNS, "balance", "level", "position", "closing", "opening", "outstanding",
+    *_STOCK_NOUNS,
+    "balance",
+    "level",
+    "position",
+    "closing",
+    "opening",
+    "outstanding",
 )
 _FLOW_CUES: tuple[str, ...] = (*_FLOW_NOUNS, "monthly", "weekly", "movement", "volume", "paid")
 
@@ -348,9 +395,7 @@ def _ambiguous_name(rng: random.Random) -> str:
     return f"{parts[0]}_{parts[1]}"
 
 
-def sample_stock_flow_family(
-    seed: int, params: StockFlowFamilyParams | None = None
-) -> StockFlowFamilySample:
+def sample_stock_flow_family(seed: int, params: StockFlowFamilyParams | None = None) -> StockFlowFamilySample:
     """Sample one labelled stock/flow instance — deterministic in ``seed``.
 
     Draws ``n_columns`` measure columns, ``stock_fraction`` of them stocks, each with a
@@ -385,3 +430,260 @@ def sample_stock_flow_family(
         columns.append(ProbeColumn(name=name, is_stock=is_stock, ambiguous=is_ambig))
 
     return StockFlowFamilySample(seed=seed, columns=tuple(columns))
+
+
+# --- the formula_divergence family (DAT-442, ADR-0009 derived-value) --------
+#
+# Feeds derived_value: each sampled GROUP is three numeric columns — two sources and
+# a target whose NAME advertises a formula over them (`freight_total` next to
+# `freight_subtotal` + `freight_tax` advertises the sum) while its VALUES follow a
+# sampled truth. The two witnesses being calibrated read different evidence: the LLM
+# `llm_hypothesis` reads the NAME, `formula_discovery` reads the ROWS — divergence is
+# exactly where they must disagree, and the labels score each one. Three strata:
+#
+# * **agree** — values follow the named formula: the true-negative class.
+# * **wholesale** — every row follows a different formula B: the name-reader is
+#   measurably wrong; the row-reader finds B (or grades the named formula broken).
+# * **partial** — a sampled fraction of rows follow B, the rest the named formula:
+#   the graded match rate degrades by exactly that fraction (generalizes
+#   ``drift_formula``'s error_ratio into a labelled family).
+#
+# The formula language mirrors the engine's discovery/hypothesis space (binary
+# ``a op b`` over two same-table numeric columns, op in + - * /; analysis/correlation/
+# within_table/derived_columns.py + the column_annotation prompt). One DELIBERATE
+# out-of-space stress kind exists — ``scaled`` (values = named formula × a constant
+# factor, a tax/discount shift no two-column formula expresses) — and is LABELLED
+# ``discoverable: false`` so the rig can stratify it. The stock/flow naming discipline
+# carries over: a target suffix vocabulary is op-specific (total/gross = sum, net/
+# outstanding = difference, ...) so a name genuinely advertises its formula, and value
+# ranges are chosen so every alternate formula separates from the named one by far
+# more than the 0.01 grading tolerance (no accidental matches).
+
+FORMULA_OPS: tuple[str, ...] = ("sum", "difference", "product", "ratio")
+_COMMUTATIVE_OPS = frozenset({"sum", "product"})
+
+
+def apply_operation(op: str, a: float, b: float) -> float:
+    """Evaluate one binary formula op — the family's (and the engine's) formula language."""
+    if op == "sum":
+        return a + b
+    if op == "difference":
+        return a - b
+    if op == "product":
+        return a * b
+    if op == "ratio":
+        return a / b
+    raise ValueError(f"unknown formula operation: {op}")
+
+
+def formula_identity(op: str, source_a: str, source_b: str) -> str:
+    """Canonical formula identity, e.g. ``sum(net,tax)``.
+
+    Mirrors the engine's claim identity (entropy/measurements/derived_value.py):
+    lowercased operands, sorted for commutative operations — so the recorded label
+    and the engine's adjudication slot share one spelling.
+    """
+    a, b = source_a.strip().lower(), source_b.strip().lower()
+    if op in _COMMUTATIVE_OPS and b < a:
+        a, b = b, a
+    return f"{op}({a},{b})"
+
+
+# Name patterns per op: (target_suffix, (source_a part, lo, hi), (source_b part, lo, hi)).
+# The suffix vocabulary is op-specific so the target name advertises ITS op; the value
+# ranges keep targets away from zero (zero-target rows are excluded from the engine's
+# grading), keep divisors well above 1, and keep difference minuends strictly above
+# subtrahends — which also makes every alternate-op value separate from the named
+# formula's value by orders of magnitude more than the 0.01 grading tolerance.
+_NamePart = tuple[str, float, float]
+_FormulaPattern = tuple[str, _NamePart, _NamePart]
+_OP_PATTERNS: dict[str, tuple[_FormulaPattern, ...]] = {
+    "sum": (
+        ("total", ("subtotal", 100.0, 900.0), ("tax", 10.0, 200.0)),
+        ("gross", ("net", 200.0, 1500.0), ("tax", 20.0, 300.0)),
+        ("total", ("base", 50.0, 600.0), ("fees", 5.0, 90.0)),
+        ("total", ("principal", 1000.0, 8000.0), ("interest", 10.0, 400.0)),
+    ),
+    "difference": (
+        ("net", ("gross", 500.0, 2000.0), ("tax", 20.0, 300.0)),
+        ("net", ("gross", 300.0, 1200.0), ("deductions", 10.0, 250.0)),
+        ("outstanding", ("invoiced", 1000.0, 5000.0), ("paid", 100.0, 800.0)),
+        ("remaining", ("budget", 2000.0, 9000.0), ("spent", 100.0, 1500.0)),
+    ),
+    "product": (
+        ("amount", ("quantity", 2.0, 50.0), ("unit_price", 5.0, 200.0)),
+        ("cost", ("hours", 2.0, 80.0), ("hourly_rate", 40.0, 150.0)),
+        ("value", ("units", 3.0, 60.0), ("price_per_unit", 5.0, 120.0)),
+    ),
+    "ratio": (
+        ("unit_cost", ("cost", 500.0, 5000.0), ("units", 5.0, 80.0)),
+        ("avg_price", ("revenue", 1000.0, 9000.0), ("quantity", 10.0, 90.0)),
+        ("daily_rate", ("charge", 600.0, 4000.0), ("days", 2.0, 30.0)),
+    ),
+}
+
+# Group themes — each group's three columns share a distinctive prefix so the LLM can
+# attribute sources to targets unambiguously (the fair-shot condition for the
+# name-reading witness); sampled WITHOUT replacement, so names never collide.
+_FORMULA_THEMES: tuple[str, ...] = (
+    "freight",
+    "storage",
+    "handling",
+    "consulting",
+    "licensing",
+    "maintenance",
+    "marketing",
+    "logistics",
+    "subscription",
+    "training",
+    "catering",
+    "leasing",
+    "insurance",
+    "packaging",
+    "inspection",
+    "advertising",
+)
+
+
+@dataclass(frozen=True)
+class FormulaDivergenceFamilyParams:
+    """The parameter space the formula_divergence generator samples from."""
+
+    n_groups: tuple[int, int] = (6, 10)  # labelled (source_a, source_b, target) groups
+    agree_fraction: tuple[float, float] = (0.3, 0.45)  # fraction of groups that are clean
+    wholesale_fraction: tuple[float, float] = (0.25, 0.4)  # all-rows-divergent fraction; rest partial
+    divergence_ratio: tuple[float, float] = (0.15, 0.6)  # B-row fraction within a partial group
+    scaled_fraction: tuple[float, float] = (0.0, 0.25)  # of divergent groups: B = scaled (out-of-space)
+    scaled_rate: tuple[float, float] = (0.08, 0.30)  # |factor − 1| for the scaled stress kind
+
+    def __post_init__(self) -> None:
+        if self.n_groups[0] < 3:
+            raise ValueError(
+                "formula_divergence family: n_groups lower bound must be >= 3 — every draw "
+                "carries all three strata (agree / wholesale / partial)."
+            )
+        if not (0.0 < self.divergence_ratio[0] and self.divergence_ratio[1] < 1.0):
+            raise ValueError(
+                "formula_divergence family: divergence_ratio must stay strictly inside (0, 1) "
+                "— ratio 0 is the agree stratum, ratio 1 is wholesale."
+            )
+        if self.scaled_rate[0] < 0.02:
+            raise ValueError(
+                "formula_divergence family: scaled_rate below 0.02 — a near-1 factor can hide "
+                "under the engine's 0.01 absolute grading tolerance on small targets."
+            )
+
+
+@dataclass(frozen=True)
+class FormulaProbeGroup:
+    """One labelled formula group: two source columns + a target with a named formula.
+
+    ``named_op`` is what the target's NAME advertises over (source_a, source_b);
+    the values follow ``actual_op`` (or the named formula × ``factor`` for the scaled
+    kind) on ``divergence_ratio`` of the rows. ``mode`` is the stratum label.
+    """
+
+    theme: str
+    target: str
+    source_a: str
+    source_b: str
+    a_range: tuple[float, float]
+    b_range: tuple[float, float]
+    named_op: str
+    mode: str  # agree | wholesale | partial
+    actual_op: str  # == named_op for agree groups and for the scaled kind
+    factor: float | None  # scaled kind: values = named formula × factor; None otherwise
+    divergence_ratio: float  # 0.0 agree, 1.0 wholesale, sampled in (0, 1) for partial
+
+    @property
+    def named_formula(self) -> str:
+        """The canonical formula the NAME advertises — the llm_hypothesis ground truth."""
+        return formula_identity(self.named_op, self.source_a, self.source_b)
+
+    @property
+    def actual_formula(self) -> str:
+        """The canonical formula the divergent VALUES follow — the data-side ground truth."""
+        if self.factor is not None:
+            return f"scaled({formula_identity(self.named_op, self.source_a, self.source_b)},x{self.factor})"
+        return formula_identity(self.actual_op, self.source_a, self.source_b)
+
+    @property
+    def discoverable(self) -> bool:
+        """Whether the divergent values' formula is in the engine's binary-op language."""
+        return self.factor is None
+
+
+@dataclass(frozen=True)
+class FormulaDivergenceFamilySample:
+    """One concrete, fully-labelled draw: the formula groups for a probe table."""
+
+    seed: int
+    groups: tuple[FormulaProbeGroup, ...]
+
+
+def sample_formula_divergence_family(
+    seed: int, params: FormulaDivergenceFamilyParams | None = None
+) -> FormulaDivergenceFamilySample:
+    """Sample one labelled formula_divergence instance — deterministic in ``seed``.
+
+    Draws ``n_groups`` themed groups, splits them into the agree / wholesale / partial
+    strata by SAMPLED fractions (each stratum non-empty), and gives every divergent
+    group an alternate truth: an op-swap (a different in-space binary formula over the
+    same sources — discoverable) or, for a sampled subset, the scaled out-of-space
+    kind. Different seeds → different themes/ops/strata (surface varies); the same
+    seed reproduces exactly (AC1).
+    """
+    p = params or FormulaDivergenceFamilyParams()
+    rng = random.Random(f"formula_divergence:{seed}")
+
+    n = min(rng.randint(*p.n_groups), len(_FORMULA_THEMES))
+    themes = rng.sample(_FORMULA_THEMES, n)
+    ops = [FORMULA_OPS[rng.randrange(len(FORMULA_OPS))] for _ in range(n)]
+    patterns = [_OP_PATTERNS[op][rng.randrange(len(_OP_PATTERNS[op]))] for op in ops]
+
+    # Stratum sizes from sampled fractions, clamped so all three strata are non-empty.
+    n_agree = max(1, min(round(n * rng.uniform(*p.agree_fraction)), n - 2))
+    n_wholesale = max(1, min(round(n * rng.uniform(*p.wholesale_fraction)), n - n_agree - 1))
+    modes = ["agree"] * n_agree + ["wholesale"] * n_wholesale + ["partial"] * (n - n_agree - n_wholesale)
+    rng.shuffle(modes)
+
+    # The scaled (out-of-space) kind: a sampled subset of divergent groups. Ratio-named
+    # targets are excluded — a near-1 factor on a small quotient could hide under the
+    # engine's 0.01 absolute grading tolerance, muddying the label.
+    divergent = [i for i in range(n) if modes[i] != "agree"]
+    eligible = [i for i in divergent if ops[i] != "ratio"]
+    n_scaled = min(len(eligible), round(len(divergent) * rng.uniform(*p.scaled_fraction)))
+    scaled_idx = set(rng.sample(eligible, n_scaled))
+
+    groups: list[FormulaProbeGroup] = []
+    for i, theme in enumerate(themes):
+        op, mode = ops[i], modes[i]
+        suffix, (part_a, a_lo, a_hi), (part_b, b_lo, b_hi) = patterns[i]
+        actual_op, factor = op, None
+        if mode != "agree":
+            if i in scaled_idx:
+                rate = rng.uniform(*p.scaled_rate)
+                factor = round(1.0 + rate if rng.random() < 0.5 else 1.0 - rate, 4)
+            else:
+                actual_op = rng.choice([o for o in FORMULA_OPS if o != op])
+        ratio = 0.0
+        if mode == "wholesale":
+            ratio = 1.0
+        elif mode == "partial":
+            ratio = round(rng.uniform(*p.divergence_ratio), 4)
+        groups.append(
+            FormulaProbeGroup(
+                theme=theme,
+                target=f"{theme}_{suffix}",
+                source_a=f"{theme}_{part_a}",
+                source_b=f"{theme}_{part_b}",
+                a_range=(a_lo, a_hi),
+                b_range=(b_lo, b_hi),
+                named_op=op,
+                mode=mode,
+                actual_op=actual_op,
+                factor=factor,
+                divergence_ratio=ratio,
+            )
+        )
+    return FormulaDivergenceFamilySample(seed=seed, groups=tuple(groups))

@@ -11,9 +11,12 @@ import random
 import polars as pl
 
 from .families import (
+    FormulaDivergenceFamilyParams,
     NullTokenFamilyParams,
     StockFlowFamilyParams,
+    apply_operation,
     mint_decoy,
+    sample_formula_divergence_family,
     sample_mixed_units_family,
     sample_null_token_family,
     sample_stock_flow_family,
@@ -53,19 +56,21 @@ def corrupt_types(
     new_col = pl.when(mask).then(replacements).otherwise(df[col].cast(pl.Utf8)).alias(col)
     df = df.with_columns(new_col)
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("TYPE"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(indices),
-        layer="value",
-        dimension="type_fidelity",
-        sub_dimension="type_corruption",
-        detector_id="type_fidelity",
-        injection_type="corrupt_type",
-        parameters={"ratio": ratio, "garbage_values": garbage},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("TYPE"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(indices),
+            layer="value",
+            dimension="type_fidelity",
+            sub_dimension="type_corruption",
+            detector_id="type_fidelity",
+            injection_type="corrupt_type",
+            parameters={"ratio": ratio, "garbage_values": garbage},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -99,19 +104,21 @@ def inject_null_tokens(
     new_col = pl.when(mask).then(replacements).otherwise(df[col].cast(pl.Utf8)).alias(col)
     df = df.with_columns(new_col)
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("NULLTOK"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(indices),
-        layer="value",
-        dimension="null_semantics",
-        sub_dimension="null_marker",
-        detector_id="null_semantics",
-        injection_type="inject_null_tokens",
-        parameters={"ratio": ratio, "tokens": list(tokens)},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("NULLTOK"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(indices),
+            layer="value",
+            dimension="null_semantics",
+            sub_dimension="null_marker",
+            detector_id="null_semantics",
+            injection_type="inject_null_tokens",
+            parameters={"ratio": ratio, "tokens": list(tokens)},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -180,31 +187,33 @@ def inject_null_token_family(
         new_values[i] = decoy
     df = df.with_columns(pl.Series(col, new_values))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("NULLFAM"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(marker_rows + decoy_rows),
-        layer="value",
-        dimension="null_semantics",
-        sub_dimension="null_marker",
-        detector_id="null_semantics",
-        injection_type="inject_null_token_family",
-        parameters={
-            "family": "null_tokens",
-            "seed": seed,
-            "markers": list(sample.markers),
-            "in_vocab_markers": list(sample.in_vocab_markers),
-            "vocab_coverage": sample.vocab_coverage,
-            "decoy_style": sample.decoy_style,
-            "decoys": sorted(set(minted_decoys)),
-            "marker_ratio": sample.marker_ratio,
-            "decoy_ratio": sample.decoy_ratio,
-            "marker_rows": sorted(marker_rows),
-            "decoy_rows": sorted(decoy_rows),
-        },
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("NULLFAM"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(marker_rows + decoy_rows),
+            layer="value",
+            dimension="null_semantics",
+            sub_dimension="null_marker",
+            detector_id="null_semantics",
+            injection_type="inject_null_token_family",
+            parameters={
+                "family": "null_tokens",
+                "seed": seed,
+                "markers": list(sample.markers),
+                "in_vocab_markers": list(sample.in_vocab_markers),
+                "vocab_coverage": sample.vocab_coverage,
+                "decoy_style": sample.decoy_style,
+                "decoys": sorted(set(minted_decoys)),
+                "marker_ratio": sample.marker_ratio,
+                "decoy_ratio": sample.decoy_ratio,
+                "marker_rows": sorted(marker_rows),
+                "decoy_rows": sorted(decoy_rows),
+            },
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -237,23 +246,25 @@ def inject_scale_mix(
             values[i] = round(float(values[i]) * sample.scale_factor, 2)
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("SCALEMIX"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(rows),
-        layer="semantic",
-        dimension="units",
-        sub_dimension="unit_consistency",
-        detector_id="unit_consistency",
-        injection_type="inject_scale_mix",
-        parameters={
-            "seed": seed,
-            "scale_factor": sample.scale_factor,
-            "mix_ratio": sample.mix_ratio,
-        },
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("SCALEMIX"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(rows),
+            layer="semantic",
+            dimension="units",
+            sub_dimension="unit_consistency",
+            detector_id="unit_consistency",
+            injection_type="inject_scale_mix",
+            parameters={
+                "seed": seed,
+                "scale_factor": sample.scale_factor,
+                "mix_ratio": sample.mix_ratio,
+            },
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -275,19 +286,21 @@ def introduce_nulls(
     new_col = pl.when(mask).then(pl.lit(None)).otherwise(df[col]).alias(col)
     df = df.with_columns(new_col)
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("NULL"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(indices),
-        layer="value",
-        dimension="completeness",
-        sub_dimension="null_injection",
-        detector_id="null_ratio",
-        injection_type="introduce_nulls",
-        parameters={"ratio": ratio},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("NULL"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(indices),
+            layer="value",
+            dimension="completeness",
+            sub_dimension="null_injection",
+            detector_id="null_ratio",
+            injection_type="introduce_nulls",
+            parameters={"ratio": ratio},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -312,26 +325,28 @@ def inject_outliers(
         if values[i] is not None:
             try:
                 val = float(values[i])
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             values[i] = val * factor * rng.choice([1, -1]) if val != 0 else factor * 1000
             actual_affected.append(i)
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("OUTLIER"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(actual_affected),
-        layer="value",
-        dimension="distribution",
-        sub_dimension="outlier_injection",
-        detector_id="outlier_rate",
-        injection_type="inject_outliers",
-        parameters={"ratio": ratio, "factor": factor},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("OUTLIER"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(actual_affected),
+            layer="value",
+            dimension="distribution",
+            sub_dimension="outlier_injection",
+            detector_id="outlier_rate",
+            injection_type="inject_outliers",
+            parameters={"ratio": ratio, "factor": factor},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -373,19 +388,21 @@ def break_benford(
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("BENFORD"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(affected),
-        layer="value",
-        dimension="distribution",
-        sub_dimension="benford_violation",
-        detector_id="benford",
-        injection_type="break_benford",
-        parameters={"method": method},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("BENFORD"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(affected),
+            layer="value",
+            dimension="distribution",
+            sub_dimension="benford_violation",
+            detector_id="benford",
+            injection_type="break_benford",
+            parameters={"method": method},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -400,19 +417,21 @@ def obscure_column_names(
     df = df.rename(mapping)
 
     for original, obscured in mapping.items():
-        registry.record(EntropyInjection(
-            injection_id=registry.next_id("NAME"),
-            target_file=f"{table_name}.csv",
-            target_column=obscured,
-            target_rows=[],  # All rows affected (schema change)
-            layer="semantic",
-            dimension="business_meaning",
-            sub_dimension="column_name_obscured",
-            detector_id="business_meaning",
-            injection_type="obscure_column_names",
-            parameters={"original": original, "obscured": obscured},
-            severity=severity,
-        ))
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("NAME"),
+                target_file=f"{table_name}.csv",
+                target_column=obscured,
+                target_rows=[],  # All rows affected (schema change)
+                layer="semantic",
+                dimension="business_meaning",
+                sub_dimension="column_name_obscured",
+                detector_id="business_meaning",
+                injection_type="obscure_column_names",
+                parameters={"original": original, "obscured": obscured},
+                severity=severity,
+            )
+        )
     return df
 
 
@@ -439,19 +458,21 @@ def mix_units(
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("UNIT"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(indices),
-        layer="semantic",
-        dimension="unit_consistency",
-        sub_dimension="mixed_currency",
-        detector_id="unit_entropy",
-        injection_type="mix_units",
-        parameters={"alt_currency": alt_currency, "ratio": ratio, "fx_rate": fx_rate},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("UNIT"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(indices),
+            layer="semantic",
+            dimension="unit_consistency",
+            sub_dimension="mixed_currency",
+            detector_id="unit_entropy",
+            injection_type="mix_units",
+            parameters={"alt_currency": alt_currency, "ratio": ratio, "fx_rate": fx_rate},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -477,7 +498,7 @@ def corrupt_dates(
         try:
             # Parse the ISO date
             d = date_type.fromisoformat(values[i])
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
 
         fmt = rng.choice(formats)
@@ -493,6 +514,7 @@ def corrupt_dates(
             values[i] = d.strftime("%b %d, %Y")
         elif fmt == "epoch":
             import calendar
+
             values[i] = str(calendar.timegm(d.timetuple()))
         else:
             values[i] = d.isoformat()
@@ -500,19 +522,21 @@ def corrupt_dates(
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("DATE"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(affected),
-        layer="structural",
-        dimension="format_consistency",
-        sub_dimension="ambiguous_dates",
-        detector_id="temporal_entropy",
-        injection_type="corrupt_dates",
-        parameters={"formats": formats},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("DATE"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(affected),
+            layer="structural",
+            dimension="format_consistency",
+            sub_dimension="ambiguous_dates",
+            detector_id="temporal_entropy",
+            injection_type="corrupt_dates",
+            parameters={"formats": formats},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -536,19 +560,21 @@ def break_referential_integrity(
 
     df = df.with_columns(pl.Series(fk_col, values))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("FK"),
-        target_file=f"{table_name}.csv",
-        target_column=fk_col,
-        target_rows=sorted(indices),
-        layer="structural",
-        dimension="referential_integrity",
-        sub_dimension="orphaned_foreign_keys",
-        detector_id="relationship_entropy",
-        injection_type="break_referential_integrity",
-        parameters={"ratio": ratio},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("FK"),
+            target_file=f"{table_name}.csv",
+            target_column=fk_col,
+            target_rows=sorted(indices),
+            layer="structural",
+            dimension="referential_integrity",
+            sub_dimension="orphaned_foreign_keys",
+            detector_id="relationship_entropy",
+            injection_type="break_referential_integrity",
+            parameters={"ratio": ratio},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -575,19 +601,21 @@ def add_duplicate_fk_paths(
 
     df = df.with_columns(pl.Series(new_col_name, new_values))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("DUPFK"),
-        target_file=f"{table_name}.csv",
-        target_column=new_col_name,
-        target_rows=sorted(noise_indices),
-        layer="structural",
-        dimension="join_paths",
-        sub_dimension="duplicate_fk_path",
-        detector_id="join_path_determinism",
-        injection_type="add_duplicate_fk_paths",
-        parameters={"source_col": existing_fk_col, "noise_ratio": noise_ratio},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("DUPFK"),
+            target_file=f"{table_name}.csv",
+            target_column=new_col_name,
+            target_rows=sorted(noise_indices),
+            layer="structural",
+            dimension="join_paths",
+            sub_dimension="duplicate_fk_path",
+            detector_id="join_path_determinism",
+            injection_type="add_duplicate_fk_paths",
+            parameters={"source_col": existing_fk_col, "noise_ratio": noise_ratio},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -616,19 +644,21 @@ def drift_formula(
 
     df = df.with_columns(_safe_series(derived_col, values, df[derived_col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("DRIFT"),
-        target_file=f"{table_name}.csv",
-        target_column=derived_col,
-        target_rows=sorted(indices),
-        layer="computational",
-        dimension="derived_consistency",
-        sub_dimension="formula_drift",
-        detector_id="derived_value",
-        injection_type="drift_formula",
-        parameters={"source_cols": source_cols, "error_ratio": error_ratio},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("DRIFT"),
+            target_file=f"{table_name}.csv",
+            target_column=derived_col,
+            target_rows=sorted(indices),
+            layer="computational",
+            dimension="derived_consistency",
+            sub_dimension="formula_drift",
+            detector_id="derived_value",
+            injection_type="drift_formula",
+            parameters={"source_cols": source_cols, "error_ratio": error_ratio},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -655,7 +685,7 @@ def inject_temporal_drift(
             continue
         try:
             d = date_type.fromisoformat(time_values[i])
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if d >= cutoff:
             val_values[i] = round(float(val_values[i]) * shift_factor, 2)
@@ -663,19 +693,21 @@ def inject_temporal_drift(
 
     df = df.with_columns(_safe_series(value_col, val_values, df[value_col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("TDRIFT"),
-        target_file=f"{table_name}.csv",
-        target_column=value_col,
-        target_rows=sorted(affected),
-        layer="value",
-        dimension="temporal_stability",
-        sub_dimension="distribution_shift",
-        detector_id="temporal_drift",
-        injection_type="inject_temporal_drift",
-        parameters={"shift_date": shift_date, "shift_factor": shift_factor},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("TDRIFT"),
+            target_file=f"{table_name}.csv",
+            target_column=value_col,
+            target_rows=sorted(affected),
+            layer="value",
+            dimension="temporal_stability",
+            sub_dimension="distribution_shift",
+            detector_id="temporal_drift",
+            injection_type="inject_temporal_drift",
+            parameters={"shift_date": shift_date, "shift_factor": shift_factor},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -710,7 +742,7 @@ def break_gl_invoice_match(
         if values[i] is not None:
             try:
                 val = float(values[i])
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             factor = rng.uniform(*factor_range)
             # Avoid factor ≈ 1.0 (undetectable)
@@ -721,19 +753,21 @@ def break_gl_invoice_match(
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("XMATCH"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(actual_affected),
-        layer="structural",
-        dimension="cross_table_consistency",
-        sub_dimension="gl_invoice_mismatch",
-        detector_id="cross_table_consistency",
-        injection_type="break_gl_invoice_match",
-        parameters={"ratio": ratio, "factor_range": list(factor_range)},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("XMATCH"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(actual_affected),
+            layer="structural",
+            dimension="cross_table_consistency",
+            sub_dimension="gl_invoice_mismatch",
+            detector_id="cross_table_consistency",
+            injection_type="break_gl_invoice_match",
+            parameters={"ratio": ratio, "factor_range": list(factor_range)},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -762,7 +796,7 @@ def break_payment_bank_match(
         if values[i] is not None:
             try:
                 val = float(values[i])
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             factor = rng.uniform(*factor_range)
             if abs(factor - 1.0) < 0.03:
@@ -772,19 +806,21 @@ def break_payment_bank_match(
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("XMATCH"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(actual_affected),
-        layer="structural",
-        dimension="cross_table_consistency",
-        sub_dimension="payment_bank_mismatch",
-        detector_id="cross_table_consistency",
-        injection_type="break_payment_bank_match",
-        parameters={"ratio": ratio, "factor_range": list(factor_range)},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("XMATCH"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(actual_affected),
+            layer="structural",
+            dimension="cross_table_consistency",
+            sub_dimension="payment_bank_mismatch",
+            detector_id="cross_table_consistency",
+            injection_type="break_payment_bank_match",
+            parameters={"ratio": ratio, "factor_range": list(factor_range)},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -814,7 +850,7 @@ def break_trial_balance(
         if values[i] is not None:
             try:
                 val = float(values[i])
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 continue
             # Percentage error (±error_range)
             error_pct = rng.uniform(*error_range) * rng.choice([1, -1]) / 100.0
@@ -823,19 +859,21 @@ def break_trial_balance(
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("XBAL"),
-        target_file=f"{table_name}.csv",
-        target_column=col,
-        target_rows=sorted(actual_affected),
-        layer="computational",
-        dimension="cross_table_consistency",
-        sub_dimension="trial_balance_gl_mismatch",
-        detector_id="derived_value_consistency",
-        injection_type="break_trial_balance",
-        parameters={"ratio": ratio, "error_range": list(error_range)},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("XBAL"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(actual_affected),
+            layer="computational",
+            dimension="cross_table_consistency",
+            sub_dimension="trial_balance_gl_mismatch",
+            detector_id="derived_value_consistency",
+            injection_type="break_trial_balance",
+            parameters={"ratio": ratio, "error_range": list(error_range)},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -867,7 +905,7 @@ def create_mutual_exclusivity(
         try:
             a_nonzero = a_vals[i] is not None and float(a_vals[i]) != 0
             b_nonzero = b_vals[i] is not None and float(b_vals[i]) != 0
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             continue
         if a_nonzero and b_nonzero:
             # Already both populated — zero one out
@@ -877,24 +915,28 @@ def create_mutual_exclusivity(
                 a_vals[i] = zero_a
             affected.append(i)
 
-    df = df.with_columns([
-        _safe_series(col_a, a_vals, df[col_a].dtype),
-        _safe_series(col_b, b_vals, df[col_b].dtype),
-    ])
+    df = df.with_columns(
+        [
+            _safe_series(col_a, a_vals, df[col_a].dtype),
+            _safe_series(col_b, b_vals, df[col_b].dtype),
+        ]
+    )
 
-    registry.record(EntropyInjection(
-        injection_id=registry.next_id("MUTEX"),
-        target_file=f"{table_name}.csv",
-        target_column=f"{col_a}/{col_b}",
-        target_rows=sorted(affected),
-        layer="structural",
-        dimension="dimensional_structure",
-        sub_dimension="mutual_exclusivity",
-        detector_id="dimensional_entropy",
-        injection_type="create_mutual_exclusivity",
-        parameters={"col_a": col_a, "col_b": col_b},
-        severity=severity,
-    ))
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("MUTEX"),
+            target_file=f"{table_name}.csv",
+            target_column=f"{col_a}/{col_b}",
+            target_rows=sorted(affected),
+            layer="structural",
+            dimension="dimensional_structure",
+            sub_dimension="mutual_exclusivity",
+            detector_id="dimensional_entropy",
+            injection_type="create_mutual_exclusivity",
+            parameters={"col_a": col_a, "col_b": col_b},
+            severity=severity,
+        )
+    )
     return df
 
 
@@ -976,6 +1018,118 @@ def inject_stock_flow_probes(
                     "is_stock": col.is_stock,
                     "true_behavior": "stock" if col.is_stock else "flow",
                     "ambiguous": col.ambiguous,  # hard (conflicting-cue) vs clear regime
+                },
+                severity=severity,
+            )
+        )
+    return df.with_columns(*additions)
+
+
+def inject_formula_divergence(
+    df: pl.DataFrame,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    n_groups: list[int] | None = None,
+    agree_fraction: list[float] | None = None,
+    wholesale_fraction: list[float] | None = None,
+    divergence_ratio: list[float] | None = None,
+    scaled_fraction: list[float] | None = None,
+    scaled_rate: list[float] | None = None,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Add SAMPLED formula groups whose target NAME advertises one formula (DAT-442).
+
+    The generative successor to ``drift_formula``: each sampled
+    :class:`~testdata.entropy.families.FormulaProbeGroup` becomes three numeric columns
+    on the probe table — two sources and a target named for a formula over them. In the
+    **agree** stratum the values follow the named formula (the true-negative class); in
+    **wholesale** every row follows a different sampled truth (an in-space op-swap, or
+    the labelled out-of-space scaled kind); in **partial** a sampled fraction of rows
+    does. Values stay NUMERIC throughout — the divergence is a different formula, never
+    an unparseable token — and targets are computed from the 2-dp-rounded sources, so a
+    clean row sits within the engine's 0.01 absolute grading tolerance while a
+    divergent row violates it by construction.
+
+    Each TARGET column is recorded with the labels the calibration rig scores the
+    derived_value witnesses against: ``named_formula`` (what the name advertises — the
+    ``llm_hypothesis`` ground truth), ``actual_formula`` (what the divergent values
+    follow), ``divergence_mode`` / ``divergence_ratio``, and ``discoverable`` (whether
+    the truth lies in the engine's binary-op discovery language). Source columns are
+    unlabelled scaffolding. Surface varies by ``seed``; the recorded seed reproduces
+    exactly and is independent of injection order (its own RNG).
+    """
+    overrides: dict[str, object] = {}
+    if n_groups is not None:
+        overrides["n_groups"] = tuple(n_groups)
+    if agree_fraction is not None:
+        overrides["agree_fraction"] = tuple(agree_fraction)
+    if wholesale_fraction is not None:
+        overrides["wholesale_fraction"] = tuple(wholesale_fraction)
+    if divergence_ratio is not None:
+        overrides["divergence_ratio"] = tuple(divergence_ratio)
+    if scaled_fraction is not None:
+        overrides["scaled_fraction"] = tuple(scaled_fraction)
+    if scaled_rate is not None:
+        overrides["scaled_rate"] = tuple(scaled_rate)
+    sample = sample_formula_divergence_family(seed, FormulaDivergenceFamilyParams(**overrides))  # type: ignore[arg-type]
+
+    n = len(df)
+    place = random.Random(f"formula_divergence_values:{seed}")  # seed-derived, order-independent
+    additions: list[pl.Series] = []
+    for group in sample.groups:
+        a_vals = [round(place.uniform(*group.a_range), 2) for _ in range(n)]
+        b_vals = [round(place.uniform(*group.b_range), 2) for _ in range(n)]
+        if group.mode == "wholesale":
+            divergent = list(range(n))
+        elif group.mode == "partial":
+            divergent = sorted(place.sample(range(n), max(1, min(n, round(n * group.divergence_ratio)))))
+        else:
+            divergent = []
+        divergent_set = set(divergent)
+
+        values: list[float] = []
+        for i in range(n):
+            named = apply_operation(group.named_op, a_vals[i], b_vals[i])
+            if i not in divergent_set:
+                values.append(round(named, 2))
+            elif group.factor is not None:
+                values.append(round(named * group.factor, 2))
+            else:
+                values.append(round(apply_operation(group.actual_op, a_vals[i], b_vals[i]), 2))
+
+        additions.extend(
+            (
+                pl.Series(group.source_a, a_vals),
+                pl.Series(group.source_b, b_vals),
+                pl.Series(group.target, values),
+            )
+        )
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("FORMDIV"),
+                target_file=f"{table_name}.csv",
+                target_column=group.target,
+                target_rows=divergent,
+                layer="computational",
+                dimension="derived_consistency",
+                sub_dimension="formula_divergence",
+                detector_id="derived_value",
+                injection_type="inject_formula_divergence",
+                parameters={
+                    "family": "formula_divergence",
+                    "seed": seed,
+                    "theme": group.theme,
+                    "named_formula": group.named_formula,
+                    "named_op": group.named_op,
+                    "actual_formula": group.actual_formula,
+                    "actual_op": group.actual_op,
+                    "factor": group.factor,
+                    "divergence_mode": group.mode,
+                    "divergence_ratio": group.divergence_ratio,
+                    "discoverable": group.discoverable,
+                    "source_columns": [group.source_a, group.source_b],
                 },
                 severity=severity,
             )
