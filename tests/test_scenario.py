@@ -73,3 +73,50 @@ def test_low_strategy():
     low = run_scenario(strategy_name="low", seed=42, months=12)
     medium = run_scenario(strategy_name="medium", seed=42, months=12)
     assert len(low["registry"]) < len(medium["registry"])
+
+
+_EVENTS_BACKED_STRATEGY = """\
+name: events-backed-stockflow-test
+level: high
+description: events-backed stock/flow probes (DAT-491)
+injections:
+  - injector: inject_stock_flow_probes
+    table: measure_probes
+    detector_id: temporal_behavior
+    params:
+      seed: 7
+      n_columns: [10, 10]
+      backed_fraction: [1.0, 1.0]
+      broken_fraction: [0.5, 0.5]
+"""
+
+
+def test_events_backed_stockflow_strategy_emits_probe_events():
+    """The runner threads the dataframes dict into the injector, exports probe_events,
+    and the entropy map carries the backed/reconciles ground truth (DAT-491)."""
+    from testdata.scenarios.runner import run_scenario as run
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        strategy_path = Path(tmpdir) / "events_backed.yaml"
+        strategy_path.write_text(_EVENTS_BACKED_STRATEGY)
+        output = Path(tmpdir) / "output"
+        result = run("month-end-close", strategy_file=strategy_path, seed=42, months=6, output_dir=output)
+
+        probes = result["dataframes"]["measure_probes"]
+        events = result["dataframes"]["probe_events"]
+        # The shared slice dimension + strictly finer event grain (>= 2 events per cell).
+        assert set(events["series_id"].to_list()) == set(probes["series_id"].to_list())
+        assert len(events) >= 2 * len(probes)
+        assert (output / "probe_events.csv").exists()
+        assert (output / "measure_probes.csv").exists()
+
+        with open(output / "entropy_map.yaml") as f:
+            emap = yaml.safe_load(f)
+        stockflow = [
+            inj["parameters"] for inj in emap["injections"] if inj["injection_type"] == "inject_stock_flow_probes"
+        ]
+        backed = [p for p in stockflow if p["backed"]]
+        assert backed and all(p["events_table"] == "probe_events" for p in backed)
+        assert {p["reconciles"] for p in backed} == {True, False}  # both calibration strata
+        for p in backed:
+            assert p["events_column"] in events.columns

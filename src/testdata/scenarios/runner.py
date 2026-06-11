@@ -101,14 +101,16 @@ def load_scenario_config(scenario_name: str) -> ScenarioConfig:
     if "sources" in raw:
         sources = []
         for src_name, src_cfg in raw["sources"].items():
-            sources.append(SourceConfig(
-                name=src_name,
-                description=src_cfg.get("description", ""),
-                tables=src_cfg["tables"],
-                column_style=src_cfg.get("column_style", "snake_case"),
-                key_strategy=src_cfg.get("key_strategy", "surrogate"),
-                format=src_cfg.get("format", "csv"),
-            ))
+            sources.append(
+                SourceConfig(
+                    name=src_name,
+                    description=src_cfg.get("description", ""),
+                    tables=src_cfg["tables"],
+                    column_style=src_cfg.get("column_style", "snake_case"),
+                    key_strategy=src_cfg.get("key_strategy", "surrogate"),
+                    format=src_cfg.get("format", "csv"),
+                )
+            )
 
     return ScenarioConfig(
         name=raw["name"],
@@ -138,6 +140,9 @@ def _apply_injection(
     all_kwargs["registry"] = registry
     all_kwargs["table_name"] = spec.table
     all_kwargs["rng"] = rng
+    # The run's full table mapping — passed only to injectors that declare it, so an
+    # injector can emit a companion table (e.g. the stock/flow probe_events, DAT-491).
+    all_kwargs["dataframes"] = dataframes
 
     sig = inspect.signature(fn)
     accepted = set(sig.parameters.keys()) - {"df"}
@@ -224,9 +229,7 @@ def run_scenario(
 
     # Step 5: Estimate injection impact on ground truth metrics
     if len(registry) > 0:
-        ground_truth.injection_impact = estimate_injection_impact(
-            registry.export_dicts()
-        )
+        ground_truth.injection_impact = estimate_injection_impact(registry.export_dicts())
 
     # Step 6: Apply normalization
     dataframes, table_mapping = apply_normalization(dataframes, config.normalization)
@@ -311,21 +314,25 @@ def _export_multi_source(
             fmt=src.format,
         )
 
-        source_index.append({
-            "name": src.name,
-            "description": src.description,
-            "directory": src.name,
-            "tables": list(src_dfs.keys()),
-            "column_style": src.column_style,
-            "key_strategy": src.key_strategy,
-            "format": src.format,
-        })
+        source_index.append(
+            {
+                "name": src.name,
+                "description": src.description,
+                "directory": src.name,
+                "tables": list(src_dfs.keys()),
+                "column_style": src.column_style,
+                "key_strategy": src.key_strategy,
+                "format": src.format,
+            }
+        )
 
     # Write top-level sources.yaml
     with open(output_dir / "sources.yaml", "w") as f:
         yaml.dump(
             {"sources": source_index, "generation": generation_params},
-            f, default_flow_style=False, sort_keys=False,
+            f,
+            default_flow_style=False,
+            sort_keys=False,
         )
 
     # Write top-level entropy map
