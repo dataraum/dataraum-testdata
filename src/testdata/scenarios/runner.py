@@ -197,9 +197,10 @@ def run_scenario(
         strategy = get_strategy(strategy_name)
     rng = random.Random(seed + 1000)  # Offset so injections differ from generation
 
-    # Generate the stock/flow probe table's grain only when a strategy injects into it,
-    # so non-stock/flow strategies (the baseline) are untouched (DAT-445).
+    # Generate probe-table grains only when a strategy injects into them, so other
+    # strategies (the baseline) are untouched (DAT-445 stock/flow; DAT-442 formula).
     probe_series = 15 if any(s.table == "measure_probes" for s in strategy.injections) else 0
+    formula_probe_rows = 300 if any(s.table == "formula_probes" for s in strategy.injections) else 0
 
     # Step 1: Generate clean data
     dataset = generate_finance_dataset(
@@ -207,6 +208,7 @@ def run_scenario(
         months=months,
         fiscal_start=config.fiscal_start,
         probe_series=probe_series,
+        formula_probe_rows=formula_probe_rows,
         **config.generator_kwargs,
     )
 

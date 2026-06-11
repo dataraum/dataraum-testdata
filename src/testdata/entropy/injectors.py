@@ -12,10 +12,13 @@ import random
 import polars as pl
 
 from .families import (
+    FormulaDivergenceFamilyParams,
     NullTokenFamilyParams,
     ProbeColumn,
     StockFlowFamilyParams,
+    apply_operation,
     mint_decoy,
+    sample_formula_divergence_family,
     sample_mixed_units_family,
     sample_null_token_family,
     sample_stock_flow_family,
@@ -1207,4 +1210,116 @@ def inject_stock_flow_probes(
             rng=events_rng,
         )
 
+    return df.with_columns(*additions)
+
+
+def inject_formula_divergence(
+    df: pl.DataFrame,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    n_groups: list[int] | None = None,
+    agree_fraction: list[float] | None = None,
+    wholesale_fraction: list[float] | None = None,
+    divergence_ratio: list[float] | None = None,
+    scaled_fraction: list[float] | None = None,
+    scaled_rate: list[float] | None = None,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Add SAMPLED formula groups whose target NAME advertises one formula (DAT-442).
+
+    The generative successor to ``drift_formula``: each sampled
+    :class:`~testdata.entropy.families.FormulaProbeGroup` becomes three numeric columns
+    on the probe table — two sources and a target named for a formula over them. In the
+    **agree** stratum the values follow the named formula (the true-negative class); in
+    **wholesale** every row follows a different sampled truth (an in-space op-swap, or
+    the labelled out-of-space scaled kind); in **partial** a sampled fraction of rows
+    does. Values stay NUMERIC throughout — the divergence is a different formula, never
+    an unparseable token — and targets are computed from the 2-dp-rounded sources, so a
+    clean row sits within the engine's 0.01 absolute grading tolerance while a
+    divergent row violates it by construction.
+
+    Each TARGET column is recorded with the labels the calibration rig scores the
+    derived_value witnesses against: ``named_formula`` (what the name advertises — the
+    ``llm_hypothesis`` ground truth), ``actual_formula`` (what the divergent values
+    follow), ``divergence_mode`` / ``divergence_ratio``, and ``discoverable`` (whether
+    the truth lies in the engine's binary-op discovery language). Source columns are
+    unlabelled scaffolding. Surface varies by ``seed``; the recorded seed reproduces
+    exactly and is independent of injection order (its own RNG).
+    """
+    overrides: dict[str, object] = {}
+    if n_groups is not None:
+        overrides["n_groups"] = tuple(n_groups)
+    if agree_fraction is not None:
+        overrides["agree_fraction"] = tuple(agree_fraction)
+    if wholesale_fraction is not None:
+        overrides["wholesale_fraction"] = tuple(wholesale_fraction)
+    if divergence_ratio is not None:
+        overrides["divergence_ratio"] = tuple(divergence_ratio)
+    if scaled_fraction is not None:
+        overrides["scaled_fraction"] = tuple(scaled_fraction)
+    if scaled_rate is not None:
+        overrides["scaled_rate"] = tuple(scaled_rate)
+    sample = sample_formula_divergence_family(seed, FormulaDivergenceFamilyParams(**overrides))  # type: ignore[arg-type]
+
+    n = len(df)
+    place = random.Random(f"formula_divergence_values:{seed}")  # seed-derived, order-independent
+    additions: list[pl.Series] = []
+    for group in sample.groups:
+        a_vals = [round(place.uniform(*group.a_range), 2) for _ in range(n)]
+        b_vals = [round(place.uniform(*group.b_range), 2) for _ in range(n)]
+        if group.mode == "wholesale":
+            divergent = list(range(n))
+        elif group.mode == "partial":
+            divergent = sorted(place.sample(range(n), max(1, min(n, round(n * group.divergence_ratio)))))
+        else:
+            divergent = []
+        divergent_set = set(divergent)
+
+        values: list[float] = []
+        for i in range(n):
+            named = apply_operation(group.named_op, a_vals[i], b_vals[i])
+            if i not in divergent_set:
+                values.append(round(named, 2))
+            elif group.factor is not None:
+                values.append(round(named * group.factor, 2))
+            else:
+                values.append(round(apply_operation(group.actual_op, a_vals[i], b_vals[i]), 2))
+
+        additions.extend(
+            (
+                pl.Series(group.source_a, a_vals),
+                pl.Series(group.source_b, b_vals),
+                pl.Series(group.target, values),
+            )
+        )
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("FORMDIV"),
+                target_file=f"{table_name}.csv",
+                target_column=group.target,
+                target_rows=divergent,
+                layer="computational",
+                dimension="derived_consistency",
+                sub_dimension="formula_divergence",
+                detector_id="derived_value",
+                injection_type="inject_formula_divergence",
+                parameters={
+                    "family": "formula_divergence",
+                    "seed": seed,
+                    "theme": group.theme,
+                    "named_formula": group.named_formula,
+                    "named_op": group.named_op,
+                    "actual_formula": group.actual_formula,
+                    "actual_op": group.actual_op,
+                    "factor": group.factor,
+                    "divergence_mode": group.mode,
+                    "divergence_ratio": group.divergence_ratio,
+                    "discoverable": group.discoverable,
+                    "source_columns": [group.source_a, group.source_b],
+                },
+                severity=severity,
+            )
+        )
     return df.with_columns(*additions)

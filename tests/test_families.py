@@ -13,14 +13,19 @@ import pytest
 
 from testdata.entropy.families import (
     CURATED_VOCAB,
+    FORMULA_OPS,
+    FormulaDivergenceFamilyParams,
     NullTokenFamilyParams,
     StockFlowFamilyParams,
+    apply_operation,
     mint_decoy,
+    sample_formula_divergence_family,
     sample_mixed_units_family,
     sample_null_token_family,
     sample_stock_flow_family,
 )
 from testdata.entropy.injectors import (
+    inject_formula_divergence,
     inject_null_token_family,
     inject_scale_mix,
     inject_stock_flow_probes,
@@ -559,3 +564,138 @@ def test_stock_flow_ambiguity_produces_conflicting_cue_names() -> None:
         assert parts & _STOCK_CUES and parts & _FLOW_CUES, f"name not conflicting: {c.name}"
     # Default params stay clear-only — the shipped corpus + its 100% clear-name result.
     assert all(not c.ambiguous for c in sample_stock_flow_family(5).columns)
+
+
+# --- formula_divergence family (DAT-442, ADR-0009 derived-value) ------------
+
+
+def _probe_frame(n: int = 240) -> pl.DataFrame:
+    return pl.DataFrame({"probe_id": [f"FP{i:05d}" for i in range(n)]})
+
+
+def test_formula_divergence_family_reproduces_and_varies() -> None:
+    assert sample_formula_divergence_family(7) == sample_formula_divergence_family(7)  # recorded seed reproduces
+    surfaces = {
+        tuple((g.target, g.mode, g.actual_formula) for g in sample_formula_divergence_family(s).groups)
+        for s in range(40)
+    }
+    assert len(surfaces) > 30  # different seeds → a different group surface
+
+
+def test_formula_divergence_sample_is_well_formed() -> None:
+    for s in range(40):
+        fam = sample_formula_divergence_family(s)
+        names = [c for g in fam.groups for c in (g.source_a, g.source_b, g.target)]
+        assert names == list(dict.fromkeys(names))  # all column names unique within a draw
+        assert {g.mode for g in fam.groups} == {"agree", "wholesale", "partial"}  # all strata present
+        for g in fam.groups:
+            assert g.named_op in FORMULA_OPS
+            # group-coherent naming: the theme prefixes all three columns (source attribution)
+            assert all(c.startswith(f"{g.theme}_") for c in (g.source_a, g.source_b, g.target))
+            if g.mode == "agree":
+                assert g.actual_formula == g.named_formula
+                assert g.divergence_ratio == 0.0 and g.discoverable
+            elif g.mode == "wholesale":
+                assert g.divergence_ratio == 1.0
+                assert g.actual_formula != g.named_formula
+            else:  # partial
+                assert 0.15 <= g.divergence_ratio <= 0.6
+                assert g.actual_formula != g.named_formula
+            if g.factor is not None:  # the scaled stress kind: labelled out-of-space
+                assert not g.discoverable and g.mode != "agree"
+                assert g.named_op != "ratio"  # a near-1 factor on a tiny quotient could hide under tolerance
+                assert g.actual_op == g.named_op
+                assert 0.08 <= abs(g.factor - 1.0) <= 0.30
+            elif g.mode != "agree":  # op-swap: a DISCOVERABLE alternate binary formula
+                assert g.discoverable and g.actual_op != g.named_op and g.actual_op in FORMULA_OPS
+
+
+def test_formula_divergence_params_override_the_space() -> None:
+    fam = sample_formula_divergence_family(
+        3, FormulaDivergenceFamilyParams(n_groups=(12, 12), scaled_fraction=(1.0, 1.0))
+    )
+    assert len(fam.groups) == 12
+    # at full scaled_fraction every ELIGIBLE divergent group is scaled; only
+    # ratio-named groups (tolerance guard) fall back to the op-swap kind.
+    swapped = [g for g in fam.groups if g.mode != "agree" and g.factor is None]
+    assert all(g.named_op == "ratio" for g in swapped)
+
+
+def test_formula_divergence_guards_reject_degenerate_spaces() -> None:
+    with pytest.raises(ValueError, match="n_groups"):
+        FormulaDivergenceFamilyParams(n_groups=(2, 4))  # cannot carry all three strata
+    with pytest.raises(ValueError, match="divergence_ratio"):
+        FormulaDivergenceFamilyParams(divergence_ratio=(0.0, 0.5))  # 0 is agree, not partial
+    with pytest.raises(ValueError, match="scaled_rate"):
+        FormulaDivergenceFamilyParams(scaled_rate=(0.001, 0.1))  # hides under the 0.01 tolerance
+
+
+def test_inject_formula_divergence_values_follow_the_labels() -> None:
+    reg = InjectionRegistry()
+    out = inject_formula_divergence(
+        _probe_frame(), seed=20260611, registry=reg, table_name="formula_probes", rng=random.Random(0)
+    )
+    assert reg.injections
+    modes = set()
+    for inj in reg.injections:
+        p = inj.parameters
+        modes.add(p["divergence_mode"])
+        assert inj.detector_id == "derived_value"
+        assert inj.injection_type == "inject_formula_divergence"
+        src_a, src_b = p["source_columns"]
+        a, b = out[src_a].to_list(), out[src_b].to_list()
+        t = out[inj.target_column].to_list()
+        divergent = set(inj.target_rows)
+        for i in range(len(t)):
+            named = apply_operation(p["named_op"], a[i], b[i])
+            if i not in divergent:
+                # clean rows obey the NAMED formula within the engine's 0.01 grading tolerance
+                assert abs(t[i] - named) < 0.01
+            else:
+                # divergent rows measurably VIOLATE the named formula ...
+                assert abs(t[i] - named) > 0.01
+                # ... and exactly follow the labelled actual formula
+                if p["factor"] is not None:
+                    assert t[i] == round(named * p["factor"], 2)
+                else:
+                    assert abs(t[i] - apply_operation(p["actual_op"], a[i], b[i])) < 0.01
+        if p["divergence_mode"] == "agree":
+            assert not divergent
+        elif p["divergence_mode"] == "wholesale":
+            assert len(divergent) == len(t)
+        else:  # partial: the divergent-row fraction is the labelled ratio
+            assert abs(len(divergent) / len(t) - p["divergence_ratio"]) < 0.05
+    assert modes == {"agree", "wholesale", "partial"}
+
+
+def test_inject_formula_divergence_preserves_grain_and_labels_targets_only() -> None:
+    reg = InjectionRegistry()
+    out = inject_formula_divergence(
+        _probe_frame(40), seed=9, registry=reg, table_name="formula_probes", rng=random.Random(0)
+    )
+    assert "probe_id" in out.columns  # grain preserved
+    targets = {inj.target_column for inj in reg.injections}
+    for inj in reg.injections:
+        p = inj.parameters
+        assert inj.target_column in out.columns
+        # one labelled record per TARGET; sources are unlabelled scaffolding in the frame
+        assert set(p["source_columns"]) <= set(out.columns)
+        assert not set(p["source_columns"]) & targets
+        # the label vocabulary the rig scores witnesses against
+        assert {"named_formula", "actual_formula", "divergence_mode", "divergence_ratio", "discoverable"} <= set(p)
+        # values stay numeric — divergence is a different formula, never a token
+        assert out[inj.target_column].dtype == pl.Float64
+
+
+def test_inject_formula_divergence_is_reproducible_from_the_seed() -> None:
+    def run(shared_seed: int) -> pl.DataFrame:
+        return inject_formula_divergence(
+            _probe_frame(60),
+            seed=42,
+            registry=InjectionRegistry(),
+            table_name="formula_probes",
+            rng=random.Random(shared_seed),
+        )
+
+    # The shared rng differs; the family seed fixes columns, values, AND divergent rows.
+    assert run(1).equals(run(2))

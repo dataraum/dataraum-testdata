@@ -51,9 +51,7 @@ def test_balanced_journals():
     for entry_id, lines in lines_by_entry.items():
         total_debit = sum(line.debit for line in lines)
         total_credit = sum(line.credit for line in lines)
-        assert total_debit == total_credit, (
-            f"Entry {entry_id}: debit={total_debit} != credit={total_credit}"
-        )
+        assert total_debit == total_credit, f"Entry {entry_id}: debit={total_debit} != credit={total_credit}"
 
 
 def test_referential_integrity_invoices_payments():
@@ -88,11 +86,7 @@ def test_temporal_consistency():
 def test_benford_distribution():
     """Bank transaction amounts follow Benford's law (digit 1 is most common)."""
     ds = _dataset()
-    first_digits = Counter(
-        str(int(abs(float(t.amount))))[0]
-        for t in ds.bank_transactions
-        if abs(float(t.amount)) >= 1
-    )
+    first_digits = Counter(str(int(abs(float(t.amount))))[0] for t in ds.bank_transactions if abs(float(t.amount)) >= 1)
     # Benford: digit 1 should have ~30% frequency
     total = sum(first_digits.values())
     digit_1_pct = first_digits["1"] / total
@@ -138,7 +132,9 @@ def test_trial_balance_derived_from_gl():
         assert tb_debits[acct] == account_debits[acct].quantize(Decimal("0.01")), (
             f"Account {acct}: TB debit {tb_debits[acct]} != GL debit {account_debits[acct]}"
         )
-        assert tb_credits.get(acct, Decimal("0")) == account_credits.get(acct, Decimal("0")).quantize(Decimal("0.01")), (
+        assert tb_credits.get(acct, Decimal("0")) == account_credits.get(acct, Decimal("0")).quantize(
+            Decimal("0.01")
+        ), (
             f"Account {acct}: TB credit {tb_credits.get(acct, Decimal('0'))} != GL credit {account_credits.get(acct, Decimal('0'))}"
         )
 
@@ -162,9 +158,7 @@ def test_balance_sheet_is_carry_forward_stock():
     assert {b.account_id for b in ds.balance_sheet} <= bs_accounts
 
     # Independent per-period net movement (debit − credit) from POSTED GL.
-    entry_period = {
-        e.entry_id: (e.date.strftime("%Y-%m"), e.status) for e in ds.journal_entries
-    }
+    entry_period = {e.entry_id: (e.date.strftime("%Y-%m"), e.status) for e in ds.journal_entries}
     gl_net: dict[tuple[str, str], Decimal] = {}
     for line in ds.journal_lines:
         info = entry_period.get(line.entry_id)
@@ -185,9 +179,7 @@ def test_balance_sheet_is_carry_forward_stock():
         for b in rows:
             delta = b.ending_balance - prev
             expected = gl_net.get((acct, b.period), Decimal("0")).quantize(Decimal("0.01"))
-            assert delta == expected, (
-                f"{acct} {b.period}: Δending {delta} != GL net {expected} (not carry-forward)"
-            )
+            assert delta == expected, f"{acct} {b.period}: Δending {delta} != GL net {expected} (not carry-forward)"
             prev = b.ending_balance
             checked += 1
     assert checked >= 50
@@ -213,9 +205,7 @@ def test_trial_balance_balanced():
         periods[tb.period] = (d + tb.debit_balance, c + tb.credit_balance)
 
     for period, (total_d, total_c) in periods.items():
-        assert total_d == total_c, (
-            f"Period {period}: total debit {total_d} != total credit {total_c}"
-        )
+        assert total_d == total_c, f"Period {period}: total debit {total_d} != total credit {total_c}"
 
 
 def test_invoice_gl_linkage():
@@ -232,9 +222,7 @@ def test_invoice_gl_linkage():
 
     non_cancelled = {inv.invoice_id for inv in ds.invoices if inv.status != "cancelled"}
     # Every non-cancelled invoice should have a GL entry
-    assert gl_invoice_ids == non_cancelled, (
-        f"Missing GL for {len(non_cancelled - gl_invoice_ids)} invoices"
-    )
+    assert gl_invoice_ids == non_cancelled, f"Missing GL for {len(non_cancelled - gl_invoice_ids)} invoices"
 
 
 def test_payment_creates_bank_transaction():
@@ -268,10 +256,7 @@ def test_revenue_creates_ar():
 
     for entry_id in revenue_accounts:
         entry_lines = lines_by_entry.get(entry_id, [])
-        has_ar_debit = any(
-            line.account_id in ar_accounts and line.debit > 0
-            for line in entry_lines
-        )
+        has_ar_debit = any(line.account_id in ar_accounts and line.debit > 0 for line in entry_lines)
         assert has_ar_debit, f"Revenue entry {entry_id} has no AR debit"
 
 
@@ -323,3 +308,11 @@ def test_non_january_fiscal_start():
         total_debit = sum(line.debit for line in lines)
         total_credit = sum(line.credit for line in lines)
         assert total_debit == total_credit, f"Entry {entry_id} unbalanced"
+
+
+def test_formula_probes_skeleton_generated_only_when_requested():
+    """The formula-divergence probe grain is opt-in — empty unless a strategy needs it."""
+    assert generate_finance_dataset(seed=1, months=2).formula_probes == []
+    probes = generate_finance_dataset(seed=1, months=2, formula_probe_rows=25).formula_probes
+    ids = [p.probe_id for p in probes]
+    assert len(ids) == 25 and len(set(ids)) == 25
