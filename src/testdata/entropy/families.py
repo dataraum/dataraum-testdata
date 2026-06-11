@@ -766,3 +766,236 @@ def sample_formula_divergence_family(
             )
         )
     return FormulaDivergenceFamilySample(seed=seed, groups=tuple(groups))
+
+
+# --- the relationship_pairs family (DAT-408 / DAT-450) ----------------------
+#
+# Feeds relationship_discovery: the four-witness genuine/spurious adjudication
+# (value_overlap / llm_judgment / manual_curation / keeper_retention). Like
+# stock/flow, the LABEL is structural, not a corrupted value — each sample is a
+# set of directed column PAIRS between two probe tables (a parent id table and a
+# child activity table), each pair drawn from one of three strata:
+#
+# * **genuine_clean** — a real FK that holds completely: every child value is in
+#   the parent pool (full containment → the data witness reads ~1.0).
+# * **genuine_broken** — a real FK with a SAMPLED orphan_ratio of child rows
+#   pointing at deleted parents (a small out-of-pool orphan id set): the
+#   degraded-positive class where value overlap sags but the name still says FK.
+# * **spurious_overlap** — two semantically UNRELATED code columns whose value
+#   POOLS collide at a sampled Jaccard (short codes sharing a namespace), the
+#   negative class value_overlap must not mistake for genuine. The overlap comes
+#   from a shared pool construction, never from copying a column.
+#
+# The name carries the semantic signal the LLM judges (genuine pairs share an
+# entity noun across both sides; spurious pairs use two different code nouns),
+# while the VALUES carry the statistic the data witness reads — so each witness
+# can be scored independently against the pair's label (the DAT-450 rig).
+#
+# Every designed pair keeps its expected value-overlap statistic ABOVE the
+# relationship phase's candidate threshold (min_confidence 0.5,
+# dataraum-config/phases/relationships.yaml) — a pair below it never becomes a
+# candidate row, is never shown to the LLM selector, and so measures nothing.
+
+# The two probe tables the family fills. The child is the strategy's injection
+# target; the parent is reached through the runner's `dataframes` pass-through.
+REL_PARENT_TABLE = "ref_entities"
+REL_CHILD_TABLE = "ref_activity"
+
+# Candidate floor: phases/relationships.yaml min_confidence (0.5) + margin.
+_MIN_DESIGNED_OVERLAP = 0.55
+
+# Entity nouns for GENUINE pairs — the same noun appears on both sides
+# (parent `{n}_id`, child `{n}_id|_ref|_key`), so the name honestly signals an
+# FK. Deliberately disjoint from the canonical finance tables' entities
+# (invoice/payment/vendor/account) so the probe sub-graph never collides with
+# the real schema's semantics.
+_ENTITY_NOUNS: tuple[str, ...] = (
+    "carrier",
+    "warehouse",
+    "depot",
+    "merchant",
+    "courier",
+    "terminal",
+    "operator",
+    "broker",
+    "facility",
+    "distributor",
+    "contractor",
+    "retailer",
+    "plant",
+    "agency",
+)
+_FK_TEMPLATES: tuple[str, ...] = ("{n}_id", "{n}_ref", "{n}_key")
+
+# Code nouns for SPURIOUS pairs — two DIFFERENT nouns per pair (`zone_code` vs
+# `batch_code`): the names honestly signal NO relation while the value pools
+# collide by design.
+_CODE_NOUNS: tuple[str, ...] = (
+    "zone",
+    "batch",
+    "route",
+    "grade",
+    "shift",
+    "tier",
+    "lane",
+    "bucket",
+    "phase",
+    "cluster",
+    "segment",
+    "band",
+    "block",
+    "sector",
+)
+
+_PREFIX_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# Id prefixes already used by the canonical generators + the probe skeletons —
+# a probe pool colliding with a real id namespace would manufacture unintended
+# candidates against the canonical tables.
+_PREFIX_BLOCKLIST: frozenset[str] = frozenset({"JE", "INV", "TXN", "RE", "RA", "V", "CC"})
+
+
+@dataclass(frozen=True)
+class RelationshipFamilyParams:
+    """The parameter space the relationship_pairs generator samples from.
+
+    Ranges, not fixed values — the generator draws a concrete instance per seed.
+    """
+
+    n_clean: tuple[int, int] = (2, 4)  # genuine_clean pairs per draw
+    n_broken: tuple[int, int] = (2, 4)  # genuine_broken pairs per draw
+    n_spurious: tuple[int, int] = (2, 4)  # spurious_overlap pairs per draw
+    # genuine: fraction of parent ids the child actually references. STRICTLY < 1
+    # so the parent set is never fully contained in the child's values — the
+    # binary full-containment flag (joins.py) would otherwise lift a broken
+    # pair's score straight back to 1.0.
+    referenced_fraction: tuple[float, float] = (0.7, 0.9)
+    # broken: fraction of child ROWS re-pointed at deleted (out-of-pool) parents.
+    orphan_ratio: tuple[float, float] = (0.05, 0.35)
+    # broken: distinct orphan ids as a fraction of the parent pool — a few
+    # deleted parents referenced many times (the realistic deletion story), and
+    # the knob that keeps the broken stratum's Jaccard above the candidate floor.
+    orphan_pool_fraction: tuple[float, float] = (0.02, 0.12)
+    # spurious: the designed distinct-value Jaccard between the two code columns.
+    spurious_jaccard: tuple[float, float] = (0.55, 0.85)
+    # spurious: distinct codes per side (must fit inside both probe tables).
+    spurious_pool_size: tuple[int, int] = (60, 150)
+
+    def __post_init__(self) -> None:
+        if self.referenced_fraction[1] >= 1.0:
+            raise ValueError(
+                "relationship_pairs family: referenced_fraction must stay < 1.0 — at 1.0 the "
+                "parent set is fully contained in the child's values and the full-containment "
+                "flag scores a broken pair 1.0."
+            )
+        if self.orphan_ratio[0] <= 0.0:
+            raise ValueError(
+                "relationship_pairs family: orphan_ratio lower bound must be > 0 — a genuine_broken pair must be broken."
+            )
+        worst_broken = self.referenced_fraction[0] / (1.0 + self.orphan_pool_fraction[1])
+        if worst_broken < _MIN_DESIGNED_OVERLAP:
+            raise ValueError(
+                f"relationship_pairs family: worst-case broken-pair Jaccard {worst_broken:.3f} falls below "
+                f"{_MIN_DESIGNED_OVERLAP} — under the relationship phase's candidate threshold (min_confidence "
+                "0.5) the pair never becomes a candidate row and measures nothing."
+            )
+        if self.spurious_jaccard[0] < _MIN_DESIGNED_OVERLAP:
+            raise ValueError(
+                f"relationship_pairs family: spurious_jaccard lower bound {self.spurious_jaccard[0]} is below "
+                f"{_MIN_DESIGNED_OVERLAP} — a sub-threshold pair never becomes a candidate row and measures nothing."
+            )
+        if self.n_clean[1] + self.n_broken[1] > len(_ENTITY_NOUNS):
+            raise ValueError(
+                "relationship_pairs family: n_clean + n_broken upper bounds exceed the entity-noun vocabulary."
+            )
+        if 2 * self.n_spurious[1] > len(_CODE_NOUNS):
+            raise ValueError(
+                "relationship_pairs family: n_spurious upper bound exceeds the code-noun vocabulary (2 nouns per pair)."
+            )
+
+
+@dataclass(frozen=True)
+class RelationshipPairSpec:
+    """One labelled directed pair: child column → parent column + its design."""
+
+    parent_column: str
+    child_column: str
+    label: str  # "genuine" | "spurious" — what every witness is scored against
+    stratum: str  # "genuine_clean" | "genuine_broken" | "spurious_overlap"
+    pool_prefix: str  # the pair's id namespace, e.g. "QK" → "QK-0042"
+    referenced_fraction: float | None  # genuine strata only
+    orphan_ratio: float  # broken only; 0.0 elsewhere
+    orphan_pool_fraction: float | None  # broken only
+    designed_jaccard: float | None  # spurious only
+    pool_size: int | None  # spurious only (genuine pool = parent rows)
+
+
+@dataclass(frozen=True)
+class RelationshipFamilySample:
+    """One concrete, fully-labelled draw: the pair specs for the probe tables."""
+
+    seed: int
+    pairs: tuple[RelationshipPairSpec, ...]
+
+
+def _pool_prefix(rng: random.Random, seen: set[str]) -> str:
+    """A fresh 2-3 letter id-namespace prefix, unique within the draw."""
+    while True:
+        prefix = "".join(rng.choice(_PREFIX_LETTERS) for _ in range(rng.randint(2, 3)))
+        if prefix not in seen and prefix not in _PREFIX_BLOCKLIST:
+            seen.add(prefix)
+            return prefix
+
+
+def sample_relationship_family(seed: int, params: RelationshipFamilyParams | None = None) -> RelationshipFamilySample:
+    """Sample one labelled relationship_pairs instance — deterministic in ``seed``.
+
+    Different seeds → different nouns / prefixes / ratios (surface varies, no
+    memorizable fixture); the same seed reproduces exactly (AC1). Per-pair id
+    namespaces are disjoint, so the ONLY designed value overlaps are the labelled
+    pairs themselves — every cross pair is clean negative space.
+    """
+    p = params or RelationshipFamilyParams()
+    rng = random.Random(f"relationship_pairs:{seed}")
+
+    n_clean = rng.randint(*p.n_clean)
+    n_broken = rng.randint(*p.n_broken)
+    n_spurious = rng.randint(*p.n_spurious)
+
+    entity_nouns = rng.sample(_ENTITY_NOUNS, n_clean + n_broken)
+    code_nouns = rng.sample(_CODE_NOUNS, 2 * n_spurious)
+    prefixes: set[str] = set()
+
+    pairs: list[RelationshipPairSpec] = []
+    for i, noun in enumerate(entity_nouns):
+        broken = i >= n_clean
+        pairs.append(
+            RelationshipPairSpec(
+                parent_column=f"{noun}_id",
+                child_column=_FK_TEMPLATES[rng.randrange(len(_FK_TEMPLATES))].format(n=noun),
+                label="genuine",
+                stratum="genuine_broken" if broken else "genuine_clean",
+                pool_prefix=_pool_prefix(rng, prefixes),
+                referenced_fraction=round(rng.uniform(*p.referenced_fraction), 4),
+                orphan_ratio=round(rng.uniform(*p.orphan_ratio), 4) if broken else 0.0,
+                orphan_pool_fraction=round(rng.uniform(*p.orphan_pool_fraction), 4) if broken else None,
+                designed_jaccard=None,
+                pool_size=None,
+            )
+        )
+    for k in range(n_spurious):
+        pairs.append(
+            RelationshipPairSpec(
+                parent_column=f"{code_nouns[2 * k]}_code",
+                child_column=f"{code_nouns[2 * k + 1]}_code",
+                label="spurious",
+                stratum="spurious_overlap",
+                pool_prefix=_pool_prefix(rng, prefixes),
+                referenced_fraction=None,
+                orphan_ratio=0.0,
+                orphan_pool_fraction=None,
+                designed_jaccard=round(rng.uniform(*p.spurious_jaccard), 4),
+                pool_size=rng.randint(*p.spurious_pool_size),
+            )
+        )
+    rng.shuffle(pairs)
+    return RelationshipFamilySample(seed=seed, pairs=tuple(pairs))

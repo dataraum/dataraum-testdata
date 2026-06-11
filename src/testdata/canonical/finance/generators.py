@@ -31,6 +31,8 @@ from .models import (
     Payment,
     PaymentMethod,
     PaymentTerms,
+    RefActivity,
+    RefEntity,
     TrialBalance,
 )
 
@@ -1186,6 +1188,21 @@ def _generate_formula_probes(n_rows: int) -> list[FormulaProbe]:
     return [FormulaProbe(probe_id=f"FP{i:05d}") for i in range(n_rows)]
 
 
+def _generate_relationship_probes(n_parents: int, n_children: int) -> tuple[list[RefEntity], list[RefActivity]]:
+    """Skeleton grains for the relationship-pairs probe tables (DAT-408/450).
+
+    ``n_parents`` parent rows + ``n_children`` child rows — the grains that
+    ``inject_relationship_pairs`` fills with labelled FK/code column pairs
+    (genuine clean / orphan-broken / spurious-overlap strata). Empty when either
+    count is 0 (no relationship strategy active).
+    """
+    if n_parents <= 0 or n_children <= 0:
+        return [], []
+    parents = [RefEntity(entity_seq=f"RE-{i:04d}") for i in range(n_parents)]
+    children = [RefActivity(activity_seq=f"RA-{i:05d}") for i in range(n_children)]
+    return parents, children
+
+
 # --- Main Generator ---
 
 
@@ -1197,6 +1214,8 @@ def generate_finance_dataset(
     q4_seasonal_boost: float | None = None,
     probe_series: int = 0,
     formula_probe_rows: int = 0,
+    relation_parents: int = 0,
+    relation_children: int = 0,
     **_kwargs: object,
 ) -> FinanceDataset:
     """Generate a complete finance dataset with closed-loop accounting.
@@ -1301,6 +1320,8 @@ def generate_finance_dataset(
     measure_probes = _generate_measure_probes(months, fiscal_start, probe_series)
     # Skeleton grain for the formula-divergence probe table — same gating (DAT-442).
     formula_probes = _generate_formula_probes(formula_probe_rows)
+    # Skeleton grains for the relationship probe tables — empty unless a strategy needs them.
+    ref_entities, ref_activity = _generate_relationship_probes(relation_parents, relation_children)
 
     return FinanceDataset(
         chart_of_accounts=chart,
@@ -1314,4 +1335,6 @@ def generate_finance_dataset(
         balance_sheet=balance_sheet,
         measure_probes=measure_probes,
         formula_probes=formula_probes,
+        ref_entities=ref_entities,
+        ref_activity=ref_activity,
     )

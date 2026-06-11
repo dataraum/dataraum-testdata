@@ -13,14 +13,18 @@ import polars as pl
 
 from .families import (
     FormulaDivergenceFamilyParams,
-    NullTokenFamilyParams,
     ProbeColumn,
+    REL_PARENT_TABLE,
+    NullTokenFamilyParams,
+    RelationshipFamilyParams,
+    RelationshipPairSpec,
     StockFlowFamilyParams,
     apply_operation,
     mint_decoy,
     sample_formula_divergence_family,
     sample_mixed_units_family,
     sample_null_token_family,
+    sample_relationship_family,
     sample_stock_flow_family,
     stock_flow_events_column,
 )
@@ -1323,3 +1327,197 @@ def inject_formula_divergence(
             )
         )
     return df.with_columns(*additions)
+
+
+def _genuine_pair_values(
+    spec: RelationshipPairSpec, n_parent: int, n_child: int, place: random.Random
+) -> tuple[list[str], list[str], list[int], float]:
+    """Build one genuine (clean or orphan-broken) FK pair's value columns.
+
+    The parent column is a unique id permutation (the pool); the child column
+    references a strict subset of it (``referenced_fraction``), with
+    ``orphan_ratio`` of child ROWS re-pointed at a small out-of-pool orphan id
+    set. Each referenced/orphan id is force-placed at least once, so the
+    distinct-value sets are exactly the designed sets.
+
+    Returns (parent_values, child_values, orphan_rows, expected_join_confidence).
+    """
+    pool = [f"{spec.pool_prefix}-{i:04d}" for i in range(n_parent)]
+    parent_values = place.sample(pool, n_parent)  # permutation → a unique key column
+
+    assert spec.referenced_fraction is not None
+    n_ref = min(max(2, round(spec.referenced_fraction * n_parent)), n_parent - 1)
+    referenced = place.sample(pool, n_ref)
+
+    orphan_count = max(1, int(n_child * spec.orphan_ratio)) if spec.orphan_ratio > 0 else 0
+    opool_size = 0
+    if orphan_count:
+        opool_size = max(1, round((spec.orphan_pool_fraction or 0.0) * n_parent))
+        opool_size = min(opool_size, orphan_count)
+    # Orphan ids share the pool's shape but live in a disjoint range — deleted
+    # parents, not garbage tokens.
+    orphan_pool = [f"{spec.pool_prefix}-{9000 + i:04d}" for i in range(opool_size)]
+
+    orphan_rows = sorted(place.sample(range(n_child), orphan_count)) if orphan_count else []
+    child_values: list[str | None] = [None] * n_child
+    for idx, row in enumerate(orphan_rows):
+        child_values[row] = orphan_pool[idx] if idx < opool_size else place.choice(orphan_pool)
+
+    non_orphan_rows = [r for r in range(n_child) if child_values[r] is None]
+    if len(non_orphan_rows) < n_ref:
+        raise ValueError(
+            f"relationship_pairs: pair {spec.child_column} needs {n_ref} non-orphan child rows "
+            f"to reference the parent subset but only {len(non_orphan_rows)} remain — grow the "
+            "child probe table or lower orphan_ratio/referenced_fraction."
+        )
+    place.shuffle(non_orphan_rows)
+    for idx, row in enumerate(non_orphan_rows):
+        child_values[row] = referenced[idx] if idx < n_ref else place.choice(referenced)
+
+    # The exact statistic the data witness will read (joins.py): intersection of
+    # distinct sets = the referenced subset; union = pool + orphan ids. A clean
+    # pair (child ⊆ parent, >10 distinct) trips the full-containment flag → 1.0.
+    jaccard = n_ref / (n_parent + opool_size)
+    expected = 1.0 if opool_size == 0 and min(n_parent, n_ref) > 10 else jaccard
+    return parent_values, [v for v in child_values if v is not None], orphan_rows, expected
+
+
+def _spurious_pair_values(
+    spec: RelationshipPairSpec, n_parent: int, n_child: int, place: random.Random
+) -> tuple[list[str], list[str], float]:
+    """Build one spurious pair: two code columns sharing a value POOL, no FK.
+
+    Both sides draw ``pool_size`` distinct codes from one namespace with a
+    designed intersection sized for ``designed_jaccard`` — overlap by shared
+    vocabulary, never by copying. The intersection stays strictly below both
+    set sizes so the full-containment flag can never fire.
+
+    Returns (parent_values, child_values, actual_jaccard).
+    """
+    assert spec.pool_size is not None and spec.designed_jaccard is not None
+    m = spec.pool_size
+    if m > n_parent or m > n_child:
+        raise ValueError(
+            f"relationship_pairs: spurious pool_size {m} exceeds a probe table's rows "
+            f"({n_parent} parent / {n_child} child) — every code must appear at least once."
+        )
+    # jaccard j = i / (2m − i)  →  i = 2mj / (1 + j); clamp keeps containment partial.
+    intersection = min(round(2 * m * spec.designed_jaccard / (1 + spec.designed_jaccard)), m - 1)
+    codes = [f"{spec.pool_prefix}-{k:04d}" for k in range(2 * m - intersection)]
+    set_parent = codes[:m]  # shared ∪ parent-only
+    set_child = codes[:intersection] + codes[m:]  # shared ∪ child-only
+
+    parent_values = set_parent + [place.choice(set_parent) for _ in range(n_parent - m)]
+    place.shuffle(parent_values)
+    child_values = set_child + [place.choice(set_child) for _ in range(n_child - m)]
+    place.shuffle(child_values)
+    return parent_values, child_values, intersection / (2 * m - intersection)
+
+
+def inject_relationship_pairs(
+    df: pl.DataFrame,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    dataframes: dict[str, pl.DataFrame],
+    n_clean: list[int] | None = None,
+    n_broken: list[int] | None = None,
+    n_spurious: list[int] | None = None,
+    referenced_fraction: list[float] | None = None,
+    orphan_ratio: list[float] | None = None,
+    orphan_pool_fraction: list[float] | None = None,
+    spurious_jaccard: list[float] | None = None,
+    spurious_pool_size: list[int] | None = None,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Fill the relationship probe tables with SAMPLED labelled pairs (DAT-408/450).
+
+    The generative successor to the fixed ``break_referential_integrity``: a
+    recorded ``seed`` samples directed column pairs across three strata
+    (genuine_clean / genuine_broken / spurious_overlap; see
+    :mod:`testdata.entropy.families`). ``df`` is the CHILD probe table
+    (:data:`REL_CHILD_TABLE`, the strategy's injection target); the PARENT probe
+    table is filled in place through the runner's ``dataframes`` pass-through.
+    Each pair becomes one parent column + one child column and ONE registry
+    record whose ``parameters`` carry the pair identity, label, stratum, and the
+    designed statistics — the ground truth the calibration rig scores the
+    relationship_discovery witnesses against.
+    """
+    overrides: dict[str, object] = {}
+    if n_clean is not None:
+        overrides["n_clean"] = tuple(n_clean)
+    if n_broken is not None:
+        overrides["n_broken"] = tuple(n_broken)
+    if n_spurious is not None:
+        overrides["n_spurious"] = tuple(n_spurious)
+    if referenced_fraction is not None:
+        overrides["referenced_fraction"] = tuple(referenced_fraction)
+    if orphan_ratio is not None:
+        overrides["orphan_ratio"] = tuple(orphan_ratio)
+    if orphan_pool_fraction is not None:
+        overrides["orphan_pool_fraction"] = tuple(orphan_pool_fraction)
+    if spurious_jaccard is not None:
+        overrides["spurious_jaccard"] = tuple(spurious_jaccard)
+    if spurious_pool_size is not None:
+        overrides["spurious_pool_size"] = tuple(spurious_pool_size)
+    sample = sample_relationship_family(seed, RelationshipFamilyParams(**overrides))  # type: ignore[arg-type]
+
+    parent = dataframes.get(REL_PARENT_TABLE)
+    if parent is None or parent.is_empty() or df.is_empty():
+        raise ValueError(
+            f"relationship_pairs: needs the '{REL_PARENT_TABLE}' parent probe table and a non-empty "
+            f"'{table_name}' child — the scenario runner generates both grains when a strategy "
+            f"injects into '{table_name}'."
+        )
+    n_parent, n_child = len(parent), len(df)
+    place = random.Random(f"relationship_pairs_values:{seed}")  # seed-derived, order-independent
+
+    parent_cols: list[pl.Series] = []
+    child_cols: list[pl.Series] = []
+    for spec in sample.pairs:
+        orphan_rows: list[int] = []
+        if spec.label == "genuine":
+            p_vals, c_vals, orphan_rows, expected = _genuine_pair_values(spec, n_parent, n_child, place)
+        else:
+            p_vals, c_vals, actual_jaccard = _spurious_pair_values(spec, n_parent, n_child, place)
+            expected = actual_jaccard
+        parent_cols.append(pl.Series(spec.parent_column, p_vals))
+        child_cols.append(pl.Series(spec.child_column, c_vals))
+
+        orphan_count = len(orphan_rows)
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("RELPAIR"),
+                target_file=f"{table_name}.csv",
+                target_column=spec.child_column,
+                target_rows=orphan_rows,  # the corrupted units; empty for clean/spurious
+                layer="structural",
+                dimension="relations",
+                sub_dimension="relationship_discovery",
+                detector_id="relationship_discovery",
+                injection_type="inject_relationship_pairs",
+                parameters={
+                    "family": "relationship_pairs",
+                    "seed": seed,
+                    "pair": f"{table_name}.{spec.child_column} -> {REL_PARENT_TABLE}.{spec.parent_column}",
+                    "child_table": table_name,
+                    "child_column": spec.child_column,
+                    "parent_table": REL_PARENT_TABLE,
+                    "parent_column": spec.parent_column,
+                    "label": spec.label,
+                    "stratum": spec.stratum,
+                    "pool_prefix": spec.pool_prefix,
+                    "referenced_fraction": spec.referenced_fraction,
+                    "orphan_ratio": spec.orphan_ratio,
+                    "orphan_count": orphan_count,
+                    "actual_orphan_fraction": round(orphan_count / n_child, 6),
+                    "designed_jaccard": spec.designed_jaccard,
+                    "expected_join_confidence": round(expected, 4),
+                },
+                severity=severity,
+            )
+        )
+
+    dataframes[REL_PARENT_TABLE] = parent.with_columns(parent_cols)
+    return df.with_columns(child_cols)

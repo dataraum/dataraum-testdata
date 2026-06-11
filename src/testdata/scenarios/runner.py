@@ -22,6 +22,7 @@ import yaml
 from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.config import get_config_dir
 from testdata.entropy import injectors
+from testdata.entropy.families import REL_CHILD_TABLE
 from testdata.entropy.registry import InjectionRegistry
 from testdata.entropy.strategies import InjectionSpec, get_strategy, load_strategy
 from testdata.export import ExportFormat, dataset_to_dataframes, export_dataframes
@@ -140,8 +141,10 @@ def _apply_injection(
     all_kwargs["registry"] = registry
     all_kwargs["table_name"] = spec.table
     all_kwargs["rng"] = rng
-    # The run's full table mapping — passed only to injectors that declare it, so an
-    # injector can emit a companion table (e.g. the stock/flow probe_events, DAT-491).
+    # The run's full table mapping — passed only to injectors that declare it, so a
+    # family can emit or fill companion tables (stock/flow probe_events DAT-491;
+    # relationship_pairs parent+child DAT-408); the signature filter below keeps
+    # single-table injectors untouched.
     all_kwargs["dataframes"] = dataframes
 
     sig = inspect.signature(fn)
@@ -201,6 +204,9 @@ def run_scenario(
     # strategies (the baseline) are untouched (DAT-445 stock/flow; DAT-442 formula).
     probe_series = 15 if any(s.table == "measure_probes" for s in strategy.injections) else 0
     formula_probe_rows = 300 if any(s.table == "formula_probes" for s in strategy.injections) else 0
+    # Same gate for the relationship probe grains (DAT-408/450): parent ids + child
+    # rows exist only when a strategy targets the child probe table.
+    needs_relationship_probes = any(s.table == REL_CHILD_TABLE for s in strategy.injections)
 
     # Step 1: Generate clean data
     dataset = generate_finance_dataset(
@@ -209,6 +215,8 @@ def run_scenario(
         fiscal_start=config.fiscal_start,
         probe_series=probe_series,
         formula_probe_rows=formula_probe_rows,
+        relation_parents=300 if needs_relationship_probes else 0,
+        relation_children=1200 if needs_relationship_probes else 0,
         **config.generator_kwargs,
     )
 
