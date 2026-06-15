@@ -19,6 +19,7 @@ from testdata.entropy.families import (
     REL_PARENT_TABLE,
     NullTokenFamilyParams,
     RelationshipFamilyParams,
+    SliceConditionalNullFamilyParams,
     StockFlowFamilyParams,
     apply_operation,
     mint_decoy,
@@ -26,6 +27,7 @@ from testdata.entropy.families import (
     sample_mixed_units_family,
     sample_null_token_family,
     sample_relationship_family,
+    sample_slice_conditional_null_family,
     sample_stock_flow_family,
 )
 from testdata.entropy.injectors import (
@@ -33,6 +35,7 @@ from testdata.entropy.injectors import (
     inject_null_token_family,
     inject_relationship_pairs,
     inject_scale_mix,
+    inject_slice_conditional_null,
     inject_stock_flow_probes,
 )
 from testdata.entropy.registry import InjectionRegistry
@@ -866,3 +869,89 @@ def test_relationship_pairs_stay_above_candidate_floor_and_isolated() -> None:
             if other_parent_col == parent_col:
                 continue
             assert not (child_vals & set(parent[other_parent_col].to_list()))
+
+
+# --- slice_conditional_null family (DAT-473) -------------------------------
+
+_CENTERS = ["CC100", "CC200", "CC300", "CC400", "CC500"]
+
+
+def _slice_frame(n: int = 1000) -> pl.DataFrame:
+    """A journal_lines-like frame: cost_center (5 values, ~15% null) + a debit measure."""
+    place = random.Random("slice_frame")
+    centers = [place.choice(_CENTERS) if place.random() < 0.85 else None for _ in range(n)]
+    debit = [float(100 + i) for i in range(n)]
+    return pl.DataFrame({"cost_center": centers, "debit": debit})
+
+
+def test_slice_conditional_null_family_reproduces_and_varies() -> None:
+    assert sample_slice_conditional_null_family(7) == sample_slice_conditional_null_family(7)
+    for s in range(40):
+        fam = sample_slice_conditional_null_family(s)
+        assert fam.n_affected in (1, 2)
+        assert 0.2 <= fam.conditional_rate <= 0.6
+        assert 0.0 <= fam.base_rate <= 0.05
+        assert fam.conditional_rate > fam.base_rate  # a gap to detect
+    surfaces = {
+        (f.n_affected, f.conditional_rate, f.base_rate)
+        for f in (sample_slice_conditional_null_family(s) for s in range(40))
+    }
+    assert len(surfaces) > 15  # different seeds → different surface
+
+
+def test_slice_conditional_null_params_guard_requires_a_gap() -> None:
+    with pytest.raises(ValueError):
+        SliceConditionalNullFamilyParams(conditional_rate=(0.04, 0.04), base_rate=(0.05, 0.05))
+
+
+def test_inject_slice_conditional_null_concentrates_and_records() -> None:
+    df = _slice_frame()
+    reg = InjectionRegistry()
+    out = inject_slice_conditional_null(
+        df,
+        col="debit",
+        slice_col="cost_center",
+        seed=42,
+        registry=reg,
+        table_name="journal_lines",
+        rng=random.Random(0),
+    )
+    (inj,) = reg.injections
+    assert inj.detector_id == "slice_conditional_null"
+    assert inj.injection_type == "inject_slice_conditional_null"
+    assert inj.target_column == "debit"
+    assert inj.parameters["slice_column"] == "cost_center"
+    affected = set(inj.parameters["affected_slices"])
+    assert 1 <= len(affected) <= 2
+    assert affected <= set(_CENTERS)
+
+    # The null rate inside every affected slice exceeds the rate in every unaffected one
+    # — concentration, the ordering the detector reads (not a tuned point).
+    centers = out["cost_center"].to_list()
+    debit = out["debit"].to_list()
+    rate: dict[str, float] = {}
+    for c in _CENTERS:
+        rows = [i for i, cc in enumerate(centers) if cc == c]
+        rate[c] = sum(debit[i] is None for i in rows) / len(rows)
+    aff_rates = [rate[c] for c in _CENTERS if c in affected]
+    clean_rates = [rate[c] for c in _CENTERS if c not in affected]
+    assert min(aff_rates) > max(clean_rates) + 0.1  # concentrated, with margin
+    # Overall null rate stays mild — null_ratio must read this as ordinary, not the signal.
+    assert inj.parameters["overall_null_ratio"] < 0.15
+
+
+def test_inject_slice_conditional_null_reproducible_from_seed() -> None:
+    def run() -> list[object]:
+        reg = InjectionRegistry()
+        out = inject_slice_conditional_null(
+            _slice_frame(),
+            col="debit",
+            slice_col="cost_center",
+            seed=42,
+            registry=reg,
+            table_name="journal_lines",
+            rng=random.Random(random.randint(0, 1_000_000)),
+        )
+        return out["debit"].to_list()
+
+    assert run() == run()  # the shared rng differs; the family seed fixes the result

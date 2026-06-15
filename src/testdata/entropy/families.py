@@ -999,3 +999,82 @@ def sample_relationship_family(seed: int, params: RelationshipFamilyParams | Non
         )
     rng.shuffle(pairs)
     return RelationshipFamilySample(seed=seed, pairs=tuple(pairs))
+
+
+# --- the slice_conditional_null family (DAT-473) ----------------------------
+#
+# Feeds slice_conditional_null: nulls in a measure column CONCENTRATED in particular
+# slices of a categorical dimension. The dataset-level null_ratio is blind to this — a
+# column 5% null overall reads as mild while one cost center is 60% null, silently biasing
+# that slice's aggregates. The detector reads the concentration with bias-corrected
+# Cramér's V of (value IS NULL) × slice under the Cochran validity rule (kill gate passed
+# 2026-06-11; pinned in dataraum-eval test_slice_null_gate.py).
+#
+# The family is NOT a value corruption like null_tokens — it samples the MISSINGNESS SHAPE:
+# how many slices are affected, the conditional null rate inside them, and the (low) base
+# rate everywhere else. The injector resolves the concrete affected slice values from the
+# data (their masses are runtime), so the recorded label is the (column, slice) pair plus
+# the affected values — exactly what the documented_dependency teach closes.
+#
+# The knobs match the gate's separating regime: 1-2 affected slices holding >= 10% of the
+# rows, conditional rate 0.2-0.6 vs base <= 0.05. The combined overall null rate stays low
+# (base*(1-mass) + cond*mass ~ 5-8%) so null_ratio reads mild and ONLY the concentration
+# statistic fires — the whole point of the measurement.
+
+
+@dataclass(frozen=True)
+class SliceConditionalNullFamilyParams:
+    """The parameter space the slice_conditional_null generator samples from.
+
+    Ranges, not fixed values — the generator draws a concrete instance per seed. The
+    bounds are the kill gate's separating regime; a strategy may override any field.
+    """
+
+    n_affected: tuple[int, int] = (1, 2)  # affected slices (small → concentrated)
+    conditional_rate: tuple[float, float] = (0.2, 0.6)  # null rate INSIDE an affected slice
+    base_rate: tuple[float, float] = (0.0, 0.05)  # null rate everywhere else (kept low)
+    min_affected_mass: float = 0.10  # combined row fraction the affected slices must hold
+
+    def __post_init__(self) -> None:
+        if not (self.conditional_rate[0] > self.base_rate[1]):
+            raise ValueError(
+                "slice_conditional_null family: conditional_rate must stay strictly above "
+                "base_rate — without a gap there is no concentration to detect."
+            )
+        if not (0.0 < self.min_affected_mass < 1.0):
+            raise ValueError(
+                "slice_conditional_null family: min_affected_mass must be in (0, 1)."
+            )
+
+
+@dataclass(frozen=True)
+class SliceConditionalNullFamilySample:
+    """One concrete draw: the missingness SHAPE (the affected slice values are resolved
+    from the data by the injector, since their masses are runtime)."""
+
+    seed: int
+    n_affected: int
+    conditional_rate: float
+    base_rate: float
+    min_affected_mass: float
+
+
+def sample_slice_conditional_null_family(
+    seed: int, params: SliceConditionalNullFamilyParams | None = None
+) -> SliceConditionalNullFamilySample:
+    """Sample one labelled slice_conditional_null instance — deterministic in ``seed``.
+
+    Different seeds → a different number of affected slices and different rates (surface
+    varies); the same seed reproduces exactly (AC1). The concrete affected slice values are
+    NOT drawn here — they depend on the data's slice masses, so the injector resolves them
+    (seeded) and records them as the label.
+    """
+    p = params or SliceConditionalNullFamilyParams()
+    rng = random.Random(f"slice_conditional_null:{seed}")
+    return SliceConditionalNullFamilySample(
+        seed=seed,
+        n_affected=rng.randint(*p.n_affected),
+        conditional_rate=round(rng.uniform(*p.conditional_rate), 4),
+        base_rate=round(rng.uniform(*p.base_rate), 4),
+        min_affected_mass=p.min_affected_mass,
+    )
