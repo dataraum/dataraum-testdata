@@ -18,6 +18,7 @@ from .families import (
     NullTokenFamilyParams,
     RelationshipFamilyParams,
     RelationshipPairSpec,
+    SliceConditionalNullFamilyParams,
     StockFlowFamilyParams,
     apply_operation,
     mint_decoy,
@@ -25,6 +26,7 @@ from .families import (
     sample_mixed_units_family,
     sample_null_token_family,
     sample_relationship_family,
+    sample_slice_conditional_null_family,
     sample_stock_flow_family,
     stock_flow_events_column,
 )
@@ -305,6 +307,108 @@ def introduce_nulls(
             detector_id="null_ratio",
             injection_type="introduce_nulls",
             parameters={"ratio": ratio},
+            severity=severity,
+        )
+    )
+    return df
+
+
+def inject_slice_conditional_null(
+    df: pl.DataFrame,
+    col: str,
+    slice_col: str,
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    n_affected: list[int] | None = None,
+    conditional_rate: list[float] | None = None,
+    base_rate: list[float] | None = None,
+    min_affected_mass: float | None = None,
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Inject a SAMPLED slice_conditional_null family (DAT-473) — concentrated missingness.
+
+    Nulls in ``col`` CONCENTRATED in 1-2 slices of the categorical ``slice_col`` (a measure
+    a cost center failed to import), with a low base rate everywhere else — so the overall
+    null_ratio stays mild and only the concentration statistic (bias-corrected Cramér's V of
+    ``col IS NULL`` × ``slice_col``) fires. A recorded ``seed`` samples the missingness shape
+    (see :mod:`testdata.entropy.families`); the concrete affected slice VALUES are resolved
+    here from the data's per-slice masses (seeded, order-independent) so the recorded
+    ``parameters`` carry the ``(col, slice_col)`` pair + the affected values — the label the
+    ``slice_conditional_null`` detector's recall asserts and a ``document_business_rule``
+    teach on that pair closes.
+    """
+    overrides: dict[str, object] = {}
+    if n_affected is not None:
+        overrides["n_affected"] = tuple(n_affected)
+    if conditional_rate is not None:
+        overrides["conditional_rate"] = tuple(conditional_rate)
+    if base_rate is not None:
+        overrides["base_rate"] = tuple(base_rate)
+    if min_affected_mass is not None:
+        overrides["min_affected_mass"] = min_affected_mass
+    sample = sample_slice_conditional_null_family(
+        seed, SliceConditionalNullFamilyParams(**overrides)  # type: ignore[arg-type]
+    )
+
+    place = random.Random(f"slice_conditional_null:{col}:{slice_col}:{seed}")
+    slice_values = df[slice_col].to_list()
+    n = len(df)
+
+    # Per-slice row mass over LABELLED rows (a null slice is no slice — the detector
+    # conditions only on rows that carry a label, so they can never be "affected").
+    labelled = [i for i in range(n) if slice_values[i] is not None]
+    counts: dict[object, int] = {}
+    for i in labelled:
+        counts[slice_values[i]] = counts.get(slice_values[i], 0) + 1
+    # Stable, seed-shuffled candidate order so the choice is deterministic but not
+    # alphabetical (no bias toward any particular center across seeds).
+    candidates = sorted(counts, key=lambda v: str(v))
+    place.shuffle(candidates)
+
+    affected: list[object] = []
+    for _ in range(50):
+        pick = place.sample(candidates, min(sample.n_affected, len(candidates)))
+        if sum(counts[v] for v in pick) / n >= sample.min_affected_mass:
+            affected = pick
+            break
+    if not affected:  # fall back to the largest slices — guarantees the mass floor
+        affected = sorted(counts, key=lambda v: counts[v], reverse=True)[: sample.n_affected]
+    affected_set = set(affected)
+
+    values = df[col].to_list()
+    nulled: list[int] = []
+    for i in range(n):
+        sv = slice_values[i]
+        rate = sample.conditional_rate if sv in affected_set else sample.base_rate
+        if values[i] is not None and place.random() < rate:
+            values[i] = None
+            nulled.append(i)
+    df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("SLICENULL"),
+            target_file=f"{table_name}.csv",
+            target_column=col,
+            target_rows=sorted(nulled),
+            layer="value",
+            dimension="nulls",
+            sub_dimension="slice_conditional_null",
+            detector_id="slice_conditional_null",
+            injection_type="inject_slice_conditional_null",
+            parameters={
+                "family": "slice_conditional_null",
+                "seed": seed,
+                "slice_column": slice_col,
+                "affected_slices": sorted(str(v) for v in affected),
+                "n_affected": sample.n_affected,
+                "conditional_rate": sample.conditional_rate,
+                "base_rate": sample.base_rate,
+                "min_affected_mass": sample.min_affected_mass,
+                "overall_null_ratio": round(len(nulled) / n, 4) if n else 0.0,
+            },
             severity=severity,
         )
     )
