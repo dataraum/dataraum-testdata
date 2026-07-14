@@ -56,6 +56,37 @@ Each generation produces:
 - **CSV files** — one per table (varies by normalization level)
 - **manifest.yaml** — file list, row counts, generation parameters
 - **entropy_map.yaml** — ground truth: every injection with target rows, detector ID, layer, severity
+- **ground_truth.yaml** — known-correct financial metrics (see [Ground Truth](#ground-truth))
+- **metadata_truth.yaml** — agent-layer ground truth (see [Metadata Truth](#metadata-truth))
+
+## Metadata Truth
+
+`metadata_truth.yaml` is the **agent-layer** ground truth: what the engine's LLM/derived
+metadata (relationships, roles, concepts, cycles, additivity) *should* resolve to. The
+generator knows every one of these answers from the models + generator design, so it
+exports them for the eval to grade the agent layer the way `entropy_map.yaml` grades
+detectors. Authored in `src/testdata/metadata_truth.py`; **generated — do not hand-edit**.
+
+| Section | Keyed by | Content |
+|---|---|---|
+| `metric_additivity` | ontology metric/measure name | drill additivity verdict (`categorical_additive` / `time_additive` + `reason`) with a `determinism` tag (`function_symmetry` = HARD, `label_dependent` = diagnostic) |
+| `stock_flow` | `table.column` | `additive` (per-period flow) vs `point_in_time` (stock/level) |
+| `reconciles_structurally` | `table.column` | measures that reconcile against a finer event fact (DAT-491 witness) |
+| `relationships` | — | the true FK topology (`{from, to}` qualified names) |
+| `table_roles` | — | `facts` / `dimensions` / `ambiguous` table lists |
+| `semantic_roles` | role | `measure` / `timestamp` column lists |
+| `business_concepts` | `table.column` | required measure→ontology-concept bindings |
+| `cycles` | — | business cycles the corpus supports (`canonical_type`, `key_tables`, `required`) |
+
+**Remap-safety.** The truth is authored at canonical (`full` / snake_case) names and
+rewritten to match each run's exported schema: table names follow the normalization
+`table_mapping` (like `InjectionRegistry.remap_tables`), column names follow the
+`column_style`. A cross-table FK that a merge collapses into one table is dropped (no
+longer discoverable); a genuine self-FK (`chart_of_accounts.parent_id`) is kept. As with
+`entropy_map.yaml`, column renames introduced by normalization *merges* (e.g.
+`payments.amount → invoice_data.payment_amount`) are not reflected — merged columns keep
+canonical names. Multi-source runs write one canonical top-level file, mirroring the
+top-level `entropy_map.yaml`.
 
 ## Finance Vertical Tables
 

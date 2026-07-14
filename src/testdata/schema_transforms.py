@@ -76,6 +76,22 @@ def _to_pascal(s: str) -> str:
     return "".join(p.capitalize() for p in s.split("_"))
 
 
+def restyle_column_name(col: str, style: ColumnStyle) -> str:
+    """Rename a single snake_case column to *style* — the scalar of ``apply_column_style``.
+
+    Exposed so ground-truth exporters (entropy_map, metadata_truth) can restyle the
+    column names they reference through the exact same rule the data columns were
+    restyled by, instead of re-deriving it.
+    """
+    if style == "camelCase":
+        return _to_camel(col)
+    if style == "PascalCase":
+        return _to_pascal(col)
+    if style == "legacy":
+        return _LEGACY_NAMES.get(col, col.upper())
+    return col  # snake_case — identity
+
+
 def apply_column_style(
     dataframes: dict[str, pl.DataFrame],
     style: ColumnStyle,
@@ -89,14 +105,7 @@ def apply_column_style(
 
     out: dict[str, pl.DataFrame] = {}
     for name, df in dataframes.items():
-        if style == "camelCase":
-            mapping = {col: _to_camel(col) for col in df.columns}
-        elif style == "PascalCase":
-            mapping = {col: _to_pascal(col) for col in df.columns}
-        elif style == "legacy":
-            mapping = {col: _LEGACY_NAMES.get(col, col.upper()) for col in df.columns}
-        else:
-            mapping = {}
+        mapping = {col: restyle_column_name(col, style) for col in df.columns}
         out[name] = df.rename(mapping)
 
     return out

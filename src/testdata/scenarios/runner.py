@@ -31,6 +31,7 @@ from testdata.ground_truth import (
     estimate_injection_impact,
     export_ground_truth,
 )
+from testdata.metadata_truth import export_metadata_truth
 from testdata.schema_transforms import (
     ColumnStyle,
     KeyStrategy,
@@ -289,6 +290,9 @@ def run_scenario(
                 fmt=fmt,
             )
         export_ground_truth(ground_truth, output_dir)
+        # Agent-layer ground truth (DAT-682) — top-level like entropy_map/ground_truth,
+        # table names remapped to this run's normalization, canonical (snake) columns.
+        export_metadata_truth(output_dir, table_mapping=table_mapping)
         if lever_spec is not None:
             _export_intervention(lever_spec, output_dir, fiscal_start=config.fiscal_start, months=months)
 

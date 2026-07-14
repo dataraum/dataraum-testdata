@@ -3,6 +3,29 @@
 Changes in dataraum-testdata that need attention in other repos (dataraum-eval
 calibration, dataraum-context engine). Newest first.
 
+## 2026-07-14: metadata_truth.yaml export — agent-layer ground truth (DAT-682)
+
+Every scenario run now writes **`metadata_truth.yaml`** alongside `entropy_map.yaml`
+and `ground_truth.yaml` (top-level, both single- and multi-source). It is the
+generator's own answers for the agent layer: `metric_additivity`, `stock_flow`,
+`reconciles_structurally`, `relationships` (FK topology), `table_roles`,
+`semantic_roles`, `business_concepts`, `cycles`. Authored in
+`src/testdata/metadata_truth.py` (`canonical_metadata_truth()` +
+`remap_metadata_truth()` + `export_metadata_truth()`); remap-safe — table names follow
+the normalization `table_mapping`, column names the `column_style`, merge-collapsed
+cross-table FKs are dropped, self-FKs kept. Schema documented in the README.
+
+**Eval action:** this replaces the hand-authored `calibration/fixtures/metadata_truth.yaml`
+as the source of truth. Regenerate that fixture from `canonical_metadata_truth()` and add
+a Tier-1 consistency test binding the two (the graded values are identical for
+`full`/snake). A per-run conftest loader over `<data_dir>/metadata_truth.yaml` is the
+seam for future normalized/wide-variant grading (the metric_additivity keys are ontology
+names, so that section is schema-shape invariant).
+
+Also refactored `schema_transforms.py`: extracted `restyle_column_name(col, style)` (the
+scalar of `apply_column_style`) so exporters restyle column references through the exact
+same rule — behavior-preserving, existing tests green.
+
 ## 2026-06-09: null_tokens family hardening — guard + clustered-decoy stress (DAT-450)
 
 Two follow-ups on the family below:
