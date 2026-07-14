@@ -263,6 +263,35 @@ def generate_chart_of_accounts() -> list[ChartOfAccounts]:
 # --- Revenue Cycle: Sales → Cash Receipts ---
 
 
+@dataclass(frozen=True)
+class Lever:
+    """A constructed intervention: a DGP parameter change at a known period (DAT-744).
+
+    Unlike entropy injectors (post-hoc corruption of generated frames), a lever
+    changes the generating process itself, so the effect propagates naturally
+    through the event cascade (sales → AR/revenue → receipts → cash/bank → TB/BS).
+
+    ``price_level``: every sale amount drawn in ``month_offset >= period_k`` is
+    scaled by ``factor`` immediately after the Benford draw. Scaling happens
+    after all random draws for the event, and no downstream control flow
+    branches on amount values, so the RNG stream is identical with and without
+    the lever — a same-seed pair (baseline, levered) is an exact counterfactual:
+    revenue-account activity in months >= period_k scales by exactly ``factor``;
+    receipts/cash follow with the collection lag; the expenditure cycle is
+    untouched.
+    """
+
+    period_k: int  # month offset (0-based) at which the lever activates
+    factor: float  # multiplicative price-level change, e.g. 1.15
+    type: str = "price_level"
+
+    def __post_init__(self) -> None:
+        if self.type != "price_level":
+            raise ValueError(f"unknown lever type: {self.type!r} (supported: price_level)")
+        if self.period_k < 0 or self.factor <= 0:
+            raise ValueError(f"invalid lever: period_k={self.period_k}, factor={self.factor}")
+
+
 @dataclass
 class _SaleRecord:
     """Internal tracking for a sale event (for cash receipt generation)."""
@@ -282,6 +311,7 @@ def _generate_revenue_entries(
     *,
     sales_per_month: int = 250,
     q4_seasonal_boost: float = 0.3,
+    lever: Lever | None = None,
 ) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord]]:
     """Generate customer sale events: DR AR, CR Revenue.
 
@@ -306,6 +336,10 @@ def _generate_revenue_entries(
         for _ in range(count):
             sale_date = _random_date(rng, m_start, m_end)
             amount = _benford_amount(rng, 500, 80000)
+            if lever is not None and month_offset >= lever.period_k:
+                # scale AFTER the draw: the RNG stream stays identical to the
+                # un-levered run, so same-seed pairs are exact counterfactuals
+                amount = _quantize(amount * Decimal(str(lever.factor)))
             customer = rng.choice(CUSTOMER_NAMES)
             cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
 
@@ -1216,6 +1250,7 @@ def generate_finance_dataset(
     formula_probe_rows: int = 0,
     relation_parents: int = 0,
     relation_children: int = 0,
+    lever: Lever | None = None,
     **_kwargs: object,
 ) -> FinanceDataset:
     """Generate a complete finance dataset with closed-loop accounting.
@@ -1230,6 +1265,8 @@ def generate_finance_dataset(
         fiscal_start: First day of the fiscal year.
         invoices_count: Number of vendor/purchase invoices.
         q4_seasonal_boost: Fractional boost applied to Q4 revenue months.
+        lever: Optional constructed intervention (DAT-744) — a DGP parameter
+            change at a known period with a known effect; see :class:`Lever`.
 
     Returns:
         FinanceDataset with all 8 tables populated and numerically consistent.
@@ -1256,6 +1293,7 @@ def generate_finance_dataset(
         counters,
         sales_per_month=250,
         q4_seasonal_boost=q4_boost,
+        lever=lever,
     )
 
     # Cash receipts → GL + Bank (DR: Cash, CR: AR)

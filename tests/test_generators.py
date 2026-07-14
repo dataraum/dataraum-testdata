@@ -316,3 +316,42 @@ def test_formula_probes_skeleton_generated_only_when_requested():
     probes = generate_finance_dataset(seed=1, months=2, formula_probe_rows=25).formula_probes
     ids = [p.probe_id for p in probes]
     assert len(ids) == 25 and len(set(ids)) == 25
+
+
+def _monthly_revenue_credit(ds, month: int) -> Decimal:
+    """Sum of revenue-account credits for one fiscal month (sales revenue only)."""
+    entry_month = {e.entry_id: e.date.month for e in ds.journal_entries}
+    return sum(
+        (
+            line.credit
+            for line in ds.journal_lines
+            if line.account_id.startswith(("41", "42")) and entry_month[line.entry_id] == month
+        ),
+        Decimal("0"),
+    )
+
+
+def test_price_level_lever_is_exact_counterfactual():
+    """DAT-744: a same-seed (baseline, levered) pair differs ONLY in sale amounts
+    from period_k on — identical event stream, pre-lever months untouched,
+    post-lever revenue scaled by exactly the factor (up to per-sale cent rounding)."""
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=7, months=6)
+    lev = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=3, factor=1.2))
+
+    # RNG-stream identity: same events, same dates, same row counts
+    assert len(base.journal_entries) == len(lev.journal_entries)
+    assert len(base.journal_lines) == len(lev.journal_lines)
+    assert all(a.date == b.date for a, b in zip(base.journal_entries, lev.journal_entries))
+
+    # pre-lever months identical, post-lever months scaled by exactly the factor
+    for month in (1, 2, 3):  # fiscal months before period_k=3 (offsets 0-2)
+        assert _monthly_revenue_credit(base, month) == _monthly_revenue_credit(lev, month)
+    for month in (4, 5, 6):  # offsets 3-5, lever active
+        base_sum, lev_sum = _monthly_revenue_credit(base, month), _monthly_revenue_credit(lev, month)
+        assert abs(float(lev_sum / base_sum) - 1.2) < 1e-4, f"month {month}: ratio {float(lev_sum / base_sum)}"
+
+    # expenditure cycle untouched
+    assert len(base.invoices) == len(lev.invoices)
+    assert base.invoices[0].amount == lev.invoices[0].amount

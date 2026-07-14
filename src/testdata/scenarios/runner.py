@@ -19,7 +19,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
-from testdata.canonical.finance.generators import generate_finance_dataset
+from testdata.canonical.finance.generators import Lever, generate_finance_dataset
 from testdata.config import get_config_dir
 from testdata.entropy import injectors
 from testdata.entropy.families import REL_CHILD_TABLE
@@ -172,11 +172,17 @@ def run_scenario(
     months: int | None = None,
     output_dir: Path | None = None,
     fmt: ExportFormat = "csv",
+    lever: dict | None = None,
 ) -> dict:
     """Generate data for a named scenario, apply entropy, and export.
 
     CLI overrides (strategy_name, seed, months) replace scenario YAML defaults
     when provided. When ``None``, the YAML default is used.
+
+    ``lever`` (DAT-744) applies a constructed intervention to the generating
+    process itself — e.g. ``{"type": "price_level", "period_k": 36,
+    "factor": 1.15}``. Recorded in ``intervention.yaml`` next to the data;
+    a same-seed run without the lever is the exact counterfactual baseline.
 
     Args:
         scenario_name: Which scenario YAML to load (e.g. "month-end-close").
@@ -213,6 +219,8 @@ def run_scenario(
     # rows exist only when a strategy targets the child probe table.
     needs_relationship_probes = any(s.table == REL_CHILD_TABLE for s in strategy.injections)
 
+    lever_spec = Lever(**lever) if lever is not None else None
+
     # Step 1: Generate clean data
     dataset = generate_finance_dataset(
         seed=seed,
@@ -222,6 +230,7 @@ def run_scenario(
         formula_probe_rows=formula_probe_rows,
         relation_parents=300 if needs_relationship_probes else 0,
         relation_children=1200 if needs_relationship_probes else 0,
+        lever=lever_spec,
         **config.generator_kwargs,
     )
 
@@ -260,6 +269,7 @@ def run_scenario(
             "months": months,
             "normalization": config.normalization,
             "injection_count": len(registry),
+            "lever": lever,
         }
         if config.sources:
             _export_multi_source(
@@ -279,6 +289,8 @@ def run_scenario(
                 fmt=fmt,
             )
         export_ground_truth(ground_truth, output_dir)
+        if lever_spec is not None:
+            _export_intervention(lever_spec, output_dir, fiscal_start=config.fiscal_start, months=months)
 
     return {
         "dataframes": dataframes,
@@ -287,6 +299,40 @@ def run_scenario(
         "config": config,
         "ground_truth": ground_truth,
     }
+
+
+def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date | None, months: int) -> None:
+    """Write intervention.yaml — the lever's ground-truth record (DAT-744).
+
+    Analogous to entropy_map.yaml for injections: the spec of what was done to
+    the DGP plus the analytic effect statement. The numeric per-period true
+    effect is obtained by the consumer via the exact same-seed counterfactual
+    pair (run the identical scenario without ``lever``).
+    """
+    start = fiscal_start if fiscal_start is not None else date(2025, 1, 1)
+    activation = date(start.year + (start.month - 1 + lever.period_k) // 12, (start.month - 1 + lever.period_k) % 12 + 1, 1)
+    payload = {
+        "intervention": {
+            "type": lever.type,
+            "period_k": lever.period_k,
+            "activation_period": activation.strftime("%Y-%m"),
+            "factor": lever.factor,
+            "months_total": months,
+            "affected": {
+                "direct": "sale amounts drawn in months >= period_k (revenue-account credits, AR debits)",
+                "propagated": "cash receipts / bank inflows for levered sales (5-45d collection lag), trial_balance and balance_sheet lines derived from them",
+                "unaffected": "expenditure cycle (invoices, payments, AP), operating events, fx_rates",
+            },
+            "analytic_effect": (
+                "monthly revenue-account activity for months >= period_k scales by exactly `factor` "
+                "vs the same-seed baseline (RNG stream is identical; scaling is applied after all "
+                "random draws). Receipts follow with the collection lag."
+            ),
+            "counterfactual": "re-run the identical scenario (same seed/months/strategy) without `lever`",
+        }
+    }
+    with (output_dir / "intervention.yaml").open("w") as fh:
+        yaml.safe_dump(payload, fh, sort_keys=False)
 
 
 def _export_multi_source(
