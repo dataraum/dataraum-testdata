@@ -3,6 +3,7 @@
 import random
 
 import polars as pl
+import pytest
 
 from testdata.entropy.injectors import (
     add_duplicate_fk_paths,
@@ -15,6 +16,7 @@ from testdata.entropy.injectors import (
     corrupt_types,
     create_mutual_exclusivity,
     drift_formula,
+    inject_driver_effect,
     inject_outliers,
     inject_temporal_drift,
     introduce_nulls,
@@ -249,6 +251,93 @@ def test_break_trial_balance():
     assert len(reg) == 1
     assert reg.injections[0].detector_id == "derived_value_consistency"
     assert reg.injections[0].sub_dimension == "trial_balance_gl_mismatch"
+
+
+def _one_sided_journal_lines() -> pl.DataFrame:
+    """A one-sided-measure fixture: debit nonzero on DR rows, zero on CR rows, across
+    five cost_centers + a null slice (a null slice is no slice)."""
+    centers = ["CC100", "CC200", "CC300", "CC400", "CC500"]
+    cc: list[str | None] = []
+    debit: list[float] = []
+    for c in centers:
+        for k in range(20):  # DR lines: nonzero
+            cc.append(c)
+            debit.append(100.0 + k)
+        for _ in range(20):  # CR lines: zero (one-sided)
+            cc.append(c)
+            debit.append(0.0)
+    for k in range(15):  # unlabelled rows — never scaled
+        cc.append(None)
+        debit.append(50.0 + k)
+    return pl.DataFrame({"cost_center": cc, "debit": debit})
+
+
+def test_inject_driver_effect():
+    df = _one_sided_journal_lines()
+    original = df["debit"].to_list()
+    factors = [1.2, 1.5, 2.0, 3.0]
+    reg = _make_registry()
+
+    result = inject_driver_effect(
+        df, col="debit", slice_col="cost_center", factors=factors, seed=20260714,
+        registry=reg, table_name="journal_lines", rng=_make_rng(),
+    )
+
+    # One record per (value, factor): exactly the ladder, one factor per distinct value.
+    recs = reg.injections
+    assert len(recs) == len(factors)
+    assert {r.detector_id for r in recs} == {"driver_rankings"}
+    assert sorted(r.parameters["factor"] for r in recs) == factors
+    assigned = {r.parameters["value"]: r.parameters["factor"] for r in recs}
+    assert len(assigned) == len(factors)  # distinct values
+    assert set(assigned) < {"CC100", "CC200", "CC300", "CC400", "CC500"}  # one left as reference
+
+    # Every nonzero debit in a scaled group is exactly f x original; zeros stay zero
+    # (scale-invariant); the reference center and the null slice are untouched.
+    ccs = result["cost_center"].to_list()
+    new = result["debit"].to_list()
+    for i, c in enumerate(ccs):
+        factor = assigned.get(c)
+        if factor is None:
+            assert new[i] == original[i]  # reference / unlabelled unchanged
+        else:
+            assert new[i] == round(original[i] * factor, 2)
+
+    # target_rows are exactly the materially-moved (nonzero) rows of each scaled group.
+    for r in recs:
+        value = r.parameters["value"]
+        expected = sorted(i for i, c in enumerate(ccs) if c == value and original[i] != 0.0)
+        assert r.target_rows == expected
+        assert r.parameters["n_scaled"] == len(expected) > 0
+        assert r.parameters["dimension"] == "cost_center"
+        assert r.parameters["measure"] == "debit"
+        assert r.parameters["family"] == "driver_effect"
+
+
+def test_inject_driver_effect_reproduces_by_seed():
+    """The value→factor assignment is seed-derived and order-independent — same seed,
+    same assignment; a different seed may pick a different center for a given factor."""
+    factors = [1.2, 1.5, 2.0, 3.0]
+
+    def _assign(seed: int) -> dict[str, float]:
+        reg = _make_registry()
+        inject_driver_effect(
+            _one_sided_journal_lines(), col="debit", slice_col="cost_center", factors=factors,
+            seed=seed, registry=reg, table_name="journal_lines", rng=_make_rng(),
+        )
+        return {r.parameters["value"]: r.parameters["factor"] for r in reg.injections}
+
+    assert _assign(20260714) == _assign(20260714)
+
+
+def test_inject_driver_effect_needs_enough_values():
+    df = pl.DataFrame({"cost_center": ["CC100"] * 50 + ["CC200"] * 50, "debit": [100.0] * 100})
+    reg = _make_registry()
+    with pytest.raises(ValueError, match="labelled value"):
+        inject_driver_effect(
+            df, col="debit", slice_col="cost_center", factors=[1.2, 1.5, 2.0, 3.0], seed=1,
+            registry=reg, table_name="journal_lines", rng=_make_rng(),
+        )
 
 
 def test_registry_summary():

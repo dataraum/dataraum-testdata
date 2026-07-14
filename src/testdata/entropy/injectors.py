@@ -1625,3 +1625,109 @@ def inject_relationship_pairs(
 
     dataframes[REL_PARENT_TABLE] = parent.with_columns(parent_cols)
     return df.with_columns(child_cols)
+
+
+def inject_driver_effect(
+    df: pl.DataFrame,
+    col: str,
+    slice_col: str,
+    factors: list[float],
+    seed: int,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
+    severity: str = "medium",
+) -> pl.DataFrame:
+    """Make ``slice_col`` a KNOWN driver of ``col`` — a factor LADDER across values (DAT-688).
+
+    The driver-discovery gate (``dataraum.analysis.drivers``) ranks a categorical
+    dimension by the permutation-gated between-group variance reduction of a measure, and
+    reports each group's interesting-slice effect = ``group_mean / baseline − 1``. This
+    family concentrates a driver in ``slice_col``: it picks ``len(factors)`` distinct
+    labelled values (seeded, order-independent) and multiplies ``col`` by an ascending
+    factor per value — a higher factor is a stronger driver (a larger positive slice
+    effect), the ORDERING the eval oracle asserts. Any remaining value keeps its natural
+    scale — the in-run reference the reference-vs-injected contrast reads.
+
+    ONE-SIDED by design (``col`` = debit, ZERO on credit lines): scaling a group's rows by
+    ``f`` multiplies that group's MEAN of ``col`` by exactly ``f`` (the zeros are
+    scale-invariant), so the group mean SHIFTS and the variance-reduction statistic reads
+    it. A BALANCED measure (net_amount, ≈0 mean per cost_center) is invisible to a
+    mean-based statistic — the /ground wall this family was gated against (DAT-688; the
+    slice_variance precedent). Because ``col`` is one-sided, the same scale also shifts the
+    group's mean of a derived net measure (net = debit − credit; the debit lines go from
+    ``+x`` to ``+f·x`` while credit lines are untouched), so the signal survives whichever
+    additive measure the engine ranks. Row-grain and ICC-safe: ``slice_col`` (cost_center)
+    is not an entity key (η²≈0 on clean), so the row permutation null is valid (DAT-544).
+
+    Records ONE registry entry per (value, factor): ``dimension`` (slice_col), ``value``,
+    ``measure`` (col), and ``factor`` — the ground truth the driver oracle reads to assert
+    ``slice_col`` ∈ ranked_dimensions under injection and the interesting-slice effects
+    ordered by factor (never a point-value threshold; ADR-0009 eval grammar).
+    """
+    if col not in df.columns or slice_col not in df.columns:
+        raise ValueError(
+            f"inject_driver_effect: {table_name!r} needs both {col!r} and {slice_col!r}"
+        )
+
+    place = random.Random(f"driver_effect:{table_name}:{col}:{slice_col}:{seed}")
+    slice_values = df[slice_col].to_list()
+
+    # Distinct labelled values with support (a null slice is no slice — the driver
+    # conditions only on rows that carry a label). Seed-shuffled so the factor→value
+    # assignment is generative (no memorized center), the LADDER the invariant.
+    counts: dict[object, int] = {}
+    for v in slice_values:
+        if v is not None:
+            counts[v] = counts.get(v, 0) + 1
+    candidates = sorted(counts, key=lambda v: str(v))
+    place.shuffle(candidates)
+
+    ladder = sorted(factors)  # ascending — the ordering the oracle grades effects against
+    if len(candidates) < len(ladder):
+        raise ValueError(
+            f"inject_driver_effect: {slice_col!r} has {len(candidates)} labelled value(s) but "
+            f"the factor ladder needs {len(ladder)} — shorten `factors` or widen the dimension."
+        )
+    assignment = dict(zip(candidates[: len(ladder)], ladder, strict=True))  # value → factor
+
+    values = df[col].to_list()
+    # Only rows whose value MATERIALLY moved (nonzero pre-scale) are recorded affected —
+    # the zeros multiply to zero (scale-invariant) and carry no signal.
+    affected_by_value: dict[object, list[int]] = {v: [] for v in assignment}
+    for i in range(len(df)):
+        factor = assignment.get(slice_values[i])
+        if factor is None or values[i] is None:
+            continue
+        original = float(values[i])
+        values[i] = round(original * factor, 2)
+        if original != 0.0:
+            affected_by_value[slice_values[i]].append(i)
+    df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    for value, factor in sorted(assignment.items(), key=lambda kv: kv[1]):
+        rows = affected_by_value[value]
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("DRIVER"),
+                target_file=f"{table_name}.csv",
+                target_column=col,
+                target_rows=sorted(rows),
+                layer="value",
+                dimension="driver_effect",
+                sub_dimension="slice_scale",
+                detector_id="driver_rankings",
+                injection_type="inject_driver_effect",
+                parameters={
+                    "family": "driver_effect",
+                    "seed": seed,
+                    "dimension": slice_col,
+                    "value": str(value),
+                    "measure": col,
+                    "factor": factor,
+                    "n_scaled": len(rows),
+                },
+                severity=severity,
+            )
+        )
+    return df
