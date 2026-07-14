@@ -42,10 +42,15 @@ def test_canonical_has_every_graded_section() -> None:
         "semantic_roles",
         "business_concepts",
         "cycles",
+        "folded_dimensions",
+        "degenerate_ids",
     ):
         assert section in truth, section
     assert len(truth["relationships"]) == 9
     assert set(truth["metric_additivity"]) == {"metrics", "measures"}
+    # folded truth is level-specific — canonical (`full`) folds nothing.
+    assert truth["folded_dimensions"] == []
+    assert truth["degenerate_ids"] == []
 
 
 def test_identity_remap_is_canonical() -> None:
@@ -97,6 +102,57 @@ def test_metric_additivity_is_shape_invariant() -> None:
     canonical = canonical_metadata_truth()
     out = remap_metadata_truth(canonical, table_mapping=_PARTIAL_MAPPING)
     assert out["metric_additivity"] == canonical["metric_additivity"]
+
+
+# ---------------------------------------------------------------------------
+# folded dimensions (DAT-757)
+# ---------------------------------------------------------------------------
+
+
+def test_full_and_partial_fold_nothing() -> None:
+    """Normalized levels have no folded dimensions and no degenerate ids."""
+    for level in (None, "full", "partial"):
+        out = remap_metadata_truth(canonical_metadata_truth(), level=level)
+        assert out["folded_dimensions"] == [], level
+        assert out["degenerate_ids"] == [], level
+
+
+def test_flat_folds_account_dim_into_two_facts() -> None:
+    """`flat` folds chart_of_accounts (concept `account`) into general_ledger AND
+    trial_balance — the cross-fact concept-identity case (DAT-757)."""
+    out = remap_metadata_truth(canonical_metadata_truth(), level="flat")
+    account = next(f for f in out["folded_dimensions"] if f["concept"] == "account")
+    assert account["fold_key"] == "account_id"
+    assert set(account["folded_into"]) == {"general_ledger", "trial_balance"}
+    assert out["degenerate_ids"] == ["general_ledger.line_id"]
+
+
+def test_single_folds_onto_the_mega_table() -> None:
+    out = remap_metadata_truth(canonical_metadata_truth(), level="single")
+    account = next(f for f in out["folded_dimensions"] if f["concept"] == "account")
+    assert account["folded_into"] == ["mega_table"]
+
+
+def test_folded_truth_matches_the_denormalized_schema() -> None:
+    """truth ↔ data bind: every folded attribute / fold key / degenerate id the truth
+    names actually EXISTS as a column in the `flat` normalized schema (DAT-757)."""
+    from testdata.canonical.finance.generators import generate_finance_dataset
+    from testdata.export import dataset_to_dataframes
+
+    dfs = dataset_to_dataframes(generate_finance_dataset(seed=42, months=2))
+    normalized, _ = apply_normalization(dict(dfs), "flat")
+    truth = remap_metadata_truth(canonical_metadata_truth(), level="flat")
+
+    for fold in truth["folded_dimensions"]:
+        for fact in fold["folded_into"]:
+            cols = set(normalized[fact].columns)
+            assert fold["fold_key"] in cols, f"{fact} missing fold_key {fold['fold_key']}"
+            missing = [a for a in fold["attributes"] if a not in cols]
+            assert not missing, f"{fact} missing folded attributes {missing}"
+
+    for qualified in truth["degenerate_ids"]:
+        table, col = qualified.split(".", 1)
+        assert col in set(normalized[table].columns), f"{table} missing degenerate id {col}"
 
 
 # ---------------------------------------------------------------------------

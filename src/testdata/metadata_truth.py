@@ -30,8 +30,17 @@ FKs that collapse to a single table after a merge are dropped (no longer discove
 a genuine self-referential FK (``chart_of_accounts.parent_id``) is kept. Column renames
 introduced by normalization *merges* (e.g. ``payments.amount -> invoice_data.payment_amount``)
 are NOT reflected — the merged columns keep canonical names, the same table-only
-contract ``entropy_map.yaml`` follows, and consistent with the wide-variant grading
-being truth-free.
+contract ``entropy_map.yaml`` follows.
+
+Folded-dimension identity truth (``folded_dimensions`` / ``degenerate_ids``, DAT-757)
+IS carried — level-specific — for the denormalized (``flat`` / ``single``) shapes, so the
+wide-variant grading is NO LONGER truth-free. A folded dimension is a referenced dimension
+whose FK-target table a normalization level INLINED into a fact; the generator knows the
+fold because it performed the join (``schema_transforms._inline_chart_of_accounts``), and
+the folded columns' identity is the concept of the source dimension table (two facts that
+fold the SAME source share ONE dimension). Degenerate operational IDs (a fact's own PK)
+ground to no concept and must abstain — the surface the DAT-757 eval /ground gate proved
+the engine's g3 wrongly asserts as hierarchies on wide data.
 """
 
 from __future__ import annotations
@@ -274,10 +283,46 @@ _CYCLES: list[dict[str, Any]] = [
 ]
 
 
+# --- folded dimensions (DAT-757) --------------------------------------------
+# A folded dimension = a referenced dimension whose FK-target table a normalization
+# level INLINED into a fact (the denormalized / wide / OBT shape). Authored to mirror
+# ``schema_transforms._inline_chart_of_accounts`` (runs at ``flat`` + ``single``):
+# chart_of_accounts (concept "account") is inlined as account_name / account_type /
+# parent_account_id / account_currency, keyed by account_id. ``folded_into`` lists the
+# facts that carry the fold — two facts folding the SAME source dimension share ONE
+# dimension by concept identity (the cross-fact case, no name/value heuristic). The
+# fold is level-specific: ``full`` / ``partial`` are still normalized → no folds.
+_ACCOUNT_FOLD: dict[str, Any] = {
+    "concept": "account",
+    "source_dimension": "chart_of_accounts",
+    "fold_key": "account_id",
+    "attributes": ["account_name", "account_type", "parent_account_id", "account_currency"],
+}
+_FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
+    # flat: CoA inlined into BOTH general_ledger and trial_balance → one shared concept.
+    "flat": [{**_ACCOUNT_FOLD, "folded_into": ["general_ledger", "trial_balance"]}],
+    # single: everything collapses onto the general_ledger spine → mega_table.
+    "single": [{**_ACCOUNT_FOLD, "folded_into": ["mega_table"]}],
+}
+
+# Degenerate dimensions (DAT-757 scope #3): a fact's OWN operational primary key —
+# grounds to no dimension concept, carries NO cross-table identity → the engine must
+# ABSTAIN, not assert it as a folded hierarchy. ``general_ledger.line_id`` is the
+# journal-line PK that survives the fold as the fact's own key. This is the exact
+# surface the eval /ground gate proved g3's distinct-count ratio wrongly asserts on
+# wide data (near-key guard misses a heavy-tailed id).
+_DEGENERATE_IDS: dict[str, list[str]] = {
+    "flat": ["general_ledger.line_id"],
+    "single": ["mega_table.line_id"],
+}
+
+
 def canonical_metadata_truth() -> dict[str, Any]:
     """The finance corpus's agent-layer ground truth at canonical (``full``/snake) names.
 
     A fresh deep-copyable dict every call — callers (remap, export) may mutate it.
+    ``folded_dimensions`` / ``degenerate_ids`` are empty at canonical (``full``) — they
+    are populated per normalization level by ``remap_metadata_truth`` (DAT-757).
     """
     return {
         "vertical": VERTICAL,
@@ -289,6 +334,8 @@ def canonical_metadata_truth() -> dict[str, Any]:
         "semantic_roles": {k: list(v) for k, v in _SEMANTIC_ROLES.items()},
         "business_concepts": {"required": dict(_BUSINESS_CONCEPTS["required"])},
         "cycles": deepcopy(_CYCLES),
+        "folded_dimensions": [],
+        "degenerate_ids": [],
     }
 
 
@@ -305,11 +352,41 @@ def _remap_qualified(name: str, table_mapping: dict[str, str], column_style: Col
     return f"{_remap_table(table, table_mapping)}.{restyle_column_name(column, column_style)}"
 
 
+def _build_folded_dimensions(level: str | None, column_style: ColumnStyle) -> list[dict[str, Any]]:
+    """The folded-dimension truth for *level* (empty for ``full`` / ``partial`` / None).
+
+    ``fold_key`` + ``attributes`` are column names → restyled to the export style;
+    ``folded_into`` / ``source_dimension`` are already the post-transform table names.
+    """
+    out: list[dict[str, Any]] = []
+    for fold in _FOLDED_DIMENSIONS.get(level or "", []):
+        out.append(
+            {
+                "concept": fold["concept"],
+                "source_dimension": fold["source_dimension"],
+                "fold_key": restyle_column_name(fold["fold_key"], column_style),
+                "attributes": [restyle_column_name(a, column_style) for a in fold["attributes"]],
+                "folded_into": list(fold["folded_into"]),
+            }
+        )
+    return out
+
+
+def _build_degenerate_ids(
+    level: str | None, table_mapping: dict[str, str], column_style: ColumnStyle
+) -> list[str]:
+    """Degenerate operational-ID columns for *level* (``table.column``, column restyled)."""
+    return [
+        _remap_qualified(q, table_mapping, column_style) for q in _DEGENERATE_IDS.get(level or "", [])
+    ]
+
+
 def remap_metadata_truth(
     truth: dict[str, Any],
     *,
     table_mapping: dict[str, str] | None = None,
     column_style: ColumnStyle = "snake_case",
+    level: str | None = None,
 ) -> dict[str, Any]:
     """Rewrite *truth* so every table/column reference matches the exported data.
 
@@ -317,6 +394,9 @@ def remap_metadata_truth(
     ``apply_normalization``; ``column_style`` is the exported column naming style.
     Both default to the identity (``full`` / snake_case). ``metric_additivity`` is
     keyed by ontology names (schema-shape invariant) and passes through untouched.
+    ``level`` is the normalization level — it drives the folded-dimension truth
+    (``folded_dimensions`` / ``degenerate_ids``), which is empty unless the level folds
+    (``flat`` / ``single``); None/``full``/``partial`` leave them empty (DAT-757).
     """
     tm = table_mapping or {}
     out = deepcopy(truth)
@@ -357,6 +437,11 @@ def remap_metadata_truth(
     out["cycles"] = [
         {**cyc, "key_tables": _dedupe([_remap_table(t, tm) for t in cyc["key_tables"]])} for cyc in truth["cycles"]
     ]
+
+    # folded_dimensions / degenerate_ids: authored at post-transform names, selected by
+    # level (DAT-757). Empty unless the level actually folds a dimension into a fact.
+    out["folded_dimensions"] = _build_folded_dimensions(level, column_style)
+    out["degenerate_ids"] = _build_degenerate_ids(level, tm, column_style)
     return out
 
 
@@ -385,17 +470,19 @@ def export_metadata_truth(
     *,
     table_mapping: dict[str, str] | None = None,
     column_style: ColumnStyle = "snake_case",
+    level: str = "full",
 ) -> None:
     """Write ``metadata_truth.yaml`` to *output_dir*, remapped to the run's schema.
 
     Emitted for every scenario alongside ``entropy_map.yaml`` / ``ground_truth.yaml``.
     ``table_mapping`` comes from ``apply_normalization``; ``column_style`` is the
     exported naming style (snake_case for single-source; the multi-source top-level
-    file stays canonical, mirroring the top-level ``entropy_map.yaml``).
+    file stays canonical, mirroring the top-level ``entropy_map.yaml``). ``level`` is the
+    normalization level driving the folded-dimension truth (DAT-757); ``full`` folds none.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     truth = remap_metadata_truth(
-        canonical_metadata_truth(), table_mapping=table_mapping, column_style=column_style
+        canonical_metadata_truth(), table_mapping=table_mapping, column_style=column_style, level=level
     )
     with open(output_dir / "metadata_truth.yaml", "w") as f:
         f.write(_HEADER)
