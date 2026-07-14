@@ -44,6 +44,7 @@ def test_canonical_has_every_graded_section() -> None:
         "cycles",
         "folded_dimensions",
         "degenerate_ids",
+        "bus_matrix",
     ):
         assert section in truth, section
     assert len(truth["relationships"]) == 9
@@ -51,6 +52,13 @@ def test_canonical_has_every_graded_section() -> None:
     # folded truth is level-specific — canonical (`full`) folds nothing.
     assert truth["folded_dimensions"] == []
     assert truth["degenerate_ids"] == []
+    # canonical bus matrix: the four account-referencing facts, all `referenced`.
+    assert truth["bus_matrix"] == {
+        "balance_sheet": {"account": {"provenance": "referenced", "key": "account_id"}},
+        "bank_transactions": {"account": {"provenance": "referenced", "key": "account_id"}},
+        "journal_lines": {"account": {"provenance": "referenced", "key": "account_id"}},
+        "trial_balance": {"account": {"provenance": "referenced", "key": "account_id"}},
+    }
 
 
 def test_identity_remap_is_canonical() -> None:
@@ -133,6 +141,34 @@ def test_single_folds_onto_the_mega_table() -> None:
     assert account["folded_into"] == ["mega_table"]
 
 
+def test_flat_bus_matrix_splits_folded_and_key_only() -> None:
+    """At `flat` the account concept is folded into GL + trial_balance while
+    bank_transactions/balance_sheet keep a bare key (CoA removed) — key_only (DAT-756/757)."""
+    out = remap_metadata_truth(canonical_metadata_truth(), level="flat")
+    bus = out["bus_matrix"]
+    assert bus["general_ledger"]["account"]["provenance"] == "folded"
+    assert bus["trial_balance"]["account"]["provenance"] == "folded"
+    assert bus["bank_transactions"]["account"] == {"provenance": "key_only", "key": "account_id"}
+    assert bus["balance_sheet"]["account"] == {"provenance": "key_only", "key": "account_id"}
+
+
+def test_single_bus_matrix_is_mega_folded() -> None:
+    out = remap_metadata_truth(canonical_metadata_truth(), level="single")
+    assert out["bus_matrix"] == {
+        "mega_table": {"account": {"provenance": "folded", "key": "account_id"}}
+    }
+
+
+def test_flat_drops_ghost_relationships() -> None:
+    """A level that REMOVES a table (CoA at flat/single) must not export relationships
+    pointing at it — the pre-2c export kept FKs to the nonexistent chart_of_accounts."""
+    for level in ("flat", "single"):
+        out = remap_metadata_truth(canonical_metadata_truth(), level=level)
+        for rel in out["relationships"]:
+            for side in ("from", "to"):
+                assert not str(rel[side]).startswith("chart_of_accounts."), (level, rel)
+
+
 def test_folded_truth_matches_the_denormalized_schema() -> None:
     """truth ↔ data bind: every folded attribute / fold key / degenerate id the truth
     names actually EXISTS as a column in the `flat` normalized schema (DAT-757)."""
@@ -153,6 +189,14 @@ def test_folded_truth_matches_the_denormalized_schema() -> None:
     for qualified in truth["degenerate_ids"]:
         table, col = qualified.split(".", 1)
         assert col in set(normalized[table].columns), f"{table} missing degenerate id {col}"
+
+    # bus matrix binds too: every cell's fact table exists and carries its key column.
+    for fact, concepts in truth["bus_matrix"].items():
+        assert fact in normalized, f"bus_matrix fact {fact} missing from flat schema"
+        for concept, cell in concepts.items():
+            assert cell["key"] in set(normalized[fact].columns), (
+                f"{fact}.{cell['key']} ({concept}, {cell['provenance']}) missing"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -180,13 +224,18 @@ def test_export_writes_parsable_yaml(tmp_path: Path) -> None:
 
 
 def test_export_table_mapping_matches_live_normalization() -> None:
-    """The mapping we pin the remap to is the one apply_normalization actually emits."""
+    """The mappings we pin the remap to are the ones apply_normalization actually emits
+    — for partial AND for the level-default mappings the bus matrix relies on (2c)."""
     from testdata.canonical.finance.generators import generate_finance_dataset
     from testdata.export import dataset_to_dataframes
+    from testdata.metadata_truth import _LEVEL_TABLE_MAPPINGS
 
     dfs = dataset_to_dataframes(generate_finance_dataset(seed=42, months=2))
     _, mapping = apply_normalization(dict(dfs), "partial")
     assert mapping == _PARTIAL_MAPPING
+    for level, pinned in _LEVEL_TABLE_MAPPINGS.items():
+        _, live = apply_normalization(dict(dfs), level)  # type: ignore[arg-type]
+        assert live == pinned, f"{level}: pinned level mapping drifted from the transform"
 
 
 # ---------------------------------------------------------------------------

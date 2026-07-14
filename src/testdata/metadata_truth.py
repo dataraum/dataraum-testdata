@@ -305,6 +305,88 @@ _FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
     "single": [{**_ACCOUNT_FOLD, "folded_into": ["mega_table"]}],
 }
 
+# --- bus matrix (DAT-756/757 unifying oracle) --------------------------------
+# The Kimball bus matrix: fact table x dimension concept -> HOW the fact exposes the
+# dimension. Fully DERIVED per level from _RELATIONSHIPS + _FOLDED_DIMENSIONS +
+# _REMOVED_TABLES — no per-level authoring. Provenance vocabulary:
+#   referenced — a surviving FK to a dimension table (the DAT-756 identity)
+#   folded     — the dimension's attributes inlined into the fact (DAT-757)
+#   key_only   — the FK column survives but the dimension table was removed by the
+#                transform (e.g. bank_transactions.account_id at `flat` after CoA is
+#                inlined elsewhere) — identity reachable only through the concept.
+# `key` is the fact-side column carrying the exposure (FK column / fold key).
+# The temporal/period conformed dimension is deliberately absent: temporal identity is
+# the workspace calendar (DAT-730), not a categorical concept.
+_DIM_TABLE_CONCEPTS: dict[str, str] = {"chart_of_accounts": "account"}
+
+# Tables a level REMOVES without a single-valued table_mapping entry (their content
+# fans out into MULTIPLE facts — CoA inlines into both general_ledger and trial_balance
+# at `flat`, so no `old -> new` rename can express it). Their inbound FKs stop being
+# discoverable relationships; the bus matrix records the key_only exposure instead.
+_REMOVED_TABLES: dict[str, frozenset[str]] = {
+    "flat": frozenset({"chart_of_accounts"}),
+    "single": frozenset({"chart_of_accounts"}),
+}
+
+# The table_mapping each level's apply_normalization emits — the DEFAULT when a caller
+# passes `level` without a live mapping (tests, offline truth builds). The runner still
+# passes the live mapping, which wins. A live-consistency test pins these to
+# apply_normalization so they cannot drift (mirrors the partial pin in the test suite).
+_LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
+    "partial": {
+        "journal_lines": "journal_data",
+        "journal_entries": "journal_data",
+        "invoices": "invoice_data",
+        "payments": "invoice_data",
+    },
+    "flat": {
+        "journal_lines": "general_ledger",
+        "journal_entries": "general_ledger",
+        "invoices": "invoice_data",
+        "payments": "invoice_data",
+    },
+    "single": {
+        "journal_lines": "mega_table",
+        "journal_entries": "mega_table",
+        "invoices": "mega_table",
+        "payments": "mega_table",
+        "bank_transactions": "mega_table",
+        "fx_rates": "mega_table",
+        "trial_balance": "mega_table",
+        "balance_sheet": "mega_table",
+    },
+}
+
+
+def _build_bus_matrix(
+    level: str | None, table_mapping: dict[str, str], column_style: ColumnStyle
+) -> dict[str, dict[str, dict[str, str]]]:
+    """``{fact_table: {concept: {provenance, key}}}`` for *level* — derived, not authored."""
+    removed = _REMOVED_TABLES.get(level or "", frozenset())
+    bus: dict[str, dict[str, dict[str, str]]] = {}
+    # folded exposures first — they win over the key_only residue of the same FK.
+    for fold in _FOLDED_DIMENSIONS.get(level or "", []):
+        for fact in fold["folded_into"]:
+            bus.setdefault(fact, {})[fold["concept"]] = {
+                "provenance": "folded",
+                "key": restyle_column_name(fold["fold_key"], column_style),
+            }
+    for rel in _RELATIONSHIPS:
+        from_table, _, from_col = str(rel["from"]).partition(".")
+        to_table = str(rel["to"]).partition(".")[0]
+        concept = _DIM_TABLE_CONCEPTS.get(to_table)
+        ft = _remap_table(from_table, table_mapping)
+        if concept is None or from_table == to_table or ft in removed:
+            continue  # not a dimension reference / the dim's own self-FK / fact gone
+        # a fold on the same (fact, concept) already claimed the exposure -> setdefault
+        kind = "key_only" if to_table in removed else "referenced"
+        bus.setdefault(ft, {}).setdefault(
+            concept,
+            {"provenance": kind, "key": restyle_column_name(from_col, column_style)},
+        )
+    return {t: dict(sorted(c.items())) for t, c in sorted(bus.items())}
+
+
 # Degenerate dimensions (DAT-757 scope #3): a fact's OWN operational primary key —
 # grounds to no dimension concept, carries NO cross-table identity → the engine must
 # ABSTAIN, not assert it as a folded hierarchy. ``general_ledger.line_id`` is the
@@ -336,6 +418,7 @@ def canonical_metadata_truth() -> dict[str, Any]:
         "cycles": deepcopy(_CYCLES),
         "folded_dimensions": [],
         "degenerate_ids": [],
+        "bus_matrix": _build_bus_matrix("full", {}, "snake_case"),
     }
 
 
@@ -396,9 +479,11 @@ def remap_metadata_truth(
     keyed by ontology names (schema-shape invariant) and passes through untouched.
     ``level`` is the normalization level — it drives the folded-dimension truth
     (``folded_dimensions`` / ``degenerate_ids``), which is empty unless the level folds
-    (``flat`` / ``single``); None/``full``/``partial`` leave them empty (DAT-757).
+    (``flat`` / ``single``); None/``full``/``partial`` leave them empty (DAT-757). When
+    ``level`` is given without a live ``table_mapping``, the level's known mapping
+    (``_LEVEL_TABLE_MAPPINGS``) is used, so every section stays at post-transform names.
     """
-    tm = table_mapping or {}
+    tm = table_mapping if table_mapping is not None else _LEVEL_TABLE_MAPPINGS.get(level or "", {})
     out = deepcopy(truth)
 
     # stock_flow / reconciles_structurally / semantic_roles / business_concepts:
@@ -414,13 +499,17 @@ def remap_metadata_truth(
 
     # relationships: remap both endpoints; drop cross-table FKs that a merge collapsed
     # into a single table (no longer a discoverable relationship); keep genuine self-FKs.
+    # Also drop FKs touching a table the level REMOVED outright (`_REMOVED_TABLES`) —
+    # a relationship to a nonexistent table is not discoverable; the surviving key
+    # column's exposure is recorded in `bus_matrix` as key_only instead (DAT-756/757).
+    removed = _REMOVED_TABLES.get(level or "", frozenset())
     rels: list[dict[str, str]] = []
     for rel in truth["relationships"]:
         ft, _, _ = str(rel["from"]).partition(".")
         tt, _, _ = str(rel["to"]).partition(".")
         new_ft, new_tt = _remap_table(ft, tm), _remap_table(tt, tm)
         collapsed_by_merge = ft != tt and new_ft == new_tt
-        if collapsed_by_merge:
+        if collapsed_by_merge or ft in removed or tt in removed:
             continue
         rels.append(
             {
@@ -442,6 +531,8 @@ def remap_metadata_truth(
     # level (DAT-757). Empty unless the level actually folds a dimension into a fact.
     out["folded_dimensions"] = _build_folded_dimensions(level, column_style)
     out["degenerate_ids"] = _build_degenerate_ids(level, tm, column_style)
+    # bus_matrix: fully derived per level (referenced FKs + folds + key_only residue).
+    out["bus_matrix"] = _build_bus_matrix(level or "full", tm, column_style)
     return out
 
 
