@@ -429,9 +429,30 @@ def _remap_table(table: str, table_mapping: dict[str, str]) -> str:
     return table_mapping.get(table, table)
 
 
-def _remap_qualified(name: str, table_mapping: dict[str, str], column_style: ColumnStyle) -> str:
-    """Rewrite a ``table.column`` reference through the table_mapping + column_style."""
+# Column renames the merge transforms apply (mirrors ``_merge_invoice_data``:
+# payments' conflicting columns are prefixed before the join; the CoA-inline
+# renames are irrelevant here because the table is REMOVED and its qualified
+# references are dropped). Keyed by qualified CANONICAL name. Every non-``full``
+# level runs the invoice merge (``apply_normalization``), so these apply at
+# partial / flat / single alike.
+_MERGE_COLUMN_RENAMES: dict[str, str] = {
+    "payments.date": "payment_date",
+    "payments.amount": "payment_amount",
+    "payments.currency": "payment_currency",
+    "payments.method": "payment_method",
+}
+
+
+def _remap_qualified(
+    name: str,
+    table_mapping: dict[str, str],
+    column_style: ColumnStyle,
+    column_renames: dict[str, str] | None = None,
+) -> str:
+    """Rewrite a ``table.column`` reference through renames + table_mapping + style."""
     table, _, column = name.partition(".")
+    if column_renames and name in column_renames:
+        column = column_renames[name]
     return f"{_remap_table(table, table_mapping)}.{restyle_column_name(column, column_style)}"
 
 
@@ -485,16 +506,32 @@ def remap_metadata_truth(
     """
     tm = table_mapping if table_mapping is not None else _LEVEL_TABLE_MAPPINGS.get(level or "", {})
     out = deepcopy(truth)
+    removed = _REMOVED_TABLES.get(level or "", frozenset())
+    # Every non-full level runs the invoice merge and carries its column renames.
+    renames = _MERGE_COLUMN_RENAMES if (level or "full") != "full" else {}
+
+    def _keep(qualified: str) -> bool:
+        """A reference into a REMOVED table is not gradeable — the table is gone."""
+        return qualified.partition(".")[0] not in removed
 
     # stock_flow / reconciles_structurally / semantic_roles / business_concepts:
-    # table.column references.
-    out["stock_flow"] = {_remap_qualified(k, tm, column_style): v for k, v in truth["stock_flow"].items()}
-    out["reconciles_structurally"] = [_remap_qualified(k, tm, column_style) for k in truth["reconciles_structurally"]]
+    # table.column references — renamed to the merged schema, removed-table refs dropped.
+    out["stock_flow"] = {
+        _remap_qualified(k, tm, column_style, renames): v for k, v in truth["stock_flow"].items() if _keep(k)
+    }
+    out["reconciles_structurally"] = [
+        _remap_qualified(k, tm, column_style, renames) for k in truth["reconciles_structurally"] if _keep(k)
+    ]
     out["semantic_roles"] = {
-        role: [_remap_qualified(c, tm, column_style) for c in cols] for role, cols in truth["semantic_roles"].items()
+        role: [_remap_qualified(c, tm, column_style, renames) for c in cols if _keep(c)]
+        for role, cols in truth["semantic_roles"].items()
     }
     out["business_concepts"] = {
-        "required": {_remap_qualified(k, tm, column_style): v for k, v in truth["business_concepts"]["required"].items()}
+        "required": {
+            _remap_qualified(k, tm, column_style, renames): v
+            for k, v in truth["business_concepts"]["required"].items()
+            if _keep(k)
+        }
     }
 
     # relationships: remap both endpoints; drop cross-table FKs that a merge collapsed
@@ -502,7 +539,6 @@ def remap_metadata_truth(
     # Also drop FKs touching a table the level REMOVED outright (`_REMOVED_TABLES`) —
     # a relationship to a nonexistent table is not discoverable; the surviving key
     # column's exposure is recorded in `bus_matrix` as key_only instead (DAT-756/757).
-    removed = _REMOVED_TABLES.get(level or "", frozenset())
     rels: list[dict[str, str]] = []
     for rel in truth["relationships"]:
         ft, _, _ = str(rel["from"]).partition(".")
@@ -519,12 +555,15 @@ def remap_metadata_truth(
         )
     out["relationships"] = rels
 
-    # table_roles / cycles.key_tables: table-name lists (dedupe after a merge).
+    # table_roles / cycles.key_tables: table-name lists (dedupe after a merge;
+    # a REMOVED table has no row in the corpus and cannot carry a role).
     out["table_roles"] = {
-        role: _dedupe([_remap_table(t, tm) for t in tables]) for role, tables in truth["table_roles"].items()
+        role: _dedupe([_remap_table(t, tm) for t in tables if t not in removed])
+        for role, tables in truth["table_roles"].items()
     }
     out["cycles"] = [
-        {**cyc, "key_tables": _dedupe([_remap_table(t, tm) for t in cyc["key_tables"]])} for cyc in truth["cycles"]
+        {**cyc, "key_tables": _dedupe([_remap_table(t, tm) for t in cyc["key_tables"] if t not in removed])}
+        for cyc in truth["cycles"]
     ]
 
     # folded_dimensions / degenerate_ids: authored at post-transform names, selected by
