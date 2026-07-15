@@ -411,7 +411,9 @@ def canonical_metadata_truth() -> dict[str, Any]:
         "metric_additivity": _metric_additivity(),
         "stock_flow": dict(_STOCK_FLOW),
         "reconciles_structurally": list(_RECONCILES_STRUCTURALLY),
-        "relationships": deepcopy(_RELATIONSHIPS),
+        # direction_reliable is part of the canonical shape (True at full — every
+        # parent keeps its grain), so the identity-remap invariant holds.
+        "relationships": [{**rel, "direction_reliable": True} for rel in deepcopy(_RELATIONSHIPS)],
         "table_roles": {k: list(v) for k, v in _TABLE_ROLES.items()},
         "semantic_roles": {k: list(v) for k, v in _SEMANTIC_ROLES.items()},
         "business_concepts": {"required": dict(_BUSINESS_CONCEPTS["required"])},
@@ -551,6 +553,13 @@ def remap_metadata_truth(
             {
                 "from": _remap_qualified(str(rel["from"]), tm, column_style),
                 "to": _remap_qualified(str(rel["to"]), tm, column_style),
+                # Direction is graded only while the parent (to) side kept its
+                # grain. A merge that folds the parent into a line-grain fact
+                # destroys the key (journal_entries.entry_id repeats per GL
+                # line), and the engine's uniqueness-canonical orientation
+                # (#495 many→one) legitimately flips — grade those undirected
+                # (Philipp's ruling, 2026-07-16).
+                "direction_reliable": tt not in tm,
             }
         )
     out["relationships"] = rels
