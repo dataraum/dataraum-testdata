@@ -1,0 +1,36 @@
+# Month-End Close — flat normalization variant (DAT-770)
+# The SAME closed-loop finance dataset as month-end-close, exported at the
+# `flat` normalization level: journal_entries+journal_lines merge into
+# general_ledger, invoices absorb payment data, and chart_of_accounts is
+# INLINED into general_ledger and trial_balance (the folded-dimension shape,
+# DAT-757). metadata_truth then derives non-empty `folded_dimensions` and a
+# bus_matrix with folded + key_only cells — the e2e oracle for the engine's
+# folded-dimension identity (DAT-761) and the DAT-762 bus matrix.
+
+name: month-end-close-flat
+description: >
+  Month-end close for a mid-size company, denormalized to the `flat` level:
+  the wide/OBT shape real ERP exports take. Same generator, same closure,
+  same seed semantics as month-end-close — only the export shape differs.
+  Exists so folded-dimension truth flows through the real pipeline.
+
+tables:
+  - chart_of_accounts
+  - journal_entries
+  - journal_lines
+  - invoices
+  - payments
+  - bank_transactions
+  - fx_rates
+  - trial_balance
+
+defaults:
+  seed: 42
+  months: 12
+  strategy: clean
+
+generator:
+  normalization: flat  # full | partial | flat | single
+  fiscal_start: "2025-01-01"
+  invoices_count: 3000
+  q4_seasonal_boost: 0.3
