@@ -296,11 +296,24 @@ _ACCOUNT_FOLD: dict[str, Any] = {
     "concept": "account",
     "source_dimension": "chart_of_accounts",
     "fold_key": "account_id",
-    "attributes": ["account_name", "account_type", "parent_account_id", "account_currency"],
+    # opened_date is the coincidental-bijection case: unique per account, so on the
+    # fact grain it is 1:1 with account_id and statistically identical to the true
+    # account_name alias — only meaning separates them. It is a folded ATTRIBUTE of
+    # the account, never an alias of it.
+    "attributes": [
+        "account_name",
+        "account_type",
+        "parent_account_id",
+        "account_currency",
+        "opened_date",
+    ],
 }
 _FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
-    # flat: CoA inlined into BOTH general_ledger and trial_balance → one shared concept.
-    "flat": [{**_ACCOUNT_FOLD, "folded_into": ["general_ledger", "trial_balance"]}],
+    # flat: CoA inlined into general_ledger, trial_balance AND balance_sheet → one
+    # shared concept across three facts (bank_transactions stays key_only by design).
+    "flat": [
+        {**_ACCOUNT_FOLD, "folded_into": ["general_ledger", "trial_balance", "balance_sheet"]}
+    ],
     # single: everything collapses onto the general_ledger spine → mega_table.
     "single": [{**_ACCOUNT_FOLD, "folded_into": ["mega_table"]}],
 }
@@ -320,9 +333,10 @@ _FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
 _DIM_TABLE_CONCEPTS: dict[str, str] = {"chart_of_accounts": "account"}
 
 # Tables a level REMOVES without a single-valued table_mapping entry (their content
-# fans out into MULTIPLE facts — CoA inlines into both general_ledger and trial_balance
-# at `flat`, so no `old -> new` rename can express it). Their inbound FKs stop being
-# discoverable relationships; the bus matrix records the key_only exposure instead.
+# fans out into MULTIPLE facts — CoA inlines into general_ledger, trial_balance and
+# balance_sheet at `flat`, so no `old -> new` rename can express it). Their inbound FKs
+# stop being discoverable relationships; the bus matrix records the key_only exposure
+# instead (bank_transactions.account_id is the surviving key_only case).
 _REMOVED_TABLES: dict[str, frozenset[str]] = {
     "flat": frozenset({"chart_of_accounts"}),
     "single": frozenset({"chart_of_accounts"}),
@@ -541,7 +555,8 @@ def remap_metadata_truth(
     # Also drop FKs touching a table the level REMOVED outright (`_REMOVED_TABLES`) —
     # a relationship to a nonexistent table is not discoverable; the surviving key
     # column's exposure is recorded in `bus_matrix` as key_only instead (DAT-756/757).
-    rels: list[dict[str, str]] = []
+    # str | bool: `direction_reliable` is a bool alongside the qualified-name strings.
+    rels: list[dict[str, str | bool]] = []
     for rel in truth["relationships"]:
         ft, _, _ = str(rel["from"]).partition(".")
         tt, _, _ = str(rel["to"]).partition(".")

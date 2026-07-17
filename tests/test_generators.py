@@ -355,3 +355,19 @@ def test_price_level_lever_is_exact_counterfactual():
     # expenditure cycle untouched
     assert len(base.invoices) == len(lev.invoices)
     assert base.invoices[0].amount == lev.invoices[0].amount
+
+
+def test_chart_of_accounts_opened_date_is_a_bijection() -> None:
+    """opened_date is unique per account BY CONSTRUCTION.
+
+    This is load-bearing: once CoA is inlined at `flat`, account_id <-> opened_date
+    becomes a non-key bijection on the fact grain — the coincidental-bijection case
+    the dimension-identity judge is tested against. A single collision would break the
+    bijection and silently void that test, so pin uniqueness here at the source.
+    """
+    from testdata.canonical.finance.generators import generate_chart_of_accounts
+
+    coa = generate_chart_of_accounts()
+    opened = [a.opened_date for a in coa]
+    assert len(set(opened)) == len(coa), "opened_date must be unique per account"
+    assert len({a.account_id for a in coa}) == len(coa), "account_id must be unique"

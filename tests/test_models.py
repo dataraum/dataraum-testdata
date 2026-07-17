@@ -23,7 +23,12 @@ from testdata.canonical.finance.models import (
 
 
 def test_chart_of_accounts_defaults():
-    acct = ChartOfAccounts(account_id="1000", name="Cash", account_type=AccountType.ASSET)
+    acct = ChartOfAccounts(
+        account_id="1000",
+        name="Cash",
+        account_type=AccountType.ASSET,
+        opened_date=date(2015, 1, 5),
+    )
     assert acct.parent_id is None
     assert acct.currency == Currency.USD
 

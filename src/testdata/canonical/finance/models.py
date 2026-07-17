@@ -59,6 +59,15 @@ class ChartOfAccounts(BaseModel):
     account_type: AccountType
     parent_id: str | None = Field(default=None, description="Parent account ID for hierarchy")
     currency: Currency = Currency.USD
+    # Unique per account BY CONSTRUCTION, which makes account_id <-> opened_date a
+    # bijection. That is the point: once CoA is inlined (`flat`), both columns repeat
+    # together on the fact grain, so the pair is a NON-KEY bijection — statistically
+    # indistinguishable from the true account_id <-> account_name alias. It is not an
+    # alias: it is an attribute OF the account. Collapsing the two would fuse "which
+    # account" with "when was it opened" into one drill axis. Only meaning separates
+    # them, so this column is the corpus's coincidental-bijection case — the negative
+    # half the dimension-identity judge has to reject.
+    opened_date: datetime.date = Field(description="Date the account was opened in the ledger")
 
 
 class JournalEntry(BaseModel):

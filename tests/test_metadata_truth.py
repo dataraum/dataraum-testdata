@@ -125,14 +125,31 @@ def test_full_and_partial_fold_nothing() -> None:
         assert out["degenerate_ids"] == [], level
 
 
-def test_flat_folds_account_dim_into_two_facts() -> None:
-    """`flat` folds chart_of_accounts (concept `account`) into general_ledger AND
-    trial_balance — the cross-fact concept-identity case (DAT-757)."""
+def test_flat_folds_account_dim_into_three_facts() -> None:
+    """`flat` folds chart_of_accounts (concept `account`) into general_ledger,
+    trial_balance AND balance_sheet — the cross-fact concept-identity case (DAT-757).
+
+    Three, not two: a consumer requiring >= 2 facts per shared dimension has no slack
+    at two, so one missed axis silently zeroes the group.
+    """
     out = remap_metadata_truth(canonical_metadata_truth(), level="flat")
     account = next(f for f in out["folded_dimensions"] if f["concept"] == "account")
     assert account["fold_key"] == "account_id"
-    assert set(account["folded_into"]) == {"general_ledger", "trial_balance"}
+    assert set(account["folded_into"]) == {"general_ledger", "trial_balance", "balance_sheet"}
     assert out["degenerate_ids"] == ["general_ledger.line_id"]
+
+
+def test_flat_fold_carries_the_coincidental_bijection_attribute() -> None:
+    """`opened_date` folds in as an ATTRIBUTE of the account, never an alias of it.
+
+    It is unique per account, so on the fact grain it is 1:1 with account_id and
+    statistically identical to the true account_name alias — the negative half the
+    dimension-identity judge must reject.
+    """
+    out = remap_metadata_truth(canonical_metadata_truth(), level="flat")
+    account = next(f for f in out["folded_dimensions"] if f["concept"] == "account")
+    assert "opened_date" in account["attributes"]
+    assert "opened_date" != account["fold_key"]
 
 
 def test_single_folds_onto_the_mega_table() -> None:
@@ -142,14 +159,19 @@ def test_single_folds_onto_the_mega_table() -> None:
 
 
 def test_flat_bus_matrix_splits_folded_and_key_only() -> None:
-    """At `flat` the account concept is folded into GL + trial_balance while
-    bank_transactions/balance_sheet keep a bare key (CoA removed) — key_only (DAT-756/757)."""
+    """At `flat` the account concept is folded into the three facts that take the
+    inline, while bank_transactions keeps a bare key (CoA removed) — key_only.
+
+    bank_transactions is the surviving key_only case BY DESIGN: its account_id has 2
+    distinct values, statistically invisible to any overlap measure, so it is the
+    Layer-A blind-spot boundary the harness reports rather than asserts (DAT-756/757).
+    """
     out = remap_metadata_truth(canonical_metadata_truth(), level="flat")
     bus = out["bus_matrix"]
     assert bus["general_ledger"]["account"]["provenance"] == "folded"
     assert bus["trial_balance"]["account"]["provenance"] == "folded"
+    assert bus["balance_sheet"]["account"] == {"provenance": "folded", "key": "account_id"}
     assert bus["bank_transactions"]["account"] == {"provenance": "key_only", "key": "account_id"}
-    assert bus["balance_sheet"]["account"] == {"provenance": "key_only", "key": "account_id"}
 
 
 def test_single_bus_matrix_is_mega_folded() -> None:

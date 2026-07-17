@@ -253,10 +253,29 @@ _CASH_ACCOUNTS = ["1110", "1120"]
 _AP_ACCOUNTS = ["2110", "2120"]
 
 
+_COA_EPOCH = date(2015, 1, 5)
+_COA_OPEN_STRIDE_DAYS = 31
+
+
 def generate_chart_of_accounts() -> list[ChartOfAccounts]:
+    """The chart of accounts — static tree, no RNG.
+
+    ``opened_date`` walks a fixed stride from ``_COA_EPOCH``, so it is strictly
+    increasing and therefore UNIQUE across the tree by construction. Uniqueness is
+    load-bearing, not decorative: a random date would collide (60 accounts over a few
+    years is squarely in birthday-paradox territory) and a single collision breaks the
+    account_id <-> opened_date bijection the identity judge is meant to be tested on.
+    See ``ChartOfAccounts.opened_date`` for why that bijection matters.
+    """
     return [
-        ChartOfAccounts(account_id=aid, name=name, account_type=atype, parent_id=parent)
-        for aid, name, atype, parent in _ACCOUNT_TREE
+        ChartOfAccounts(
+            account_id=aid,
+            name=name,
+            account_type=atype,
+            parent_id=parent,
+            opened_date=_COA_EPOCH + timedelta(days=_COA_OPEN_STRIDE_DAYS * i),
+        )
+        for i, (aid, name, atype, parent) in enumerate(_ACCOUNT_TREE)
     ]
 
 

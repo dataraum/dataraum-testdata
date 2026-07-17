@@ -372,8 +372,22 @@ def _inline_chart_of_accounts(
     dfs: dict[str, pl.DataFrame],
     mapping: dict[str, str],
 ) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
-    """Inline chart_of_accounts into journal_data → general_ledger, and
-    enrich trial_balance with account metadata.
+    """Inline chart_of_accounts into journal_data → general_ledger, and enrich
+    trial_balance + balance_sheet with account metadata.
+
+    Every fact that carries ``account_id`` AND has a dimension table to lose gets the
+    fold — that is what denormalizing a warehouse does, and it keeps the three facts'
+    account axes conformed to one concept. ``balance_sheet`` is included so the
+    conformed group has three members rather than two: a consumer that needs >= 2
+    facts per shared dimension (the aggregation-lineage witness) then has slack, and
+    the corpus stops sitting exactly on that boundary where one missing axis silently
+    zeroes the whole group. It also restores level parity — at `full` the witness
+    already reconciles balance_sheet.ending_balance (cumulative/STOCK) against the
+    journal, and that pairing needs a shared account axis to survive `flat`.
+
+    ``bank_transactions`` deliberately does NOT get the fold: its account_id stays a
+    key_only exposure (the Layer-A blind-spot boundary — 2 distinct values, invisible
+    to any overlap measure). Keep it that way; it is a graded acceptance class.
     """
     coa = dfs.pop("chart_of_accounts")
 
@@ -396,11 +410,11 @@ def _inline_chart_of_accounts(
         if new == "journal_data":
             mapping[old] = "general_ledger"
 
-    # trial_balance = trial_balance LEFT JOIN coa ON account_id
-    tb = dfs.pop("trial_balance")
-    tb_enriched = tb.join(coa_renamed, on="account_id", how="left")
-    dfs["trial_balance"] = tb_enriched
-    # trial_balance keeps its name, so no mapping entry needed.
+    # trial_balance / balance_sheet = <fact> LEFT JOIN coa ON account_id.
+    # Both keep their names, so no mapping entry is needed for either.
+    for fact in ("trial_balance", "balance_sheet"):
+        df = dfs.pop(fact)
+        dfs[fact] = df.join(coa_renamed, on="account_id", how="left")
 
     return dfs, mapping
 
