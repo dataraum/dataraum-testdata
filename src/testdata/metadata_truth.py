@@ -270,6 +270,55 @@ _BUSINESS_CONCEPTS: dict[str, dict[str, str]] = {
     }
 }
 
+# --- reconciles_with (DAT-725 P2) -------------------------------------------
+# The event fact the DAT-491 structural witness reconciles measures against:
+# trial_balance and balance_sheet are DERIVED by aggregating journal lines
+# (``generators._derive_trial_balance`` / ``_derive_balance_sheet``), so the
+# generator knows the event side of every structural reconciliation.
+_EVENT_FACT = "journal_lines"
+
+
+def _build_reconciles_with(
+    required: dict[str, str],
+    reconciles_structurally: list[str],
+    event_table: str | None,
+) -> dict[str, Any]:
+    """The expected post-P2 ``reconciles_with`` edge set — derived, never authored.
+
+    Two deterministic producers (the DAT-727 ruling, moved into P2), both keyed at
+    Grounding grain — a Grounding is per (concept, relation):
+
+    * ``aggregation_lineage`` — the DAT-491 witness reified as a Grounding→Grounding
+      reconciliation: each structurally-reconciling measure ties out against its
+      event fact's aggregation (trial_balance balance ↔ GL sum). Derived from
+      ``reconciles_structurally`` × the generator's event fact. An entry whose
+      measure landed IN the event relation after a merge is dropped — a measure
+      cannot reconcile against an aggregation of its own relation.
+    * ``multi_grounding`` — any concept with >= 2 groundings reconciles its
+      groundings pairwise. The fan-in is the concept's distinct required-binding
+      tables; a concept whose bindings collapse into ONE relation after a merge
+      is dropped (nothing left to reconcile).
+    """
+    lineage = (
+        []
+        if event_table is None
+        else [
+            {"measure": measure, "event_table": event_table}
+            for measure in reconciles_structurally
+            if measure.partition(".")[0] != event_table
+        ]
+    )
+    fan_in: dict[str, set[str]] = {}
+    for col, concept in required.items():
+        fan_in.setdefault(concept, set()).add(col.partition(".")[0])
+    multi = [
+        {"concept": concept, "relations": sorted(tables)}
+        for concept, tables in sorted(fan_in.items())
+        if len(tables) >= 2
+    ]
+    return {"aggregation_lineage": lineage, "multi_grounding": multi}
+
+
 # --- business cycles (DAT-686) ----------------------------------------------
 # The cycles this finance-9 corpus REALISTICALLY supports, derived from the finance
 # cycle vocabulary × the corpus's actual tables + completion columns. Three have a
@@ -431,6 +480,9 @@ def canonical_metadata_truth() -> dict[str, Any]:
         "table_roles": {k: list(v) for k, v in _TABLE_ROLES.items()},
         "semantic_roles": {k: list(v) for k, v in _SEMANTIC_ROLES.items()},
         "business_concepts": {"required": dict(_BUSINESS_CONCEPTS["required"])},
+        "reconciles_with": _build_reconciles_with(
+            _BUSINESS_CONCEPTS["required"], _RECONCILES_STRUCTURALLY, _EVENT_FACT
+        ),
         "cycles": deepcopy(_CYCLES),
         "folded_dimensions": [],
         "degenerate_ids": [],
@@ -549,6 +601,16 @@ def remap_metadata_truth(
             if _keep(k)
         }
     }
+
+    # reconciles_with: RECOMPUTED from the remapped sections (mirrors bus_matrix's
+    # derived approach) — the per-level drop rules (measure merged into its event
+    # relation; a concept's fan-in collapsing below 2) live in the builder, so a
+    # textual remap of the canonical edge set would be wrong at `single`.
+    out["reconciles_with"] = _build_reconciles_with(
+        out["business_concepts"]["required"],
+        out["reconciles_structurally"],
+        None if _EVENT_FACT in removed else _remap_table(_EVENT_FACT, tm),
+    )
 
     # relationships: remap both endpoints; drop cross-table FKs that a merge collapsed
     # into a single table (no longer a discoverable relationship); keep genuine self-FKs.
