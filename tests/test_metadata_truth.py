@@ -41,6 +41,7 @@ def test_canonical_has_every_graded_section() -> None:
         "table_roles",
         "semantic_roles",
         "business_concepts",
+        "reconciles_with",
         "cycles",
         "folded_dimensions",
         "degenerate_ids",
@@ -49,6 +50,18 @@ def test_canonical_has_every_graded_section() -> None:
         assert section in truth, section
     assert len(truth["relationships"]) == 9
     assert set(truth["metric_additivity"]) == {"metrics", "measures"}
+    # reconciles_with (DAT-725 P2) is derived: the witness edges cover exactly the
+    # structurally-reconciling measures, and the multi-grounding concepts are the
+    # >= 2-relation fan-ins of business_concepts.required.
+    reconciles = truth["reconciles_with"]
+    assert {e["measure"] for e in reconciles["aggregation_lineage"]} == set(
+        truth["reconciles_structurally"]
+    )
+    assert {e["event_table"] for e in reconciles["aggregation_lineage"]} == {"journal_lines"}
+    assert {m["concept"]: m["relations"] for m in reconciles["multi_grounding"]} == {
+        "account_balance": ["balance_sheet", "trial_balance"],
+        "transaction_amount": ["bank_transactions", "invoices", "payments"],
+    }
     # folded truth is level-specific — canonical (`full`) folds nothing.
     assert truth["folded_dimensions"] == []
     assert truth["degenerate_ids"] == []
