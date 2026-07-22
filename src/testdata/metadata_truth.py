@@ -45,13 +45,17 @@ the engine's g3 wrongly asserts as hierarchies on wide data.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from testdata.schema_transforms import ColumnStyle, restyle_column_name
+
+if TYPE_CHECKING:
+    import polars as pl
 
 VERTICAL = "finance"
 
@@ -253,6 +257,54 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         "balance_sheet.period",
     ],
 }
+
+# --- measured_in / units (DAT-731, CAP-measured-in-truth) --------------------
+# The unit column each measure is DENOMINATED in, authored from the MODELS: every
+# monetary measure sits beside the Currency-typed column of its own table
+# (JournalLine/Invoice/Payment/BankTransaction .currency). None = no same-table unit
+# source → the engine must project NO measured_in edge:
+#   * fx_rates.rate is DIMENSIONLESS — a ratio BETWEEN two Currency columns
+#     (from_ccy/to_ccy), flagged so the oracle can assert no-edge for that reason;
+#   * trial_balance / balance_sheet balances are denominated by the ACCOUNT dimension
+#     (chart_of_accounts.currency, reachable only via FK) — no in-table unit column at
+#     canonical. A fold changes that: `_MEASURED_IN_FOLD` below.
+# ``cross_unit`` (declared unit column carries >1 distinct value) is DATA-DERIVED at
+# export from the generated frames — never authored. All-USD by model default, so it
+# is False everywhere unless an injector writes a second currency INTO the unit
+# column (mix_units' declared variant); the undeclared variant converts values only
+# and correctly leaves cross_unit False (the gate grades the DECLARED surface).
+_MEASURED_IN: dict[str, str | None] = {
+    "journal_lines.debit": "journal_lines.currency",
+    "journal_lines.credit": "journal_lines.currency",
+    "journal_lines.net_amount": "journal_lines.currency",
+    "invoices.amount": "invoices.currency",
+    "payments.amount": "payments.currency",
+    "bank_transactions.amount": "bank_transactions.currency",
+    "fx_rates.rate": None,
+    "trial_balance.debit_balance": None,
+    "trial_balance.credit_balance": None,
+    "balance_sheet.ending_balance": None,
+}
+_DIMENSIONLESS: frozenset[str] = frozenset({"fx_rates.rate"})
+
+# Pairings CREATED by the CoA fold (mirrors ``_inline_chart_of_accounts``, the same
+# way _FOLDED_DIMENSIONS does): ``account_currency`` lands ON the balance facts at
+# ``flat``/``single``, becoming their same-table unit source. general_ledger's
+# debit/credit keep journal_lines' own in-table currency (the line's unit column —
+# account_currency is the account's attribute, not the line's denomination).
+_MEASURED_IN_FOLD: dict[str, dict[str, str]] = {
+    "flat": {
+        "trial_balance.debit_balance": "trial_balance.account_currency",
+        "trial_balance.credit_balance": "trial_balance.account_currency",
+        "balance_sheet.ending_balance": "balance_sheet.account_currency",
+    },
+    "single": {
+        "trial_balance.debit_balance": "trial_balance.account_currency",
+        "trial_balance.credit_balance": "trial_balance.account_currency",
+        "balance_sheet.ending_balance": "balance_sheet.account_currency",
+    },
+}
+
 
 # The measure→ontology-concept bindings metric grounding depends on (a missing one
 # means the metric cannot ground). Graded HARD for recall. Dimension-concept bindings
@@ -462,6 +514,48 @@ _DEGENERATE_IDS: dict[str, list[str]] = {
 }
 
 
+def _build_measured_in(
+    level: str | None = None,
+    table_mapping: dict[str, str] | None = None,
+    column_style: ColumnStyle = "snake_case",
+    column_renames: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """The measured_in truth for *level*, remapped — derived, not textually rewritten.
+
+    Rebuilt from the statics per level (like ``folded_dimensions`` / ``bus_matrix``)
+    because the pairing itself is level-dependent (the CoA fold creates unit columns).
+    Entries whose measure lands in a REMOVED table are dropped; entries that collapse
+    to the same remapped measure after a merge (``single``'s diagonal concat unions
+    same-named columns) are deduped, first in canonical sort order wins.
+    ``cross_unit`` defaults False here; the export overrides it from the DATA.
+    """
+    tm = table_mapping or {}
+    removed = _REMOVED_TABLES.get(level or "", frozenset())
+    pairs = dict(_MEASURED_IN)
+    pairs.update(_MEASURED_IN_FOLD.get(level or "", {}))
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for measure, unit in sorted(pairs.items()):
+        if measure.partition(".")[0] in removed:
+            continue
+        remapped_measure = _remap_qualified(measure, tm, column_style, column_renames)
+        if remapped_measure in seen:
+            continue
+        seen.add(remapped_measure)
+        entry: dict[str, Any] = {
+            "measure": remapped_measure,
+            "unit_column": (
+                _remap_qualified(unit, tm, column_style, column_renames) if unit else None
+            ),
+            "cross_unit": False,
+        }
+        if measure in _DIMENSIONLESS:
+            entry["dimensionless"] = True
+        out.append(entry)
+    return out
+
+
 def canonical_metadata_truth() -> dict[str, Any]:
     """The finance corpus's agent-layer ground truth at canonical (``full``/snake) names.
 
@@ -484,6 +578,7 @@ def canonical_metadata_truth() -> dict[str, Any]:
             _BUSINESS_CONCEPTS["required"], _RECONCILES_STRUCTURALLY, _EVENT_FACT
         ),
         "cycles": deepcopy(_CYCLES),
+        "measured_in": _build_measured_in(),
         "folded_dimensions": [],
         "degenerate_ids": [],
         "bus_matrix": _build_bus_matrix("full", {}, "snake_case"),
@@ -652,6 +747,12 @@ def remap_metadata_truth(
         for cyc in truth["cycles"]
     ]
 
+    # measured_in: rebuilt per level (the CoA fold CREATES unit columns at flat/single,
+    # so a textual remap of the canonical pairing would miss them — same derived
+    # approach as folded_dimensions / bus_matrix). cross_unit stays False here; the
+    # export overrides it from the generated data.
+    out["measured_in"] = _build_measured_in(level, tm, column_style, renames)
+
     # folded_dimensions / degenerate_ids: authored at post-transform names, selected by
     # level (DAT-757). Empty unless the level actually folds a dimension into a fact.
     out["folded_dimensions"] = _build_folded_dimensions(level, column_style)
@@ -687,6 +788,7 @@ def export_metadata_truth(
     table_mapping: dict[str, str] | None = None,
     column_style: ColumnStyle = "snake_case",
     level: str = "full",
+    dataframes: Mapping[str, pl.DataFrame] | None = None,
 ) -> None:
     """Write ``metadata_truth.yaml`` to *output_dir*, remapped to the run's schema.
 
@@ -695,11 +797,26 @@ def export_metadata_truth(
     exported naming style (snake_case for single-source; the multi-source top-level
     file stays canonical, mirroring the top-level ``entropy_map.yaml``). ``level`` is the
     normalization level driving the folded-dimension truth (DAT-757); ``full`` folds none.
+
+    ``dataframes`` (the runner's post-injection, post-normalization frames) drives the
+    DATA-DERIVED ``measured_in.cross_unit`` flags: a measure's declared unit column
+    carrying >1 distinct value → True. Deriving from the data rather than the
+    injection config is deliberate (the corrupt_dates lesson): an injector that
+    silently no-ops can never produce a false truth, and the undeclared mix_units
+    variant (values converted, unit column untouched) correctly stays False.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     truth = remap_metadata_truth(
         canonical_metadata_truth(), table_mapping=table_mapping, column_style=column_style, level=level
     )
+    if dataframes is not None:
+        for entry in truth["measured_in"]:
+            if not entry["unit_column"]:
+                continue
+            table, _, unit_col = str(entry["unit_column"]).partition(".")
+            df = dataframes.get(table)
+            if df is not None and unit_col in df.columns:
+                entry["cross_unit"] = df[unit_col].drop_nulls().n_unique() > 1
     with open(output_dir / "metadata_truth.yaml", "w") as f:
         f.write(_HEADER)
         yaml.dump(truth, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

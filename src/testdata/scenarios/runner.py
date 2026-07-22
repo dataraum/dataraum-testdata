@@ -293,7 +293,13 @@ def run_scenario(
         # Agent-layer ground truth (DAT-682) — top-level like entropy_map/ground_truth,
         # table names remapped to this run's normalization, canonical (snake) columns.
         # ``level`` drives the folded-dimension truth for denormalized shapes (DAT-757).
-        export_metadata_truth(output_dir, table_mapping=table_mapping, level=config.normalization)
+        export_metadata_truth(
+            output_dir,
+            table_mapping=table_mapping,
+            level=config.normalization,
+            # post-injection frames drive the data-derived measured_in.cross_unit flags
+            dataframes=dataframes,
+        )
         if lever_spec is not None:
             _export_intervention(lever_spec, output_dir, fiscal_start=config.fiscal_start, months=months)
 

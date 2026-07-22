@@ -556,18 +556,39 @@ def mix_units(
     rng: random.Random,
     fx_rate: float = 1.1,
     severity: str = "medium",
+    unit_col: str | None = None,
 ) -> pl.DataFrame:
-    """Mix currencies without declaration — convert some values at FX rate."""
+    """Mix currencies — convert some values at FX rate, declared or undeclared.
+
+    Two variants of one family (CAP-measured-in-truth):
+
+    * **undeclared** (default, ``unit_col=None``): values converted, the unit column
+      untouched — the mixing is invisible to any reader of the DECLARED unit surface
+      (the original shape; a unit-column gate must stay silent on it).
+    * **declared** (``unit_col`` given): the converted rows also write
+      ``alt_currency`` into ``unit_col`` — a genuinely multi-currency table (the same
+      economic amounts recorded in another currency, honestly declared). This is the
+      shape the cross-unit drill gate must flag, and the data-derived
+      ``measured_in.cross_unit`` truth flips True from it.
+    """
     n = len(df)
     count = max(1, int(n * ratio))
     indices = rng.sample(range(n), min(count, n))
 
     values = df[col].to_list()
+    converted: list[int] = []
     for i in indices:
         if values[i] is not None:
             values[i] = round(float(values[i]) * fx_rate, 2)
+            converted.append(i)
 
     df = df.with_columns(_safe_series(col, values, df[col].dtype))
+
+    if unit_col is not None:
+        units = df[unit_col].to_list()
+        for i in converted:
+            units[i] = alt_currency
+        df = df.with_columns(_safe_series(unit_col, units, df[unit_col].dtype))
 
     registry.record(
         EntropyInjection(
@@ -577,10 +598,15 @@ def mix_units(
             target_rows=sorted(indices),
             layer="semantic",
             dimension="unit_consistency",
-            sub_dimension="mixed_currency",
+            sub_dimension="declared_mixed_currency" if unit_col else "mixed_currency",
             detector_id="unit_entropy",
             injection_type="mix_units",
-            parameters={"alt_currency": alt_currency, "ratio": ratio, "fx_rate": fx_rate},
+            parameters={
+                "alt_currency": alt_currency,
+                "ratio": ratio,
+                "fx_rate": fx_rate,
+                "unit_col": unit_col,
+            },
             severity=severity,
         )
     )

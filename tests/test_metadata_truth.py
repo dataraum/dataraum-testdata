@@ -290,3 +290,106 @@ def test_run_scenario_multi_source_emits_top_level_truth(tmp_path: Path) -> None
     assert (tmp_path / "metadata_truth.yaml").exists()
     written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
     assert len(written["relationships"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# measured_in / units (DAT-731, CAP-measured-in-truth)
+# ---------------------------------------------------------------------------
+
+
+def test_measured_in_binds_the_models() -> None:
+    """The pairing is INTROSPECTED from the models and compared to the authored truth,
+    so the truth cannot drift from the structure it claims to author: every Decimal
+    measure on a model with exactly ONE Currency-typed column pairs with that column;
+    a multi-Currency model (FXRate — a ratio between currencies) and no-Currency
+    models (TrialBalance / BalanceSheet) carry unit_column=None."""
+    import typing
+    from decimal import Decimal
+
+    from testdata.canonical.finance.models import Currency, FinanceDataset
+
+    expected: dict[str, str | None] = {}
+    for table, field in FinanceDataset.model_fields.items():
+        (model,) = typing.get_args(field.annotation)
+        currency_cols = [
+            name for name, f in model.model_fields.items() if f.annotation is Currency
+        ]
+        measures = [name for name, f in model.model_fields.items() if f.annotation is Decimal]
+        measures += [
+            name
+            for name, c in model.model_computed_fields.items()
+            if c.return_type is Decimal
+        ]
+        for measure in measures:
+            expected[f"{table}.{measure}"] = (
+                f"{table}.{currency_cols[0]}" if len(currency_cols) == 1 else None
+            )
+
+    truth = canonical_metadata_truth()
+    authored = {e["measure"]: e["unit_column"] for e in truth["measured_in"]}
+    assert authored == expected
+    # every entry starts single-currency; fx_rates.rate is flagged dimensionless
+    assert all(e["cross_unit"] is False for e in truth["measured_in"])
+    flagged = {e["measure"] for e in truth["measured_in"] if e.get("dimensionless")}
+    assert flagged == {"fx_rates.rate"}
+
+
+def test_measured_in_flat_fold_creates_unit_columns() -> None:
+    """The CoA fold lands account_currency on the balance facts at flat — the truth
+    gains those same-table pairings (mirroring _inline_chart_of_accounts), while the
+    line-grain measures keep their OWN currency and merged names carry the renames."""
+    flat = remap_metadata_truth(canonical_metadata_truth(), level="flat")
+    entries = {e["measure"]: e["unit_column"] for e in flat["measured_in"]}
+    assert entries["trial_balance.debit_balance"] == "trial_balance.account_currency"
+    assert entries["trial_balance.credit_balance"] == "trial_balance.account_currency"
+    assert entries["balance_sheet.ending_balance"] == "balance_sheet.account_currency"
+    assert entries["general_ledger.debit"] == "general_ledger.currency"
+    assert entries["invoice_data.amount"] == "invoice_data.currency"
+    assert entries["invoice_data.payment_amount"] == "invoice_data.payment_currency"
+    # canonical (full): no fold, no same-table unit source for the balances
+    fe = {e["measure"]: e["unit_column"] for e in canonical_metadata_truth()["measured_in"]}
+    assert fe["trial_balance.debit_balance"] is None
+    assert fe["balance_sheet.ending_balance"] is None
+
+
+def test_export_cross_unit_is_data_derived(tmp_path: Path) -> None:
+    """cross_unit comes from the FRAMES, never the injection config: a mixed unit
+    column flips True, an all-USD one stays False, an absent table is left alone —
+    an injector that silently no-ops can never produce a false truth."""
+    import polars as pl
+
+    from testdata.metadata_truth import export_metadata_truth as export
+
+    frames = {
+        "invoices": pl.DataFrame({"currency": ["USD", "EUR", "USD"]}),
+        "payments": pl.DataFrame({"currency": ["USD", "USD", "USD"]}),
+    }
+    export(tmp_path, dataframes=frames)
+    written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
+    flags = {e["measure"]: e["cross_unit"] for e in written["measured_in"]}
+    assert flags["invoices.amount"] is True
+    assert flags["payments.amount"] is False
+    assert flags["journal_lines.debit"] is False  # table absent from frames → default
+
+
+def test_run_scenario_unit_columns_exist_in_exported_frames(tmp_path: Path) -> None:
+    """Truth-integrity bind: every non-null unit_column the truth names must exist in
+    the run's exported frames (full AND flat) — the drift guard that keeps the
+    pairing honest against schema-transform changes."""
+    for level_scenario in ("month-end-close",):
+        result = run_scenario(level_scenario, strategy_name="clean", months=2, output_dir=tmp_path)
+        frames = result["dataframes"]
+        written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
+        for entry in written["measured_in"]:
+            if not entry["unit_column"]:
+                continue
+            table, _, col = entry["unit_column"].partition(".")
+            assert table in frames and col in frames[table].columns, entry
+            assert entry["cross_unit"] is False  # clean corpus is single-currency
+    flat_frames, mapping = apply_normalization(dict(frames), "flat")
+    flat_truth = remap_metadata_truth(canonical_metadata_truth(), table_mapping=mapping, level="flat")
+    for entry in flat_truth["measured_in"]:
+        if not entry["unit_column"]:
+            continue
+        table, _, col = entry["unit_column"].partition(".")
+        assert table in flat_frames and col in flat_frames[table].columns, entry

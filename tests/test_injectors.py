@@ -350,3 +350,37 @@ def test_registry_summary():
     summary = reg.summary()
     assert "by_layer" in summary
     assert "by_detector" in summary
+
+
+def test_mix_units_declared_flips_unit_column():
+    """The declared variant (unit_col given) writes alt_currency into the unit column
+    on exactly the converted rows — a genuinely multi-currency, honestly-declared
+    table (the shape the cross-unit gate must flag)."""
+    df = pl.DataFrame({"amount": [1000.0] * 100, "currency": ["USD"] * 100})
+    reg = _make_registry()
+    result = mix_units(
+        df, "amount", "EUR", ratio=0.10, registry=reg, table_name="test",
+        rng=_make_rng(), fx_rate=1.1, unit_col="currency",
+    )
+    units = result["currency"].to_list()
+    values = result["amount"].to_list()
+    eur_rows = [i for i, u in enumerate(units) if u == "EUR"]
+    assert len(eur_rows) >= 5
+    # declaration and conversion move together: every EUR row carries a converted value
+    assert all(abs(values[i] - 1100.0) < 0.01 for i in eur_rows)
+    assert reg.injections[0].sub_dimension == "declared_mixed_currency"
+    assert reg.injections[0].parameters["unit_col"] == "currency"
+
+
+def test_mix_units_undeclared_leaves_unit_column_untouched():
+    """The original shape: values converted, unit column untouched — invisible to any
+    reader of the declared unit surface, so data-derived cross_unit stays False."""
+    df = pl.DataFrame({"amount": [1000.0] * 100, "currency": ["USD"] * 100})
+    reg = _make_registry()
+    result = mix_units(
+        df, "amount", "EUR", ratio=0.10, registry=reg, table_name="test",
+        rng=_make_rng(), fx_rate=1.1,
+    )
+    assert set(result["currency"].to_list()) == {"USD"}
+    assert reg.injections[0].sub_dimension == "mixed_currency"
+    assert reg.injections[0].parameters["unit_col"] is None
