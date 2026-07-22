@@ -208,6 +208,48 @@ class RefActivity(BaseModel):
     activity_seq: str = Field(description="Probe child row identifier")
 
 
+class Address(BaseModel):
+    """Dimension for the role-playing-FK probe shape (DAT-788/DAT-419).
+
+    One address master that TWO differently-roled FK columns on the same fact
+    reference (``orders.bill_to_addr`` + ``orders.ship_to_addr`` — the DAT-419
+    two-FKs-one-table-pair shape), plus a second fact sharing the ship_to role
+    under a DIFFERENT column name (``deliveries.delivery_addr`` — the judge's
+    conform path). Role columns are filled by ``inject_role_playing_fks``.
+    Generated only when a strategy injects into the role-play facts; empty otherwise.
+    """
+
+    address_id: str = Field(description="Unique address identifier")
+    street: str = Field(description="Street line")
+    city: str = Field(description="City name")
+    country: str = Field(description="Country code")
+
+
+class Order(BaseModel):
+    """Skeleton grain for the role-play fact with two FK roles (DAT-788/DAT-419).
+
+    ``order_id`` × ``order_date`` rows; ``inject_role_playing_fks`` adds the
+    ``bill_to_addr`` / ``ship_to_addr`` FK-role columns (both → addresses).
+    Generated only when a strategy injects into it; empty otherwise.
+    """
+
+    order_id: str = Field(description="Unique order identifier")
+    order_date: datetime.date
+
+
+class Delivery(BaseModel):
+    """Skeleton grain for the second role-play fact sharing the dimension (DAT-788).
+
+    ``inject_role_playing_fks`` adds ``delivery_addr`` (→ addresses, ship_to ROLE
+    under a different name — role-consistent with the parent order's ship_to by
+    construction). Generated only when a strategy injects into the role-play facts.
+    """
+
+    delivery_id: str = Field(description="Unique delivery identifier")
+    order_id: str = Field(description="FK to Order")
+    delivery_date: datetime.date
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -224,3 +266,6 @@ class FinanceDataset(BaseModel):
     formula_probes: list[FormulaProbe] = []
     ref_entities: list[RefEntity] = []
     ref_activity: list[RefActivity] = []
+    addresses: list[Address] = []
+    orders: list[Order] = []
+    deliveries: list[Delivery] = []

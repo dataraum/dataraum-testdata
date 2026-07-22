@@ -579,6 +579,9 @@ def canonical_metadata_truth() -> dict[str, Any]:
         ),
         "cycles": deepcopy(_CYCLES),
         "measured_in": _build_measured_in(),
+        # FK-role truth (DAT-788): empty unless the run carries the role-play probe
+        # shape — filled data-conditionally at export (_apply_roleplay_truth).
+        "fk_roles": {},
         "folded_dimensions": [],
         "degenerate_ids": [],
         "bus_matrix": _build_bus_matrix("full", {}, "snake_case"),
@@ -773,6 +776,49 @@ def _dedupe(items: list[str]) -> list[str]:
     return out
 
 
+# --- role-playing FKs (DAT-788/DAT-419, CAP-roleplay-fk-fixture) -------------
+# Truth for the conditional role-play probe shape, authored from the probe DESIGN
+# (models.Address/Order/Delivery + inject_role_playing_fks): one dimension, one fact
+# with TWO FK roles to it, a second fact sharing the ship_to role under a different
+# name. Emitted ONLY when the run's frames carry the shape (the probe tables are
+# never renamed by normalization, so canonical names ARE export names). The
+# bus_matrix is deliberately NOT extended: its {fact: {concept: {key}}} schema
+# cannot express two roled exposures of one concept — that inexpressibility is
+# DAT-788's point; role truth lives in fk_roles + the relationships' fk_role field.
+_ROLEPLAY_TABLES: tuple[str, ...] = ("addresses", "orders", "deliveries")
+_ROLEPLAY_RELATIONSHIPS: list[dict[str, str]] = [
+    {"from": "orders.bill_to_addr", "to": "addresses.address_id", "fk_role": "bill_to"},
+    {"from": "orders.ship_to_addr", "to": "addresses.address_id", "fk_role": "ship_to"},
+    {"from": "deliveries.delivery_addr", "to": "addresses.address_id", "fk_role": "ship_to"},
+    {"from": "deliveries.order_id", "to": "orders.order_id"},
+]
+
+
+def _apply_roleplay_truth(truth: dict[str, Any], dataframes: Mapping[str, Any]) -> None:
+    """Extend *truth* with the role-play sections when the shape is present (data-
+    conditional, like cross_unit): relationships (+fk_role on the roled edges),
+    table_roles, timestamp semantic_roles, and the fk_roles map O6 grades pairing
+    against. A corpus without the probe tables is untouched — canonical equality
+    holds for every other strategy."""
+    present = all(
+        t in dataframes and len(dataframes[t]) > 0 for t in _ROLEPLAY_TABLES
+    )
+    if not present:
+        return
+    truth["relationships"] = truth["relationships"] + [
+        {**rel, "direction_reliable": True} for rel in deepcopy(_ROLEPLAY_RELATIONSHIPS)
+    ]
+    truth["table_roles"]["facts"] = truth["table_roles"]["facts"] + ["orders", "deliveries"]
+    truth["table_roles"]["dimensions"] = truth["table_roles"]["dimensions"] + ["addresses"]
+    truth["semantic_roles"]["timestamp"] = truth["semantic_roles"]["timestamp"] + [
+        "orders.order_date",
+        "deliveries.delivery_date",
+    ]
+    truth["fk_roles"] = {
+        rel["from"]: rel["fk_role"] for rel in _ROLEPLAY_RELATIONSHIPS if "fk_role" in rel
+    }
+
+
 # --- export -----------------------------------------------------------------
 
 _HEADER = (
@@ -817,6 +863,8 @@ def export_metadata_truth(
             df = dataframes.get(table)
             if df is not None and unit_col in df.columns:
                 entry["cross_unit"] = df[unit_col].drop_nulls().n_unique() > 1
+        # role-play shape truth (DAT-788): emitted only when the frames carry it
+        _apply_roleplay_truth(truth, dataframes)
     with open(output_dir / "metadata_truth.yaml", "w") as f:
         f.write(_HEADER)
         yaml.dump(truth, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

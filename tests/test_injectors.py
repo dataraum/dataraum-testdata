@@ -384,3 +384,53 @@ def test_mix_units_undeclared_leaves_unit_column_untouched():
     assert set(result["currency"].to_list()) == {"USD"}
     assert reg.injections[0].sub_dimension == "mixed_currency"
     assert reg.injections[0].parameters["unit_col"] is None
+
+
+def test_inject_role_playing_fks_shape_and_records():
+    """The role-play family (DAT-788/DAT-419): FK integrity into the address
+    dimension, role consistency BY CONSTRUCTION (delivery_addr == parent order's
+    ship_to), a same-address trap fraction, and one genuine_clean record per role
+    column. Deterministic under an explicit seed."""
+    from testdata.canonical.finance.generators import generate_finance_dataset
+    from testdata.entropy.injectors import inject_role_playing_fks
+    from testdata.export import dataset_to_dataframes
+
+    ds = generate_finance_dataset(
+        seed=42, months=2, roleplay_addresses=10, roleplay_orders=50, roleplay_deliveries=80
+    )
+    dfs = dataset_to_dataframes(ds)
+    reg = _make_registry()
+    dfs["orders"] = inject_role_playing_fks(
+        df=dfs["orders"], registry=reg, table_name="orders",
+        rng=_make_rng(), dataframes=dfs, seed=7,
+    )
+
+    addr_ids = set(dfs["addresses"]["address_id"].to_list())
+    bill = dfs["orders"]["bill_to_addr"].to_list()
+    ship = dfs["orders"]["ship_to_addr"].to_list()
+    assert set(bill) <= addr_ids and set(ship) <= addr_ids
+    assert any(b == s for b, s in zip(bill, ship))      # the same-address trap leg
+    assert any(b != s for b, s in zip(bill, ship))      # roles genuinely distinct
+
+    ship_by_order = dict(zip(dfs["orders"]["order_id"].to_list(), ship))
+    for oid, daddr in zip(
+        dfs["deliveries"]["order_id"].to_list(), dfs["deliveries"]["delivery_addr"].to_list()
+    ):
+        assert daddr == ship_by_order[oid]              # role consistency by construction
+
+    assert len(reg.injections) == 3
+    assert all(i.parameters["stratum"] == "genuine_clean" for i in reg.injections)
+    assert {(i.target_file, i.target_column, i.parameters["fk_role"]) for i in reg.injections} == {
+        ("orders.csv", "bill_to_addr", "bill_to"),
+        ("orders.csv", "ship_to_addr", "ship_to"),
+        ("deliveries.csv", "delivery_addr", "ship_to"),
+    }
+
+    # determinism: same explicit seed -> identical assignment
+    dfs2 = dataset_to_dataframes(ds)
+    dfs2["orders"] = inject_role_playing_fks(
+        df=dfs2["orders"], registry=_make_registry(), table_name="orders",
+        rng=random.Random(999), dataframes=dfs2, seed=7,
+    )
+    assert dfs2["orders"]["bill_to_addr"].to_list() == bill
+    assert dfs2["deliveries"]["delivery_addr"].to_list() == dfs["deliveries"]["delivery_addr"].to_list()

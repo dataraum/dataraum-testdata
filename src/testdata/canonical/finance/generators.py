@@ -15,10 +15,12 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from .models import (
     AccountType,
+    Address,
     BalanceSheet,
     BankTransaction,
     ChartOfAccounts,
     Currency,
+    Delivery,
     FinanceDataset,
     FormulaProbe,
     FXRate,
@@ -28,6 +30,7 @@ from .models import (
     JournalLine,
     JournalStatus,
     MeasureProbe,
+    Order,
     Payment,
     PaymentMethod,
     PaymentTerms,
@@ -1256,6 +1259,54 @@ def _generate_relationship_probes(n_parents: int, n_children: int) -> tuple[list
     return parents, children
 
 
+_ROLEPLAY_CITIES = [
+    ("Zurich", "CH"), ("Geneva", "CH"), ("Berlin", "DE"), ("Munich", "DE"),
+    ("Paris", "FR"), ("Lyon", "FR"), ("Milan", "IT"), ("Vienna", "AT"),
+    ("Amsterdam", "NL"), ("Brussels", "BE"), ("Madrid", "ES"), ("Lisbon", "PT"),
+]
+
+
+def _generate_roleplay_probes(
+    n_addresses: int, n_orders: int, n_deliveries: int, fiscal_start: date, months: int
+) -> tuple[list[Address], list[Order], list[Delivery]]:
+    """Skeleton grains for the role-playing-FK probe shape (DAT-788/DAT-419).
+
+    A complete address dimension plus id×date grains for the two facts;
+    ``inject_role_playing_fks`` fills the ROLE columns (orders.bill_to_addr /
+    ship_to_addr, deliveries.delivery_addr). Deliveries reference orders
+    round-robin with the delivery dated a few days after its order. Empty when
+    any count is 0 (no role-play strategy active).
+    """
+    if n_addresses <= 0 or n_orders <= 0 or n_deliveries <= 0:
+        return [], [], []
+    addresses = [
+        Address(
+            address_id=f"ADDR-{i:04d}",
+            street=f"{(i * 7) % 190 + 1} {'Main' if i % 3 else 'Station'} Street",
+            city=_ROLEPLAY_CITIES[i % len(_ROLEPLAY_CITIES)][0],
+            country=_ROLEPLAY_CITIES[i % len(_ROLEPLAY_CITIES)][1],
+        )
+        for i in range(n_addresses)
+    ]
+    span_days = max(months * 28, 1)
+    orders = [
+        Order(
+            order_id=f"ORD-{i:05d}",
+            order_date=fiscal_start + timedelta(days=(i * 13) % span_days),
+        )
+        for i in range(n_orders)
+    ]
+    deliveries = [
+        Delivery(
+            delivery_id=f"DLV-{i:05d}",
+            order_id=orders[i % n_orders].order_id,
+            delivery_date=orders[i % n_orders].order_date + timedelta(days=2 + i % 5),
+        )
+        for i in range(n_deliveries)
+    ]
+    return addresses, orders, deliveries
+
+
 # --- Main Generator ---
 
 
@@ -1269,6 +1320,9 @@ def generate_finance_dataset(
     formula_probe_rows: int = 0,
     relation_parents: int = 0,
     relation_children: int = 0,
+    roleplay_addresses: int = 0,
+    roleplay_orders: int = 0,
+    roleplay_deliveries: int = 0,
     lever: Lever | None = None,
     **_kwargs: object,
 ) -> FinanceDataset:
@@ -1379,6 +1433,10 @@ def generate_finance_dataset(
     formula_probes = _generate_formula_probes(formula_probe_rows)
     # Skeleton grains for the relationship probe tables — empty unless a strategy needs them.
     ref_entities, ref_activity = _generate_relationship_probes(relation_parents, relation_children)
+    # Skeleton grains + dimension for the role-playing-FK shape — same gating (DAT-788).
+    addresses, orders, deliveries = _generate_roleplay_probes(
+        roleplay_addresses, roleplay_orders, roleplay_deliveries, fiscal_start, months
+    )
 
     return FinanceDataset(
         chart_of_accounts=chart,
@@ -1394,4 +1452,7 @@ def generate_finance_dataset(
         formula_probes=formula_probes,
         ref_entities=ref_entities,
         ref_activity=ref_activity,
+        addresses=addresses,
+        orders=orders,
+        deliveries=deliveries,
     )

@@ -613,6 +613,88 @@ def mix_units(
     return df
 
 
+def inject_role_playing_fks(
+    df: pl.DataFrame,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,
+    dataframes: dict[str, pl.DataFrame],
+    seed: int | None = None,
+    same_addr_ratio: float = 0.3,
+    severity: str = "low",
+) -> pl.DataFrame:
+    """Fill the role-playing-FK columns on the role-play probe shape (DAT-788/DAT-419).
+
+    A LABELLED-CLEAN structural family, not a defect: one dimension (addresses),
+    one fact carrying TWO FK roles to it (orders.bill_to_addr / ship_to_addr —
+    also the DAT-419 two-FKs-one-table-pair shape), and a second fact sharing the
+    ship_to role under a DIFFERENT column name (deliveries.delivery_addr — the
+    judge's conform path). Role consistency is BY CONSTRUCTION: every delivery's
+    delivery_addr equals its parent order's ship_to_addr, so the lineage witness
+    has a data-level same-role signal, and bill_to must never pair with it.
+
+    ``same_addr_ratio`` of orders bill and ship to the SAME address (realistic
+    overlap that a naive value-overlap pairing would seize on — the trap leg).
+    Records one ``stratum="genuine_clean"`` registry entry per role column
+    (precision material, never a recall target — the eval's calibration-negative
+    convention). Truth: the export's conditional ``fk_roles`` + relationships
+    sections (metadata_truth), emitted only when the shape is present.
+    """
+    if table_name != "orders":
+        raise ValueError("inject_role_playing_fks targets the 'orders' probe table")
+    local_rng = random.Random(seed) if seed is not None else rng
+    address_ids = dataframes["addresses"]["address_id"].to_list()
+
+    ship_to = [local_rng.choice(address_ids) for _ in range(len(df))]
+    bill_to = [
+        ship if local_rng.random() < same_addr_ratio else local_rng.choice(address_ids)
+        for ship in ship_to
+    ]
+    df = df.with_columns(
+        pl.Series("bill_to_addr", bill_to),
+        pl.Series("ship_to_addr", ship_to),
+    )
+
+    # deliveries.delivery_addr = the parent order's ship_to (same role, different name)
+    ship_by_order = dict(zip(df["order_id"].to_list(), ship_to, strict=True))
+    deliveries = dataframes["deliveries"]
+    delivery_addr = [ship_by_order[oid] for oid in deliveries["order_id"].to_list()]
+    dataframes["deliveries"] = deliveries.with_columns(pl.Series("delivery_addr", delivery_addr))
+
+    roles = {
+        ("orders", "bill_to_addr"): "bill_to",
+        ("orders", "ship_to_addr"): "ship_to",
+        ("deliveries", "delivery_addr"): "ship_to",
+    }
+    for (tbl, col), role in roles.items():
+        registry.record(
+            EntropyInjection(
+                injection_id=registry.next_id("ROLEFK"),
+                target_file=f"{tbl}.csv",
+                target_column=col,
+                target_rows=[],  # labelled-clean: nothing corrupted
+                layer="structural",
+                dimension="relations",
+                sub_dimension="role_playing_fks",
+                detector_id="relationship_discovery",
+                injection_type="inject_role_playing_fks",
+                parameters={
+                    "family": "role_playing_fks",
+                    "stratum": "genuine_clean",
+                    "seed": seed,
+                    "fk_role": role,
+                    "referenced_table": "addresses" if col != "order_id" else "orders",
+                    "same_addr_ratio": same_addr_ratio,
+                    "n_addresses": len(address_ids),
+                    "n_orders": len(df),
+                    "n_deliveries": len(dataframes["deliveries"]),
+                },
+                severity=severity,
+            )
+        )
+    return df
+
+
 def corrupt_dates(
     df: pl.DataFrame,
     col: str,

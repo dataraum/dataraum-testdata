@@ -219,6 +219,9 @@ def run_scenario(
     # Same gate for the relationship probe grains (DAT-408/450): parent ids + child
     # rows exist only when a strategy targets the child probe table.
     needs_relationship_probes = any(s.table == REL_CHILD_TABLE for s in strategy.injections)
+    # Same gate for the role-playing-FK shape (DAT-788/DAT-419): dimension + both
+    # fact grains exist only when a strategy targets the role-play fact.
+    needs_roleplay = any(s.table == "orders" for s in strategy.injections)
 
     lever_spec = Lever(**lever) if lever is not None else None
 
@@ -231,6 +234,9 @@ def run_scenario(
         formula_probe_rows=formula_probe_rows,
         relation_parents=300 if needs_relationship_probes else 0,
         relation_children=1200 if needs_relationship_probes else 0,
+        roleplay_addresses=60 if needs_roleplay else 0,
+        roleplay_orders=400 if needs_roleplay else 0,
+        roleplay_deliveries=700 if needs_roleplay else 0,
         lever=lever_spec,
         **config.generator_kwargs,
     )

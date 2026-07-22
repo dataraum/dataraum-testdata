@@ -393,3 +393,86 @@ def test_run_scenario_unit_columns_exist_in_exported_frames(tmp_path: Path) -> N
             continue
         table, _, col = entry["unit_column"].partition(".")
         assert table in flat_frames and col in flat_frames[table].columns, entry
+
+
+# ---------------------------------------------------------------------------
+# role-playing FKs (DAT-788/DAT-419, CAP-roleplay-fk-fixture)
+# ---------------------------------------------------------------------------
+
+
+def _roleplay_frames() -> dict:
+    from testdata.canonical.finance.generators import generate_finance_dataset
+    from testdata.entropy.injectors import inject_role_playing_fks
+    from testdata.entropy.registry import InjectionRegistry
+    import random as _random
+
+    ds = generate_finance_dataset(
+        seed=42, months=2, roleplay_addresses=10, roleplay_orders=40, roleplay_deliveries=60
+    )
+    from testdata.export import dataset_to_dataframes
+
+    dfs = dataset_to_dataframes(ds)
+    dfs["orders"] = inject_role_playing_fks(
+        df=dfs["orders"], registry=InjectionRegistry(), table_name="orders",
+        rng=_random.Random(1), dataframes=dfs, seed=7,
+    )
+    return dfs
+
+
+def test_roleplay_truth_is_data_conditional(tmp_path: Path) -> None:
+    """The role-play sections appear ONLY when the frames carry the shape; a corpus
+    without the probe tables keeps canonical truth exactly (fk_roles empty)."""
+    from testdata.metadata_truth import export_metadata_truth as export
+
+    # without the shape: canonical equality (fk_roles stays {})
+    export(tmp_path / "clean")
+    clean = yaml.safe_load((tmp_path / "clean" / "metadata_truth.yaml").read_text())
+    assert clean == canonical_metadata_truth()
+    assert clean["fk_roles"] == {}
+    assert len(clean["relationships"]) == 9
+
+    # with the shape: fk_roles + roled relationships + table/timestamp roles
+    export(tmp_path / "role", dataframes=_roleplay_frames())
+    truth = yaml.safe_load((tmp_path / "role" / "metadata_truth.yaml").read_text())
+    assert truth["fk_roles"] == {
+        "orders.bill_to_addr": "bill_to",
+        "orders.ship_to_addr": "ship_to",
+        "deliveries.delivery_addr": "ship_to",
+    }
+    assert len(truth["relationships"]) == 13
+    roled = {r["from"]: r.get("fk_role") for r in truth["relationships"] if "fk_role" in r}
+    assert roled == truth["fk_roles"]
+    assert "orders" in truth["table_roles"]["facts"]
+    assert "deliveries" in truth["table_roles"]["facts"]
+    assert "addresses" in truth["table_roles"]["dimensions"]
+    assert "orders.order_date" in truth["semantic_roles"]["timestamp"]
+
+
+def test_run_scenario_roleplay_end_to_end(tmp_path: Path) -> None:
+    """The sizing gate + injector + conditional truth through the real runner: a
+    strategy targeting the orders probe table materializes the shape; entropy_map
+    records the genuine_clean legs; metadata_truth carries the role truth."""
+    strategy = tmp_path / "roleplay-test.yaml"
+    strategy.write_text(
+        "name: roleplay-test\n"
+        "level: low\n"
+        "description: role-play probe shape e2e\n"
+        "injections:\n"
+        "  - injector: inject_role_playing_fks\n"
+        "    table: orders\n"
+        "    params:\n"
+        "      seed: 20260722\n"
+        "      severity: low\n"
+    )
+    out = tmp_path / "out"
+    run_scenario("month-end-close", strategy_file=strategy, months=2, output_dir=out)
+
+    for table in ("addresses", "orders", "deliveries"):
+        assert (out / f"{table}.csv").exists(), table
+    truth = yaml.safe_load((out / "metadata_truth.yaml").read_text())
+    assert len(truth["fk_roles"]) == 3
+    assert len(truth["relationships"]) == 13
+    emap = yaml.safe_load((out / "entropy_map.yaml").read_text())
+    rolefk = [i for i in emap["injections"] if i["injection_type"] == "inject_role_playing_fks"]
+    assert len(rolefk) == 3
+    assert all(i["parameters"]["stratum"] == "genuine_clean" for i in rolefk)

@@ -30,6 +30,9 @@ TABLE_NAMES: dict[str, str] = {
     "formula_probes": "formula_probes",
     "ref_entities": "ref_entities",
     "ref_activity": "ref_activity",
+    "addresses": "addresses",
+    "orders": "orders",
+    "deliveries": "deliveries",
 }
 
 
