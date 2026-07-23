@@ -378,7 +378,18 @@ def _build_reconciles_with(
 # real but weakly signalled → soft.
 _CYCLES: list[dict[str, Any]] = [
     {"canonical_type": "journal_entry_cycle", "key_tables": ["journal_entries", "journal_lines"], "required": True},
-    {"canonical_type": "accounts_payable", "key_tables": ["invoices", "payments"], "required": True},
+    # DAT-856 three-state grading: accounts_payable is the corpus's DIRECTED backbone
+    # cycle — family + direction are DECLARED ground truth from the finance vertical's
+    # family declaration (vendor→invoice→payment settles OUTGOING), never a truth
+    # patch (DAT-685; the be67049 revert is the precedent). Undirected cycles carry
+    # no family/direction and grade exactly as before.
+    {
+        "canonical_type": "accounts_payable",
+        "key_tables": ["invoices", "payments"],
+        "required": True,
+        "family": "settlement",
+        "direction": "outgoing",
+    },
     {"canonical_type": "bank_reconciliation", "key_tables": ["bank_transactions", "payments"], "required": True},
     {"canonical_type": "period_close", "key_tables": ["trial_balance", "balance_sheet"], "required": False},
 ]
