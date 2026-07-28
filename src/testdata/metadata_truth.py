@@ -284,6 +284,16 @@ _MEASURED_IN: dict[str, str | None] = {
     "trial_balance.debit_balance": None,
     "trial_balance.credit_balance": None,
     "balance_sheet.ending_balance": None,
+    # The operating chain (DAT-884). No in-table currency column on either table —
+    # the corpus is single-currency there — so the unit source is undeclared, exactly
+    # like the derived balance tables above. Authored as None deliberately: inventing
+    # a currency column just to give these a unit source would be writing the schema
+    # to suit the truth file.
+    "products.standard_cost": None,
+    "products.list_price": None,
+    "sales_order_lines.unit_price": None,
+    "sales_order_lines.line_amount": None,
+    "sales_order_lines.line_cost": None,
 }
 _DIMENSIONLESS: frozenset[str] = frozenset({"fx_rates.rate"})
 
@@ -464,12 +474,17 @@ _LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
         "journal_entries": "journal_data",
         "invoices": "invoice_data",
         "payments": "invoice_data",
+        # the operating chain's header/item fold (DAT-884), mirroring journal_data
+        "sales_order_lines": "sales_data",
+        "sales_orders": "sales_data",
     },
     "flat": {
         "journal_lines": "general_ledger",
         "journal_entries": "general_ledger",
         "invoices": "invoice_data",
         "payments": "invoice_data",
+        "sales_order_lines": "sales_data",
+        "sales_orders": "sales_data",
     },
     "single": {
         "journal_lines": "mega_table",
@@ -480,6 +495,10 @@ _LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
         "fx_rates": "mega_table",
         "trial_balance": "mega_table",
         "balance_sheet": "mega_table",
+        "sales_order_lines": "mega_table",
+        "sales_orders": "mega_table",
+        "customers": "mega_table",
+        "products": "mega_table",
     },
 }
 

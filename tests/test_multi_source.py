@@ -14,7 +14,7 @@ from testdata.scenarios.multi_system_recon import run_scenario
 def test_multi_source_returns_all_tables():
     """run_scenario returns all 9 tables in dataframes dict."""
     result = run_scenario(strategy_name="clean", seed=42, months=3)
-    assert len(result["dataframes"]) == 9  # 8 canonical tables + balance_sheet
+    assert len(result["dataframes"]) == 13  # 8 canonical + balance_sheet + 4 operating-chain (DAT-884)
 
 
 def test_multi_source_has_sources_config():

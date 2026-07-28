@@ -433,3 +433,161 @@ def test_stream_is_stable_under_a_count_change() -> None:
         return [rng.random() for _ in range(5)]  # a later cycle's draws
 
     assert interleaved(12) != interleaved(10)
+
+
+# --- The operating chain (DAT-884 slices 2-4) ---
+
+
+@functools.lru_cache(maxsize=2)
+def _chain_dataset(seed: int = 42):
+    return generate_finance_dataset(seed=seed, months=12)
+
+
+def test_order_line_arithmetic_holds_by_construction() -> None:
+    """line_amount == units x unit_price and line_cost == units x standard_cost.
+
+    Load-bearing: DB1 truth is computed from these two columns, so if the identity
+    ever drifts the answer key silently stops being an answer key.
+    """
+    d = _chain_dataset()
+    cost_of = {p.product_id: p.standard_cost for p in d.products}
+    assert d.sales_order_lines
+    for line in d.sales_order_lines:
+        assert line.line_amount == (line.unit_price * line.units).quantize(Decimal("0.01"))
+        assert line.line_cost == (cost_of[line.product_id] * line.units).quantize(Decimal("0.01"))
+
+
+def test_every_order_line_resolves_to_a_customer_and_a_product() -> None:
+    """No orphan in the chain — DB1 per entity would silently drop rows."""
+    d = _chain_dataset()
+    orders = {o.order_id for o in d.sales_orders}
+    customers = {c.customer_id for c in d.customers}
+    products = {p.product_id for p in d.products}
+    assert all(o.customer_id in customers for o in d.sales_orders)
+    assert all(line.order_id in orders for line in d.sales_order_lines)
+    assert all(line.product_id in products for line in d.sales_order_lines)
+
+
+def test_cost_of_sale_is_no_longer_a_random_slice_of_purchases() -> None:
+    """COGS is EXACTLY the order lines' cost — the defect that made margins ungradeable.
+
+    Before DAT-884 nothing targeted account 5100; vendor invoices landed there by
+    `rng.choice(expense_accounts)`, so gross profit had no true value to compare to.
+    Cost of goods sold must now equal the sum of line_cost to the cent.
+    """
+    d = _chain_dataset()
+    cogs = sum(line.debit for line in d.journal_lines if line.account_id == "5100")
+    expected = sum(line.line_cost for line in d.sales_order_lines)
+    assert cogs == expected
+
+    # …and nothing else posts there.
+    credits = sum(line.credit for line in d.journal_lines if line.account_id == "5100")
+    assert credits == Decimal("0.00")
+
+
+def test_gross_profit_is_positive_and_realistic() -> None:
+    """A corpus whose cost of sale exceeds its revenue would be a self-inflicted defect."""
+    d = _chain_dataset()
+    revenue = sum(line.line_amount for line in d.sales_order_lines)
+    cost = sum(line.line_cost for line in d.sales_order_lines)
+    margin = float((revenue - cost) / revenue * 100)
+    assert 15.0 < margin < 60.0, f"gross margin {margin:.1f}% is not a plausible business"
+
+
+def test_inventory_never_goes_negative() -> None:
+    """Cost of sale credits Inventory, so replenishment must keep the stock positive.
+
+    Without it the corpus would carry a negative asset we invented ourselves, and
+    every detector firing on it would be our defect reported as theirs.
+    """
+    d = _chain_dataset()
+    balance = Decimal("0.00")
+    by_date = sorted(d.journal_entries, key=lambda e: (e.date, e.entry_id))
+    lines_by_entry: dict[str, list] = {}
+    for line in d.journal_lines:
+        lines_by_entry.setdefault(line.entry_id, []).append(line)
+    for entry in by_date:
+        for line in lines_by_entry.get(entry.entry_id, []):
+            if line.account_id == "1400":
+                balance += line.debit - line.credit
+    assert balance > 0, f"inventory ends at {balance}"
+
+
+def test_db1_truth_ties_to_the_two_cuts_and_to_the_ledger() -> None:
+    """DB1 per customer and per product group are two cuts of one true number."""
+    from testdata.ground_truth import calculate_ground_truth
+
+    d = _chain_dataset()
+    gt = calculate_ground_truth(d, seed=42)
+    assert gt.db1_by_customer and gt.db1_by_product_group
+
+    by_customer = sum(c.db1 for c in gt.db1_by_customer)
+    by_group = sum(c.db1 for c in gt.db1_by_product_group)
+    assert by_customer == by_group
+
+    lines_total = sum(line.line_amount - line.line_cost for line in d.sales_order_lines)
+    assert abs(by_customer - lines_total) < Decimal("1.00")
+
+
+# --- The volume lever (DAT-884 slice 5) ---
+
+
+def test_volume_lever_is_an_exact_counterfactual() -> None:
+    """The baseline's orders are a strict SUBSET of the levered run's.
+
+    This is the property entity-keyed streams exist for, and it is stronger than the
+    price lever's ratio claim: every pre-existing order is byte-identical, so the
+    difference between the two corpora IS the added volume and nothing else.
+    """
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=11, months=6)
+    lev = generate_finance_dataset(
+        seed=11, months=6, lever=Lever(period_k=3, factor=1.4, type="volume")
+    )
+
+    base_orders = {o.order_id: o for o in base.sales_orders}
+    lev_orders = {o.order_id: o for o in lev.sales_orders}
+    assert set(base_orders) < set(lev_orders), "baseline orders must be a strict subset"
+    for oid, order in base_orders.items():
+        assert lev_orders[oid] == order, f"{oid} changed under the lever"
+
+    base_lines = {line.order_line_id: line for line in base.sales_order_lines}
+    lev_lines = {line.order_line_id: line for line in lev.sales_order_lines}
+    assert set(base_lines) < set(lev_lines)
+    for lid, line in base_lines.items():
+        assert lev_lines[lid] == line, f"{lid} changed under the lever"
+
+    # Pre-lever months are untouched; post-lever months gained volume.
+    def units(dataset, before: bool) -> int:
+        dates = {o.order_id: o.order_date for o in dataset.sales_orders}
+        return sum(
+            line.units for line in dataset.sales_order_lines
+            if (dates[line.order_id].month <= 3) is before
+        )
+
+    assert units(base, True) == units(lev, True)
+    assert units(lev, False) > units(base, False)
+
+    # The ledger cycles never draw from the chain's streams, so they are untouched.
+    assert len(base.invoices) == len(lev.invoices)
+    assert base.invoices[0].amount == lev.invoices[0].amount
+    assert [p.amount for p in base.payments] == [p.amount for p in lev.payments]
+
+
+def test_price_lever_leaves_volume_and_cost_untouched() -> None:
+    """A price change moves revenue, not units and not standard cost."""
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=11, months=6)
+    lev = generate_finance_dataset(
+        seed=11, months=6, lever=Lever(period_k=3, factor=1.2, type="price_level")
+    )
+
+    assert len(base.sales_orders) == len(lev.sales_orders)
+    assert sum(line.units for line in base.sales_order_lines) == sum(
+        line.units for line in lev.sales_order_lines
+    )
+    base_cogs = sum(line.debit for line in base.journal_lines if line.account_id == "5100")
+    lev_cogs = sum(line.debit for line in lev.journal_lines if line.account_id == "5100")
+    assert base_cogs == lev_cogs

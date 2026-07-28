@@ -296,6 +296,7 @@ def apply_normalization(
     # partial: merge parent→child pairs
     out, mapping = _merge_journal_data(out, mapping)
     out, mapping = _merge_invoice_data(out, mapping)
+    out, mapping = _merge_sales_data(out, mapping)
 
     if level == "partial":
         return out, mapping
@@ -331,6 +332,33 @@ def _merge_journal_data(
     dfs["journal_data"] = journal_data
     mapping["journal_lines"] = "journal_data"
     mapping["journal_entries"] = "journal_data"
+    return dfs, mapping
+
+
+def _merge_sales_data(
+    dfs: dict[str, pl.DataFrame],
+    mapping: dict[str, str],
+) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
+    """sales_data = sales_order_lines LEFT JOIN sales_orders ON order_id (DAT-884).
+
+    The operating chain's parent→child pair, folded exactly like journal_data — the
+    header/item split is the shape a real ERP presents, and collapsing it is what the
+    ``partial`` level exists to test the engine against. Customers and products stay
+    as lookups at this level; they are dimension masters, not the order's parent.
+
+    A corpus generated before the chain existed simply has neither table — skip
+    rather than fail, so old fixtures stay loadable.
+    """
+    if "sales_order_lines" not in dfs or "sales_orders" not in dfs:
+        return dfs, mapping
+
+    lines = dfs.pop("sales_order_lines")
+    orders = dfs.pop("sales_orders")
+    sales_data = lines.join(orders, on="order_id", how="left")
+
+    dfs["sales_data"] = sales_data
+    mapping["sales_order_lines"] = "sales_data"
+    mapping["sales_orders"] = "sales_data"
     return dfs, mapping
 
 
@@ -475,9 +503,16 @@ def _build_single_table(
         "formula_probes",
         "ref_entities",
         "ref_activity",
+        "customers",
+        "products",
     ):
         if name in dfs:
             dfs.pop(name)
             mapping[name] = "mega_table"
+
+    # The merged sales_data folds in too, but it is a DERIVED name: its constituents
+    # (sales_orders / sales_order_lines) are already mapped above, so recording it
+    # again would put a table that never existed into the mapping.
+    dfs.pop("sales_data", None)
 
     return dfs, mapping

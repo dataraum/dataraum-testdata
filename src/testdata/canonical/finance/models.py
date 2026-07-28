@@ -250,6 +250,63 @@ class Delivery(BaseModel):
     delivery_date: datetime.date
 
 
+class Customer(BaseModel):
+    """A selling-side counterparty — the Demand dimension's canonical entity (DAT-884).
+
+    Distinct from the role-play probe dimension (:class:`Address`): this is real
+    operating master data every sales order references, present on every corpus.
+    """
+
+    customer_id: str = Field(description="Unique customer identifier")
+    name: str = Field(description="Customer legal name")
+    segment: str = Field(description="Commercial segment — the Demand ladder's rung")
+    region: str = Field(description="Sales region")
+    payment_terms: PaymentTerms = Field(description="Agreed settlement terms")
+
+
+class Product(BaseModel):
+    """A sellable item with a STANDARD COST — the Offer dimension's canonical entity.
+
+    ``standard_cost`` is what makes gross profit and DB1 real: before this the corpus
+    had no cost-of-sale relationship at all (COGS was a random slice of vendor
+    purchases), so every margin metric was ungradeable in principle. Cost of sale is
+    now ``units × standard_cost``, derivable per line and therefore per customer and
+    per product group.
+    """
+
+    product_id: str = Field(description="Unique product identifier")
+    name: str = Field(description="Product name")
+    product_group: str = Field(description="Product group — the Offer ladder's rung")
+    standard_cost: Decimal = Field(description="Standard cost per unit (the DB1 cost side)")
+    list_price: Decimal = Field(description="List price per unit before discount")
+
+
+class SalesOrder(BaseModel):
+    """A customer order header (the documented ERP sales-order shape, DAT-884)."""
+
+    order_id: str = Field(description="Unique sales order identifier")
+    customer_id: str = Field(description="FK to Customer")
+    order_date: datetime.date
+    status: str = Field(description="Order status")
+
+
+class SalesOrderLine(BaseModel):
+    """One ordered product at a quantity and a price — the grain revenue derives from.
+
+    ``line_amount == units × unit_price`` and ``line_cost == units × standard_cost``
+    BY CONSTRUCTION, so the GL revenue and COGS legs are derived rather than drawn,
+    and DB1 per customer / per product group is exact.
+    """
+
+    order_line_id: str = Field(description="Unique order line identifier")
+    order_id: str = Field(description="FK to SalesOrder")
+    product_id: str = Field(description="FK to Product")
+    units: int = Field(description="Quantity ordered")
+    unit_price: Decimal = Field(description="Agreed price per unit")
+    line_amount: Decimal = Field(description="units × unit_price")
+    line_cost: Decimal = Field(description="units × product standard_cost")
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -269,3 +326,9 @@ class FinanceDataset(BaseModel):
     addresses: list[Address] = []
     orders: list[Order] = []
     deliveries: list[Delivery] = []
+    # The operating chain (DAT-884) — present on EVERY corpus, unlike the probe
+    # shapes above, which stay conditional and empty by default.
+    customers: list[Customer] = []
+    products: list[Product] = []
+    sales_orders: list[SalesOrder] = []
+    sales_order_lines: list[SalesOrderLine] = []

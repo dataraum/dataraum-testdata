@@ -40,7 +40,7 @@ def test_both_format_export():
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
         # 9 tables (8 canonical + balance_sheet) × 2 formats = 18 file entries
-        assert len(manifest["files"]) == 18
+        assert len(manifest["files"]) == 26  # 13 tables x 2 formats (DAT-884 added 4)
 
 
 def test_parquet_manifest_structure():
@@ -69,7 +69,7 @@ def test_csv_default_unchanged():
 
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
-        assert len(manifest["files"]) == 9  # 8 canonical tables + balance_sheet
+        assert len(manifest["files"]) == 13  # 8 canonical + balance_sheet + 4 operating-chain (DAT-884)
         for entry in manifest["files"]:
             assert entry["file"].endswith(".csv")
 

@@ -22,6 +22,9 @@ _PARTIAL_MAPPING = {
     "journal_entries": "journal_data",
     "invoices": "invoice_data",
     "payments": "invoice_data",
+    # the operating chain's header/item fold (DAT-884)
+    "sales_order_lines": "sales_data",
+    "sales_orders": "sales_data",
 }
 
 

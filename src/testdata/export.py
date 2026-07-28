@@ -33,6 +33,11 @@ TABLE_NAMES: dict[str, str] = {
     "addresses": "addresses",
     "orders": "orders",
     "deliveries": "deliveries",
+    # The operating chain (DAT-884) — always present, unlike the probe shapes above.
+    "customers": "customers",
+    "products": "products",
+    "sales_orders": "sales_orders",
+    "sales_order_lines": "sales_order_lines",
 }
 
 

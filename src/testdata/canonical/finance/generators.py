@@ -20,6 +20,7 @@ from .models import (
     BankTransaction,
     ChartOfAccounts,
     Currency,
+    Customer,
     Delivery,
     FinanceDataset,
     FormulaProbe,
@@ -34,8 +35,11 @@ from .models import (
     Payment,
     PaymentMethod,
     PaymentTerms,
+    Product,
     RefActivity,
     RefEntity,
+    SalesOrder,
+    SalesOrderLine,
     TrialBalance,
 )
 
@@ -327,23 +331,32 @@ class Lever:
     changes the generating process itself, so the effect propagates naturally
     through the event cascade (sales → AR/revenue → receipts → cash/bank → TB/BS).
 
-    ``price_level``: every sale amount drawn in ``month_offset >= period_k`` is
-    scaled by ``factor`` immediately after the Benford draw. Scaling happens
-    after all random draws for the event, and no downstream control flow
-    branches on amount values, so the RNG stream is identical with and without
-    the lever — a same-seed pair (baseline, levered) is an exact counterfactual:
-    revenue-account activity in months >= period_k scales by exactly ``factor``;
-    receipts/cash follow with the collection lag; the expenditure cycle is
-    untouched.
+    ``price_level``: every realised line amount in ``month_offset >= period_k`` is
+    scaled by ``factor`` after the order lines are drawn. Scaling happens after all
+    random draws for the event and no downstream control flow branches on amount
+    values, so the RNG stream is identical with and without the lever — a same-seed
+    pair is an exact counterfactual: revenue in months >= period_k scales by exactly
+    ``factor``; receipts/cash follow with the collection lag; cost of sale and the
+    expenditure cycle are untouched (a price change does not move volumes or costs).
+
+    ``volume``: the number of orders a customer places in ``month_offset >=
+    period_k`` is scaled by ``factor``. Exact for a different and stronger reason
+    (DAT-884): order *i* of a (customer, month) draws from its own identity-keyed
+    stream, so the baseline's orders are a strict SUBSET of the levered run's —
+    byte-identical, plus the added ones. The ledger cycles never draw from those
+    streams, so purchases, payroll and depreciation are untouched, and the added
+    rows' revenue, cost of sale and DB1 contribution are computable to the cent.
     """
 
     period_k: int  # month offset (0-based) at which the lever activates
-    factor: float  # multiplicative price-level change, e.g. 1.15
+    factor: float  # multiplicative change, e.g. 1.15
     type: str = "price_level"
 
     def __post_init__(self) -> None:
-        if self.type != "price_level":
-            raise ValueError(f"unknown lever type: {self.type!r} (supported: price_level)")
+        if self.type not in ("price_level", "volume"):
+            raise ValueError(
+                f"unknown lever type: {self.type!r} (supported: price_level, volume)"
+            )
         if self.period_k < 0 or self.factor <= 0:
             raise ValueError(f"invalid lever: period_k={self.period_k}, factor={self.factor}")
 
@@ -356,102 +369,354 @@ class _SaleRecord:
     sale_date: date
     amount: Decimal
     customer: str
+    order_id: str = ""
     collected: bool = False
 
 
-def _generate_revenue_entries(
-    rng: random.Random,
+# --- The operating chain: customer → product → order → order line (DAT-884) ---
+
+_SEGMENTS = ["Enterprise", "Mid-Market", "SMB"]
+_REGIONS = ["DACH", "Nordics", "Benelux", "UK&I"]
+
+# (group, product name, base standard cost, gross-margin target) — the margin target
+# sets list_price = cost / (1 - margin), so a product's DB1 is a designed quantity
+# rather than an accident of two independent draws.
+_PRODUCT_CATALOG: list[tuple[str, str, float, float]] = [
+    ("Instruments", "Flow Meter", 420.0, 0.42),
+    ("Instruments", "Pressure Sensor", 180.0, 0.38),
+    ("Instruments", "Thermal Probe", 95.0, 0.45),
+    ("Controllers", "Edge Controller", 1250.0, 0.35),
+    ("Controllers", "PLC Module", 780.0, 0.31),
+    ("Consumables", "Filter Cartridge", 22.0, 0.55),
+    ("Consumables", "Calibration Kit", 65.0, 0.5),
+    ("Services", "Installation Day", 540.0, 0.28),
+    ("Services", "Support Contract", 300.0, 0.6),
+]
+
+# Revenue accounts the chain posts to, by product group. Services revenue is a
+# genuinely different account from product revenue — the split the Offer ladder
+# groups by, and it keeps the existing 41xx/42xx revenue structure meaningful.
+_GROUP_REVENUE_ACCOUNT = {
+    "Instruments": "4110",
+    "Controllers": "4120",
+    "Consumables": "4110",
+    "Services": "4210",
+}
+
+_INVENTORY_ACCOUNT = "1400"
+_COGS_ACCOUNT = "5100"
+
+
+def generate_customers() -> list[Customer]:
+    """Customer master — deterministic, no RNG (identity must be stable across runs)."""
+    out: list[Customer] = []
+    for i, name in enumerate(CUSTOMER_NAMES):
+        out.append(
+            Customer(
+                customer_id=f"C-{i + 1:04d}",
+                name=name,
+                segment=_SEGMENTS[i % len(_SEGMENTS)],
+                region=_REGIONS[i % len(_REGIONS)],
+                payment_terms=list(PaymentTerms)[i % len(PaymentTerms)],
+            )
+        )
+    return out
+
+
+def generate_products() -> list[Product]:
+    """Product master with standard cost — deterministic, no RNG.
+
+    ``list_price`` derives from the catalog's margin target rather than a separate
+    draw, so the true unit contribution is a designed number we can assert against.
+    """
+    out: list[Product] = []
+    for i, (group, name, cost, margin) in enumerate(_PRODUCT_CATALOG):
+        standard_cost = _quantize(Decimal(str(cost)))
+        list_price = _quantize(standard_cost / Decimal(str(1.0 - margin)))
+        out.append(
+            Product(
+                product_id=f"P-{i + 1:04d}",
+                name=name,
+                product_group=group,
+                standard_cost=standard_cost,
+                list_price=list_price,
+            )
+        )
+    return out
+
+
+def _order_count(
+    seed: int, customer_id: str, month_offset: int, base: float, seasonal: float,
+    lever: "Lever | None",
+) -> int:
+    """How many orders this customer places this month — the volume lever's target.
+
+    Drawn from the (customer, month) stream, so changing the count perturbs nothing
+    else. A ``volume`` lever scales the count from ``period_k`` on; because order *i*
+    keys its own stream, the baseline's orders remain a strict SUBSET of the levered
+    run's and the added rows are exactly attributable.
+    """
+    draw = _stream(seed, "order_count", customer_id, month_offset)
+    n = max(0, round(draw.gauss(base * seasonal, base * 0.25)))
+    if lever is not None and lever.type == "volume" and month_offset >= lever.period_k:
+        n = int(round(n * lever.factor))
+    return n
+
+
+def generate_sales_orders(
+    seed: int,
+    customers: list[Customer],
+    products: list[Product],
     fiscal_start: date,
     months: int,
-    counters: _Counters,
     *,
-    sales_per_month: int = 250,
+    orders_per_customer_month: float = 18.0,
     q4_seasonal_boost: float = 0.3,
     lever: Lever | None = None,
-) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord]]:
-    """Generate customer sale events: DR AR, CR Revenue.
+) -> tuple[list[SalesOrder], list[SalesOrderLine]]:
+    """The operating chain — customer orders with priced, costed lines.
 
-    Returns GL entries/lines plus internal sale records for cash receipt generation.
+    Draws ONLY from entity-keyed streams (never the sequential ``rng``), so the
+    ledger cycles are independent of order volume and a volume lever stays an exact
+    counterfactual.
     """
-    leaf = _get_leaf_accounts()
-    revenue_accounts = leaf.get(AccountType.REVENUE, [])
-    # Exclude "Other Income" (interest, FX gains) from sales
-    sales_revenue = [a for a in revenue_accounts if a.startswith(("41", "42"))]
+    orders: list[SalesOrder] = []
+    lines: list[SalesOrderLine] = []
+
+    for customer in customers:
+        for month_offset in range(months):
+            m_start, m_end = _month_start_end(fiscal_start, month_offset)
+            seasonal = 1.0 + q4_seasonal_boost * (m_start.month >= 10)
+            n_orders = _order_count(
+                seed, customer.customer_id, month_offset,
+                orders_per_customer_month, seasonal, lever,
+            )
+            for i in range(n_orders):
+                o = _stream(seed, "order", customer.customer_id, month_offset, i)
+                order_id = f"SO-{customer.customer_id[2:]}-{month_offset:02d}-{i:03d}"
+                orders.append(
+                    SalesOrder(
+                        order_id=order_id,
+                        customer_id=customer.customer_id,
+                        order_date=_random_date(o, m_start, m_end),
+                        status="open" if o.random() < 0.08 else "confirmed",
+                    )
+                )
+                for j in range(o.choices([1, 2, 3], weights=[55, 30, 15])[0]):
+                    line = _stream(seed, "order_line", order_id, j)
+                    product = products[line.randrange(len(products))]
+                    units = line.choices([2, 5, 10, 25, 60, 150], weights=[20, 25, 25, 18, 9, 3])[0]
+                    # Discount off list — the price realisation that makes per-customer
+                    # DB1 differ from per-product DB1.
+                    discount = Decimal(str(round(line.uniform(0.0, 0.18), 4)))
+                    unit_price = _quantize(product.list_price * (Decimal("1") - discount))
+                    lines.append(
+                        SalesOrderLine(
+                            order_line_id=f"{order_id}-L{j + 1}",
+                            order_id=order_id,
+                            product_id=product.product_id,
+                            units=units,
+                            unit_price=unit_price,
+                            line_amount=_quantize(unit_price * units),
+                            line_cost=_quantize(product.standard_cost * units),
+                        )
+                    )
+    return orders, lines
+
+
+def _generate_revenue_entries(
+    seed: int,
+    orders: list[SalesOrder],
+    order_lines: list[SalesOrderLine],
+    customers: list[Customer],
+    products: list[Product],
+    counters: _Counters,
+    fiscal_start: date,
+    *,
+    lever: Lever | None = None,
+) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord], dict[str, Decimal]]:
+    """Revenue and cost of sale, DERIVED from the order lines (DAT-884).
+
+    Two GL entries per order, both derived rather than drawn:
+
+    * **Revenue** — DR Accounts Receivable (order total), CR the product group's
+      revenue account per line (``units × unit_price``).
+    * **Cost of sale** — DR Cost of Goods Sold, CR Inventory (``units ×
+      standard_cost``). This is the leg the corpus never had: before it, COGS was a
+      random slice of vendor purchases with no link to any sale, so gross profit and
+      every margin below it were ungradeable in principle.
+
+    Returns entries, lines, the sale records the receipt cycle consumes, and COGS
+    per fiscal month (which sizes inventory replenishment, so stock stays positive
+    and scales naturally under a volume lever).
+
+    A ``price_level`` lever scales the realised unit price here — after every draw,
+    exactly as before, so it remains an exact counterfactual. A ``volume`` lever acts
+    earlier, on the order count.
+    """
+    lines_by_order: dict[str, list[SalesOrderLine]] = {}
+    for line in order_lines:
+        lines_by_order.setdefault(line.order_id, []).append(line)
+    product_group = {p.product_id: p.product_group for p in products}
+    customer_name = {c.customer_id: c.name for c in customers}
 
     entries: list[JournalEntry] = []
-    lines: list[JournalLine] = []
+    gl_lines: list[JournalLine] = []
     sales: list[_SaleRecord] = []
+    cogs_by_month: dict[str, Decimal] = {}
 
-    for month_offset in range(months):
-        m_start, m_end = _month_start_end(fiscal_start, month_offset)
+    price_factor = (
+        Decimal(str(lever.factor))
+        if lever is not None and lever.type == "price_level"
+        else None
+    )
 
-        # Q4 seasonal boost
-        seasonal = 1.0 + q4_seasonal_boost * (m_start.month >= 10)
-        count = int(rng.gauss(sales_per_month, sales_per_month * 0.1) * seasonal)
+    for order in orders:
+        rows = lines_by_order.get(order.order_id, [])
+        if not rows:
+            continue
+        post = _stream(seed, "revenue_post", order.order_id)
+        month_key = order.order_date.strftime("%Y-%m")
+        month_offset = (
+            (order.order_date.year - fiscal_start.year) * 12
+            + order.order_date.month - fiscal_start.month
+        )
+        active = (
+            price_factor is not None and lever is not None and month_offset >= lever.period_k
+        )
 
-        for _ in range(count):
-            sale_date = _random_date(rng, m_start, m_end)
-            amount = _benford_amount(rng, 500, 80000)
-            if lever is not None and month_offset >= lever.period_k:
-                # scale AFTER the draw: the RNG stream stays identical to the
-                # un-levered run, so same-seed pairs are exact counterfactuals
-                amount = _quantize(amount * Decimal(str(lever.factor)))
-            customer = rng.choice(CUSTOMER_NAMES)
-            cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
+        cost_center = post.choice(COST_CENTERS) if post.random() < 0.85 else None
+        customer = customer_name.get(order.customer_id, order.customer_id)
 
-            entry_id = counters.next_entry()
-            entries.append(
-                JournalEntry(
-                    entry_id=entry_id,
-                    date=sale_date,
-                    description=f"Revenue recognition - {customer}",
-                    status=JournalStatus.POSTED,
-                    created_by=rng.choice(USERS),
-                )
+        def priced(line: SalesOrderLine) -> Decimal:
+            if price_factor is None or not active:
+                return line.line_amount
+            return _quantize(line.line_amount * price_factor)
+
+        total = _quantize(sum((priced(r) for r in rows), Decimal("0.00")))
+        cost = _quantize(sum((r.line_cost for r in rows), Decimal("0.00")))
+
+        # ── Revenue: DR AR / CR revenue per line ──
+        entry_id = counters.next_entry()
+        entries.append(
+            JournalEntry(
+                entry_id=entry_id,
+                date=order.order_date,
+                description=f"Revenue recognition - {customer}",
+                status=JournalStatus.POSTED,
+                created_by=post.choice(USERS),
             )
-
-            # DR: AR
-            ar_account = rng.choice(_AR_ACCOUNTS)
-            lines.append(
+        )
+        gl_lines.append(
+            JournalLine(
+                line_id=counters.next_line(),
+                entry_id=entry_id,
+                account_id=post.choice(_AR_ACCOUNTS),
+                debit=total,
+                credit=Decimal("0.00"),
+                cost_center=cost_center,
+            )
+        )
+        for row in rows:
+            gl_lines.append(
                 JournalLine(
                     line_id=counters.next_line(),
                     entry_id=entry_id,
-                    account_id=ar_account,
-                    debit=amount,
-                    credit=Decimal("0.00"),
+                    account_id=_GROUP_REVENUE_ACCOUNT[product_group[row.product_id]],
+                    debit=Decimal("0.00"),
+                    credit=priced(row),
                     cost_center=cost_center,
                 )
             )
 
-            # CR: Revenue (may split across 1-2 revenue accounts)
-            n_rev = rng.choices([1, 2], weights=[80, 20])[0]
-            rev_amounts = _split_amount(rng, amount, n_rev)
-            for rev_amt in rev_amounts:
-                lines.append(
-                    JournalLine(
-                        line_id=counters.next_line(),
-                        entry_id=entry_id,
-                        account_id=rng.choice(sales_revenue),
-                        debit=Decimal("0.00"),
-                        credit=rev_amt,
-                        cost_center=cost_center,
-                    )
-                )
-
-            sales.append(
-                _SaleRecord(
-                    entry_id=entry_id,
-                    sale_date=sale_date,
-                    amount=amount,
-                    customer=customer,
+        # ── Cost of sale: DR COGS / CR Inventory ──
+        if cost > 0:
+            cogs_entry = counters.next_entry()
+            entries.append(
+                JournalEntry(
+                    entry_id=cogs_entry,
+                    date=order.order_date,
+                    description=f"Cost of sale - {customer}",
+                    status=JournalStatus.POSTED,
+                    created_by=post.choice(USERS),
                 )
             )
+            gl_lines.append(
+                JournalLine(
+                    line_id=counters.next_line(), entry_id=cogs_entry,
+                    account_id=_COGS_ACCOUNT, debit=cost, credit=Decimal("0.00"),
+                    cost_center=cost_center,
+                )
+            )
+            gl_lines.append(
+                JournalLine(
+                    line_id=counters.next_line(), entry_id=cogs_entry,
+                    account_id=_INVENTORY_ACCOUNT, debit=Decimal("0.00"), credit=cost,
+                    cost_center=cost_center,
+                )
+            )
+            cogs_by_month[month_key] = cogs_by_month.get(month_key, Decimal("0.00")) + cost
 
-    return entries, lines, sales
+        sales.append(
+            _SaleRecord(
+                entry_id=entry_id,
+                sale_date=order.order_date,
+                amount=total,
+                customer=customer,
+                order_id=order.order_id,
+            )
+        )
+
+    return entries, gl_lines, sales, cogs_by_month
+
+
+def _generate_inventory_replenishment(
+    seed: int,
+    cogs_by_month: dict[str, Decimal],
+    counters: _Counters,
+) -> tuple[list[JournalEntry], list[JournalLine]]:
+    """Stock purchases sized to the month's cost of sale: DR Inventory, CR AP.
+
+    Without this the cost-of-sale leg would drive Inventory permanently negative and
+    the corpus would carry a defect we invented ourselves. Sizing it off the month's
+    COGS means stock scales naturally under a volume lever — the propagation a DGP
+    lever is supposed to have — and it gives the engine's ``dio`` /
+    ``cash_conversion_cycle`` metrics real data to bind to for the first time.
+    """
+    entries: list[JournalEntry] = []
+    lines: list[JournalLine] = []
+    for month_key in sorted(cogs_by_month):
+        cogs = cogs_by_month[month_key]
+        buy = _stream(seed, "replenish", month_key)
+        amount = _quantize(cogs * Decimal(str(round(buy.uniform(1.02, 1.18), 4))))
+        purchase_date = date(int(month_key[:4]), int(month_key[5:7]), buy.randint(2, 26))
+        entry_id = counters.next_entry()
+        entries.append(
+            JournalEntry(
+                entry_id=entry_id,
+                date=purchase_date,
+                description=f"Inventory replenishment - {month_key}",
+                status=JournalStatus.POSTED,
+                created_by=buy.choice(USERS),
+            )
+        )
+        lines.append(
+            JournalLine(
+                line_id=counters.next_line(), entry_id=entry_id,
+                account_id=_INVENTORY_ACCOUNT, debit=amount, credit=Decimal("0.00"),
+            )
+        )
+        lines.append(
+            JournalLine(
+                line_id=counters.next_line(), entry_id=entry_id,
+                account_id=buy.choice(_AP_ACCOUNTS), debit=Decimal("0.00"), credit=amount,
+            )
+        )
+    return entries, lines
 
 
 def _generate_cash_receipts(
-    rng: random.Random,
+    seed: int,
     sales: list[_SaleRecord],
     fiscal_start: date,
     months: int,
@@ -459,7 +724,13 @@ def _generate_cash_receipts(
     *,
     collection_rate: float = 0.85,
 ) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
-    """Generate cash receipt events for collected sales: DR Cash, CR AR + Bank Txn."""
+    """Cash receipts for collected sales: DR Cash, CR AR + Bank Txn.
+
+    Keyed per SALE (DAT-884), not drawn from the sequential stream: whether order X
+    is collected, when, and how much must not depend on how many other orders exist,
+    or a volume lever would silently re-roll the collection outcome of every
+    pre-existing sale and destroy the subset property the counterfactual rests on.
+    """
     fiscal_end = _month_start_end(fiscal_start, months - 1)[1]
 
     entries: list[JournalEntry] = []
@@ -467,6 +738,7 @@ def _generate_cash_receipts(
     bank_txns: list[BankTransaction] = []
 
     for sale in sales:
+        rng = _stream(seed, "receipt", sale.order_id or sale.entry_id)
         # Older sales more likely to be collected
         days_outstanding = (fiscal_end - sale.sale_date).days
         if days_outstanding > 60:
@@ -555,7 +827,12 @@ def _generate_purchase_invoices(
 ) -> tuple[list[Invoice], list[JournalEntry], list[JournalLine]]:
     """Generate vendor/purchase invoices with GL entries: DR Expense, CR AP."""
     leaf = _get_leaf_accounts()
-    expense_accounts = leaf.get(AccountType.EXPENSE, [])
+    # COGS is EXCLUDED (DAT-884): cost of goods sold is now derived from order lines
+    # (units x standard_cost) and posted by the revenue cycle. Letting vendor invoices
+    # land here too would make account 5100 a mix of real cost-of-sale and random
+    # purchases — ambiguous, and the reason gross profit was ungradeable before.
+    # Goods purchases reach the books as Inventory via replenishment instead.
+    expense_accounts = [a for a in leaf.get(AccountType.EXPENSE, []) if a != _COGS_ACCOUNT]
 
     invoices: list[Invoice] = []
     entries: list[JournalEntry] = []
@@ -1391,25 +1668,20 @@ def generate_finance_dataset(
     chart = generate_chart_of_accounts()
     fx_rates = _generate_fx_rates(rng, fiscal_start, months)
 
-    # ── Revenue cycle ──
-    # Sales → GL entries (DR: AR, CR: Revenue)
-    sale_entries, sale_lines, sale_records = _generate_revenue_entries(
-        rng,
+    # ── The operating chain (DAT-884) ──
+    # Drawn from entity-keyed streams only, NEVER the sequential `rng`, so the
+    # ledger cycles below are independent of order volume and a volume lever stays
+    # an exact counterfactual. Its GL entries are minted LAST (see below).
+    customers = generate_customers()
+    products = generate_products()
+    sales_orders, sales_order_lines = generate_sales_orders(
+        seed,
+        customers,
+        products,
         fiscal_start,
         months,
-        counters,
-        sales_per_month=250,
         q4_seasonal_boost=q4_boost,
         lever=lever,
-    )
-
-    # Cash receipts → GL + Bank (DR: Cash, CR: AR)
-    receipt_entries, receipt_lines, receipt_bank = _generate_cash_receipts(
-        rng,
-        sale_records,
-        fiscal_start,
-        months,
-        counters,
     )
 
     # ── Expenditure cycle ──
@@ -1448,9 +1720,33 @@ def generate_finance_dataset(
         count_per_month=20,
     )
 
+    # ── The operating chain's GL, minted LAST (DAT-884) ──
+    # Ordering is load-bearing, not cosmetic: a volume lever changes how many sales
+    # entries exist, so minting them mid-cascade would shift every later cycle's
+    # entry_id/line_id and the expenditure cycle would stop being byte-identical
+    # between a same-seed pair. Last means the extra ids land at the end and nothing
+    # before them moves. (A separate id prefix would also work but puts two formats
+    # in one column — a self-inflicted format-consistency false positive on clean.)
+    sale_entries, sale_lines, sale_records, cogs_by_month = _generate_revenue_entries(
+        seed, sales_orders, sales_order_lines, customers, products, counters,
+        fiscal_start, lever=lever,
+    )
+    stock_entries, stock_lines = _generate_inventory_replenishment(
+        seed, cogs_by_month, counters
+    )
+    receipt_entries, receipt_lines, receipt_bank = _generate_cash_receipts(
+        seed, sale_records, fiscal_start, months, counters,
+    )
+
     # ── Assembly ──
-    all_entries = sale_entries + receipt_entries + inv_entries + pay_entries + op_entries + misc_entries
-    all_lines = sale_lines + receipt_lines + inv_lines + pay_lines + op_lines + misc_lines
+    all_entries = (
+        inv_entries + pay_entries + op_entries + misc_entries
+        + sale_entries + stock_entries + receipt_entries
+    )
+    all_lines = (
+        inv_lines + pay_lines + op_lines + misc_lines
+        + sale_lines + stock_lines + receipt_lines
+    )
     all_bank = receipt_bank + pay_bank + op_bank + misc_bank
 
     # Sort by date for chronological ordering
@@ -1489,4 +1785,8 @@ def generate_finance_dataset(
         addresses=addresses,
         orders=orders,
         deliveries=deliveries,
+        customers=customers,
+        products=products,
+        sales_orders=sales_orders,
+        sales_order_lines=sales_order_lines,
     )

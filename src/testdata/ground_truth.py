@@ -68,6 +68,27 @@ class AnnualMetrics(BaseModel):
     free_cash_flow: Decimal
 
 
+class ContributionMargin(BaseModel):
+    """True DB1 for one entity — revenue minus cost of sale (DAT-884).
+
+    The first **per-entity unit metric with truth** this corpus can carry, and the
+    reason the operating chain exists. Both sides are derived from the order lines
+    by construction (``units × unit_price`` and ``units × standard_cost``), so this
+    is exact, not estimated — an answer key, not a plausible number.
+
+    ``db1_pct`` is the contribution margin ratio; a grader comparing an engine
+    metric should use it rather than the absolute figure when entity sizes differ.
+    """
+
+    entity: str  # customer_id or product_group
+    revenue: Decimal
+    cost_of_sale: Decimal
+    db1: Decimal
+    db1_pct: float
+    units: int
+    orders: int
+
+
 class Invariants(BaseModel):
     """Structural integrity checks on the dataset."""
 
@@ -97,6 +118,10 @@ class GroundTruth(BaseModel):
     monthly: list[PeriodMetrics]
     invariants: Invariants
     injection_impact: list[InjectionImpact] = []
+    # DAT-884 — the operating-model answer key. Empty on corpora generated before
+    # the chain existed; a grader must treat absence as "not gradeable", never as 0.
+    db1_by_customer: list[ContributionMargin] = []
+    db1_by_product_group: list[ContributionMargin] = []
 
 
 # --- Calculation ---
@@ -279,7 +304,65 @@ def calculate_ground_truth(
         annual=annual,
         monthly=monthly_metrics,
         invariants=invariants,
+        db1_by_customer=_contribution_margin(dataset, by="customer"),
+        db1_by_product_group=_contribution_margin(dataset, by="product_group"),
     )
+
+
+def _contribution_margin(
+    dataset: FinanceDataset, *, by: str
+) -> list[ContributionMargin]:
+    """True DB1 per customer or per product group, from the order lines (DAT-884).
+
+    Computed off the operating chain rather than the GL: the line carries both sides
+    (``line_amount``, ``line_cost``) by construction, so this is an exact answer key.
+    Deriving it from GL postings instead would re-introduce the very ambiguity the
+    chain removed — account 5100 no longer mixes cost-of-sale with vendor purchases,
+    but the GL still cannot attribute a posting to a customer or a product group.
+
+    Returns [] when the corpus has no chain, so a grader sees "not gradeable" rather
+    than a zero it might mistake for a measurement.
+    """
+    if not dataset.sales_order_lines:
+        return []
+
+    customer_of = {o.order_id: o.customer_id for o in dataset.sales_orders}
+    group_of = {p.product_id: p.product_group for p in dataset.products}
+
+    agg: dict[str, dict[str, Any]] = {}
+    for line in dataset.sales_order_lines:
+        if by == "customer":
+            key = customer_of.get(line.order_id, "")
+        else:
+            key = group_of.get(line.product_id, "")
+        if not key:
+            continue
+        bucket = agg.setdefault(
+            key,
+            {"revenue": Decimal("0"), "cost": Decimal("0"), "units": 0, "orders": set()},
+        )
+        bucket["revenue"] += line.line_amount
+        bucket["cost"] += line.line_cost
+        bucket["units"] += line.units
+        bucket["orders"].add(line.order_id)
+
+    out: list[ContributionMargin] = []
+    for key in sorted(agg):
+        b = agg[key]
+        revenue, cost = _q(b["revenue"]), _q(b["cost"])
+        db1 = _q(revenue - cost)
+        out.append(
+            ContributionMargin(
+                entity=key,
+                revenue=revenue,
+                cost_of_sale=cost,
+                db1=db1,
+                db1_pct=round(float(db1 / revenue * 100), 2) if revenue else 0.0,
+                units=int(b["units"]),
+                orders=len(b["orders"]),
+            )
+        )
+    return out
 
 
 def _all_accounts_with_prefix(
