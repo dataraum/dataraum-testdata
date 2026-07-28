@@ -1,6 +1,7 @@
 """Tests for deterministic finance data generators."""
 
 import functools
+import random
 from collections import Counter
 from datetime import date
 from decimal import Decimal
@@ -371,3 +372,64 @@ def test_chart_of_accounts_opened_date_is_a_bijection() -> None:
     opened = [a.opened_date for a in coa]
     assert len(set(opened)) == len(coa), "opened_date must be unique per account"
     assert len({a.account_id for a in coa}) == len(coa), "account_id must be unique"
+
+
+# --- Entity-keyed RNG streams (DAT-884 slice 1) ---
+
+
+def test_stream_is_deterministic_per_key() -> None:
+    """Same (seed, key) → same draws, wherever and whenever it is called."""
+    from testdata.canonical.finance.generators import _stream
+
+    a = [_stream(7, "order", "C-0003", 4).random() for _ in range(3)]
+    b = [_stream(7, "order", "C-0003", 4).random() for _ in range(3)]
+    assert a == b
+
+
+def test_stream_separates_entities_and_seeds() -> None:
+    """A different entity, coordinate or seed is a different stream.
+
+    Load-bearing: a key missing a coordinate would silently make two entities share a
+    stream, and their draws would correlate for no modelled reason.
+    """
+    from testdata.canonical.finance.generators import _stream
+
+    base = _stream(7, "order", "C-0003", 4).random()
+    assert base != _stream(7, "order", "C-0004", 4).random()  # entity
+    assert base != _stream(7, "order", "C-0003", 5).random()  # month
+    assert base != _stream(8, "order", "C-0003", 4).random()  # seed
+    assert base != _stream(7, "receipt", "C-0003", 4).random()  # kind
+
+
+def test_stream_is_stable_under_a_count_change() -> None:
+    """THE property a volume lever needs: adding events perturbs nothing existing.
+
+    On one sequential stream, drawing 12 events instead of 10 shifts every later
+    value — the two runs then differ everywhere and the difference is no longer
+    attributable to the intervention. Keyed by identity, the first 10 are byte-identical
+    and the baseline is a strict SUBSET of the levered run.
+    """
+    from testdata.canonical.finance.generators import _stream
+
+    def draw(n: int) -> list[float]:
+        return [_stream(7, "order", "C-0003", 4, i).random() for i in range(n)]
+
+    baseline, levered = draw(10), draw(12)
+    assert levered[:10] == baseline
+    assert len(set(levered)) == 12  # the added draws are genuinely new, not repeats
+
+    # …and the sequential alternative demonstrably does NOT have this property,
+    # which is the whole reason this helper exists.
+    def sequential(n: int) -> list[float]:
+        rng = random.Random(7)
+        return [rng.random() for _ in range(n)]
+
+    assert sequential(12)[:10] == sequential(10)  # same prefix only because nothing
+    # else consumed the stream; interleave a second event type and the prefix breaks:
+    def interleaved(n_orders: int) -> list[float]:
+        rng = random.Random(7)
+        for _ in range(n_orders):
+            rng.random()
+        return [rng.random() for _ in range(5)]  # a later cycle's draws
+
+    assert interleaved(12) != interleaved(10)

@@ -136,6 +136,40 @@ def _month_start_end(fiscal_start: date, month_offset: int) -> tuple[date, date]
     return start, end
 
 
+# --- Entity-keyed RNG streams (DAT-884) ---
+
+
+def _stream(seed: int, *key: object) -> random.Random:
+    """A random stream keyed by stable entity IDENTITY, not by draw order.
+
+    The operating chain (DAT-884) draws only from these, never from the sequential
+    ``rng`` the ledger cycles share. That is what makes a **volume** lever an exact
+    same-seed counterfactual.
+
+    Why it is load-bearing. The existing ``price_level`` lever is exact for a narrow
+    reason: it rescales an amount *after* every draw and nothing downstream branches
+    on the value, so the sequential stream is untouched (see :class:`Lever`). A volume
+    lever changes how many events exist, so on one sequential stream run B would draw
+    a different number of randoms than run A and every subsequent value would shift —
+    the two corpora would differ everywhere, and the difference would no longer be
+    attributable to the intervention. A counterfactual that is only approximately the
+    same everywhere else is not ground truth; it is noise with a story.
+
+    Keyed by identity, order *i* of a (customer, month) draws from
+    ``_stream(seed, "order", customer_id, month, i)`` regardless of how many orders
+    that month holds. So for a volume factor > 1 the baseline's orders are a strict
+    **subset** of the levered run's, byte-identical, plus the added ones — and the
+    added rows' revenue, COGS and DB1 contribution are computable to the cent.
+
+    Same-key determinism is the whole contract, so the key must contain every
+    coordinate that distinguishes the entity — a missing coordinate silently makes
+    two different entities share a stream. Precedent: the string-keyed
+    ``random.Random(f"null_token_family:{col}:{seed}")`` pattern in
+    ``entropy/injectors.py``, which exists for the same order-independence reason.
+    """
+    return random.Random(":".join(str(k) for k in (*key, seed)))
+
+
 # --- Counters ---
 
 
