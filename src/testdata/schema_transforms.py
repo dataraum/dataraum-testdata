@@ -505,6 +505,8 @@ def _build_single_table(
         "ref_activity",
         "customers",
         "products",
+        "ar_invoices",
+        "receipts",
     ):
         if name in dfs:
             dfs.pop(name)

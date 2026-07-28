@@ -98,7 +98,7 @@ def test_partial_unchanged_tables(base_dataframes):
 def test_partial_table_count(base_dataframes):
     """partial produces 7 tables (6 + the standalone balance_sheet period table)."""
     dfs, _ = apply_normalization(dict(base_dataframes), "partial")
-    assert len(dfs) == 10  # + customers, products, sales_data (DAT-884)
+    assert len(dfs) == 12  # + customers, products, sales_data, ar_invoices, receipts
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ def test_flat_enriches_trial_balance(base_dataframes):
 def test_flat_table_count(base_dataframes):
     """flat produces 6 tables (5 + the standalone balance_sheet period table)."""
     dfs, _ = apply_normalization(dict(base_dataframes), "flat")
-    assert len(dfs) == 9  # + customers, products, sales_data (DAT-884)
+    assert len(dfs) == 11  # + customers, products, sales_data, ar_invoices, receipts
 
 
 # ---------------------------------------------------------------------------

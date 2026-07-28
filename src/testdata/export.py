@@ -38,6 +38,8 @@ TABLE_NAMES: dict[str, str] = {
     "products": "products",
     "sales_orders": "sales_orders",
     "sales_order_lines": "sales_order_lines",
+    "ar_invoices": "ar_invoices",
+    "receipts": "receipts",
 }
 
 

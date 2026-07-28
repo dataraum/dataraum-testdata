@@ -307,6 +307,36 @@ class SalesOrderLine(BaseModel):
     line_cost: Decimal = Field(description="units × product standard_cost")
 
 
+class ARInvoice(BaseModel):
+    """A CUSTOMER-side invoice — the AR half the corpus never had (DAT-884).
+
+    ``invoices`` is vendor-side only, so days-sales-outstanding had no receivable
+    document to measure against and the AR half of Capital was invisible. One AR
+    invoice per sales order, amount tied to the order's revenue posting.
+    """
+
+    ar_invoice_id: str = Field(description="Unique AR invoice identifier")
+    order_id: str = Field(description="FK to SalesOrder")
+    customer_id: str = Field(description="FK to Customer")
+    invoice_date: datetime.date
+    due_date: datetime.date
+    amount: Decimal = Field(description="Invoiced amount — the order's revenue")
+    currency: Currency = Currency.USD
+    status: InvoiceStatus = Field(description="Settlement status at fiscal close")
+
+
+class Receipt(BaseModel):
+    """Customer cash in against an AR invoice — the collection event DSO measures."""
+
+    receipt_id: str = Field(description="Unique receipt identifier")
+    ar_invoice_id: str = Field(description="FK to ARInvoice")
+    customer_id: str = Field(description="FK to Customer")
+    receipt_date: datetime.date
+    amount: Decimal = Field(description="Amount collected (may be partial)")
+    currency: Currency = Currency.USD
+    method: PaymentMethod = Field(description="How the money arrived")
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -332,3 +362,5 @@ class FinanceDataset(BaseModel):
     products: list[Product] = []
     sales_orders: list[SalesOrder] = []
     sales_order_lines: list[SalesOrderLine] = []
+    ar_invoices: list[ARInvoice] = []
+    receipts: list[Receipt] = []

@@ -591,3 +591,60 @@ def test_price_lever_leaves_volume_and_cost_untouched() -> None:
     base_cogs = sum(line.debit for line in base.journal_lines if line.account_id == "5100")
     lev_cogs = sum(line.debit for line in lev.journal_lines if line.account_id == "5100")
     assert base_cogs == lev_cogs
+
+
+def test_ar_side_exists_and_reconciles() -> None:
+    """The AR half of Capital — the corpus defect DAT-884 names.
+
+    `invoices` is vendor-side only, so DSO had no receivable document to measure.
+    One AR invoice per order, amount tied to the order's revenue posting.
+    """
+    d = _chain_dataset()
+    assert d.ar_invoices and d.receipts
+
+    invoiced = {i.ar_invoice_id: i for i in d.ar_invoices}
+    assert len(invoiced) == len(d.sales_orders), "one AR invoice per order"
+
+    order_total = {}
+    for line in d.sales_order_lines:
+        order_total[line.order_id] = order_total.get(line.order_id, Decimal("0")) + line.line_amount
+    for inv in d.ar_invoices:
+        assert inv.amount == order_total[inv.order_id].quantize(Decimal("0.01"))
+
+    # Every receipt points at a real invoice, and never collects more than was billed.
+    for receipt in d.receipts:
+        assert receipt.ar_invoice_id in invoiced
+        assert receipt.amount <= invoiced[receipt.ar_invoice_id].amount
+
+
+def test_ar_invoice_status_is_derived_from_actual_receipts() -> None:
+    """A `paid` invoice with no receipt behind it is exactly the cross-table
+    inconsistency the engine's validation induction exists to catch — and it would
+    be ours, not theirs. Status must follow the money."""
+    d = _chain_dataset()
+    collected: dict[str, Decimal] = {}
+    for receipt in d.receipts:
+        collected[receipt.ar_invoice_id] = (
+            collected.get(receipt.ar_invoice_id, Decimal("0.00")) + receipt.amount
+        )
+    for inv in d.ar_invoices:
+        got = collected.get(inv.ar_invoice_id, Decimal("0.00"))
+        if inv.status.value == "paid":
+            assert got >= inv.amount
+        elif inv.status.value == "partial":
+            assert Decimal("0") < got < inv.amount
+        else:
+            assert got == Decimal("0.00"), f"{inv.ar_invoice_id} is {inv.status} but collected {got}"
+
+
+def test_ar_due_dates_follow_the_customer_terms() -> None:
+    """DSO must be a property of the data, not a constant."""
+    d = _chain_dataset()
+    terms_of = {c.customer_id: c.payment_terms for c in d.customers}
+    lags = {(inv.due_date - inv.invoice_date).days for inv in d.ar_invoices}
+    assert len(lags) > 1, "every invoice shares one due lag — terms are not being honoured"
+    for inv in d.ar_invoices[:200]:
+        expected = {"net_30": 30, "net_60": 60, "net_90": 90, "due_on_receipt": 0}[
+            terms_of[inv.customer_id].value
+        ]
+        assert (inv.due_date - inv.invoice_date).days == expected

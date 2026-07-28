@@ -294,6 +294,10 @@ _MEASURED_IN: dict[str, str | None] = {
     "sales_order_lines.unit_price": None,
     "sales_order_lines.line_amount": None,
     "sales_order_lines.line_cost": None,
+    # These two DO carry an in-table currency column, so the unit source is declared
+    # — the same shape as invoices/payments.
+    "ar_invoices.amount": "ar_invoices.currency",
+    "receipts.amount": "receipts.currency",
 }
 _DIMENSIONLESS: frozenset[str] = frozenset({"fx_rates.rate"})
 
@@ -499,6 +503,8 @@ _LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
         "sales_orders": "mega_table",
         "customers": "mega_table",
         "products": "mega_table",
+        "ar_invoices": "mega_table",
+        "receipts": "mega_table",
     },
 }
 

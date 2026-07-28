@@ -16,6 +16,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from .models import (
     AccountType,
     Address,
+    ARInvoice,
     BalanceSheet,
     BankTransaction,
     ChartOfAccounts,
@@ -36,6 +37,7 @@ from .models import (
     PaymentMethod,
     PaymentTerms,
     Product,
+    Receipt,
     RefActivity,
     RefEntity,
     SalesOrder,
@@ -370,6 +372,7 @@ class _SaleRecord:
     amount: Decimal
     customer: str
     order_id: str = ""
+    customer_id: str = ""
     collected: bool = False
 
 
@@ -664,10 +667,76 @@ def _generate_revenue_entries(
                 amount=total,
                 customer=customer,
                 order_id=order.order_id,
+                customer_id=order.customer_id,
             )
         )
 
     return entries, gl_lines, sales, cogs_by_month
+
+
+_TERMS_DAYS: dict[PaymentTerms, int] = {
+    PaymentTerms.NET_30: 30,
+    PaymentTerms.NET_60: 60,
+    PaymentTerms.NET_90: 90,
+    PaymentTerms.DUE_ON_RECEIPT: 0,
+}
+
+
+def _generate_ar_invoices(
+    sales: list[_SaleRecord],
+    customers: list[Customer],
+    fiscal_end: date,
+) -> list[ARInvoice]:
+    """One customer invoice per order — the AR document the corpus never had.
+
+    ``invoices`` is vendor-side only, so days-sales-outstanding had no receivable to
+    measure and the AR half of Capital was invisible (DAT-884). Amount ties to the
+    order's revenue posting by construction, and the due date follows the customer's
+    own agreed terms, so DSO is a property of the data rather than a constant.
+
+    Status is derived from the receipt cycle afterwards (``_settle_ar_invoices``) —
+    minting it here would guess at a collection the receipt cycle actually decides.
+    """
+    terms_of = {c.customer_id: c.payment_terms for c in customers}
+    out: list[ARInvoice] = []
+    for sale in sales:
+        terms = terms_of.get(sale.customer_id, PaymentTerms.NET_30)
+        due = sale.sale_date + timedelta(days=_TERMS_DAYS[terms])
+        out.append(
+            ARInvoice(
+                ar_invoice_id=f"ARI-{sale.order_id[3:]}",
+                order_id=sale.order_id,
+                customer_id=sale.customer_id,
+                invoice_date=sale.sale_date,
+                due_date=due,
+                amount=sale.amount,
+                status=InvoiceStatus.OVERDUE if due < fiscal_end else InvoiceStatus.OPEN,
+            )
+        )
+    return out
+
+
+def _settle_ar_invoices(
+    ar_invoices: list[ARInvoice], receipts: list[Receipt]
+) -> None:
+    """Set each AR invoice's status from what was actually collected against it.
+
+    Derived, never drawn: an invoice reading ``paid`` with no receipt behind it — or
+    ``open`` with one — is precisely the cross-table inconsistency the engine's
+    validation induction is supposed to catch, and it would be ours, not theirs.
+    """
+    collected: dict[str, Decimal] = {}
+    for receipt in receipts:
+        collected[receipt.ar_invoice_id] = (
+            collected.get(receipt.ar_invoice_id, Decimal("0.00")) + receipt.amount
+        )
+    for invoice in ar_invoices:
+        got = collected.get(invoice.ar_invoice_id, Decimal("0.00"))
+        if got <= 0:
+            continue
+        invoice.status = (
+            InvoiceStatus.PAID if got >= invoice.amount else InvoiceStatus.PARTIAL
+        )
 
 
 def _generate_inventory_replenishment(
@@ -723,8 +792,8 @@ def _generate_cash_receipts(
     counters: _Counters,
     *,
     collection_rate: float = 0.85,
-) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
-    """Cash receipts for collected sales: DR Cash, CR AR + Bank Txn.
+) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction], list[Receipt]]:
+    """Cash receipts for collected sales: DR Cash, CR AR + Bank Txn + the AR document.
 
     Keyed per SALE (DAT-884), not drawn from the sequential stream: whether order X
     is collected, when, and how much must not depend on how many other orders exist,
@@ -736,6 +805,7 @@ def _generate_cash_receipts(
     entries: list[JournalEntry] = []
     lines: list[JournalLine] = []
     bank_txns: list[BankTransaction] = []
+    receipts: list[Receipt] = []
 
     for sale in sales:
         rng = _stream(seed, "receipt", sale.order_id or sale.entry_id)
@@ -811,7 +881,19 @@ def _generate_cash_receipts(
             )
         )
 
-    return entries, lines, bank_txns
+        if sale.order_id:
+            receipts.append(
+                Receipt(
+                    receipt_id=f"RC-{sale.order_id[3:]}",
+                    ar_invoice_id=f"ARI-{sale.order_id[3:]}",
+                    customer_id=sale.customer_id,
+                    receipt_date=receipt_date,
+                    amount=amount,
+                    method=rng.choice(list(PaymentMethod)),
+                )
+            )
+
+    return entries, lines, bank_txns, receipts
 
 
 # --- Expenditure Cycle: Purchase Invoices → Vendor Payments ---
@@ -1734,9 +1816,13 @@ def generate_finance_dataset(
     stock_entries, stock_lines = _generate_inventory_replenishment(
         seed, cogs_by_month, counters
     )
-    receipt_entries, receipt_lines, receipt_bank = _generate_cash_receipts(
+    receipt_entries, receipt_lines, receipt_bank, receipts = _generate_cash_receipts(
         seed, sale_records, fiscal_start, months, counters,
     )
+    ar_invoices = _generate_ar_invoices(
+        sale_records, customers, _month_start_end(fiscal_start, months - 1)[1]
+    )
+    _settle_ar_invoices(ar_invoices, receipts)
 
     # ── Assembly ──
     all_entries = (
@@ -1789,4 +1875,6 @@ def generate_finance_dataset(
         products=products,
         sales_orders=sales_orders,
         sales_order_lines=sales_order_lines,
+        ar_invoices=ar_invoices,
+        receipts=receipts,
     )
