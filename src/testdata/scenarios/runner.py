@@ -328,6 +328,36 @@ def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date |
     """
     start = fiscal_start if fiscal_start is not None else date(2025, 1, 1)
     activation = date(start.year + (start.month - 1 + lever.period_k) // 12, (start.month - 1 + lever.period_k) % 12 + 1, 1)
+    # The effect statement is TYPE-SPECIFIC. Emitting the price-lever wording for a
+    # volume lever would put a wrong ground truth on disk — the exact failure this
+    # file exists to prevent (DAT-884).
+    if lever.type == "volume":
+        affected = {
+            "direct": "order COUNT per customer per month for months >= period_k; the added orders carry their own lines, revenue, cost of sale and AR invoice",
+            "propagated": "revenue and COGS postings for the added orders, their receipts/bank inflows, inventory replenishment (sized off monthly COGS), trial_balance and balance_sheet",
+            "unaffected": "every pre-existing order and order line (byte-identical), the expenditure cycle (invoices, payments, AP), operating events, fx_rates",
+        }
+        analytic_effect = (
+            "orders of the same-seed baseline are a strict SUBSET of the levered run's: every "
+            "pre-existing order, line, AR invoice and receipt is byte-identical, because order i "
+            "of a (customer, month) draws from its own identity-keyed stream. The difference "
+            "between the two corpora IS the added volume, so its revenue, cost of sale and DB1 "
+            "contribution are computable to the cent by set difference. Order counts scale by "
+            "`factor` in expectation, not exactly (the count is a rounded draw)."
+        )
+    else:
+        affected = {
+            "direct": "realised line amounts in months >= period_k (revenue-account credits, AR debits, AR invoice amounts)",
+            "propagated": "cash receipts / bank inflows for levered sales (5-45d collection lag), trial_balance and balance_sheet lines derived from them",
+            "unaffected": "order and line COUNTS, units, product standard cost and therefore cost of sale; the expenditure cycle (invoices, payments, AP), operating events, fx_rates",
+        }
+        analytic_effect = (
+            "monthly revenue-account activity for months >= period_k scales by exactly `factor` "
+            "vs the same-seed baseline (RNG stream is identical; scaling is applied after all "
+            "random draws). Receipts follow with the collection lag. Cost of sale is unchanged, "
+            "so contribution margin moves by the full price delta."
+        )
+
     payload = {
         "intervention": {
             "type": lever.type,
@@ -335,16 +365,8 @@ def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date |
             "activation_period": activation.strftime("%Y-%m"),
             "factor": lever.factor,
             "months_total": months,
-            "affected": {
-                "direct": "sale amounts drawn in months >= period_k (revenue-account credits, AR debits)",
-                "propagated": "cash receipts / bank inflows for levered sales (5-45d collection lag), trial_balance and balance_sheet lines derived from them",
-                "unaffected": "expenditure cycle (invoices, payments, AP), operating events, fx_rates",
-            },
-            "analytic_effect": (
-                "monthly revenue-account activity for months >= period_k scales by exactly `factor` "
-                "vs the same-seed baseline (RNG stream is identical; scaling is applied after all "
-                "random draws). Receipts follow with the collection lag."
-            ),
+            "affected": affected,
+            "analytic_effect": analytic_effect,
             "counterfactual": "re-run the identical scenario (same seed/months/strategy) without `lever`",
         }
     }
