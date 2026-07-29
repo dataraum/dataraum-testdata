@@ -225,9 +225,19 @@ _RELATIONSHIPS: list[dict[str, str]] = [
 # dimension. journal_entries (event header, no measure) and fx_rates (rate lookup that
 # also carries a measure) are genuinely modelable either way → reported, not asserted.
 _TABLE_ROLES: dict[str, list[str]] = {
-    "facts": ["journal_lines", "invoices", "payments", "bank_transactions", "trial_balance", "balance_sheet"],
-    "dimensions": ["chart_of_accounts"],
-    "ambiguous": ["journal_entries", "fx_rates"],
+    "facts": [
+        "journal_lines", "invoices", "payments", "bank_transactions",
+        "trial_balance", "balance_sheet",
+        # DAT-884 operating chain: each carries its own measures at its own grain.
+        "sales_order_lines", "ar_invoices", "receipts",
+    ],
+    "dimensions": ["chart_of_accounts", "customers"],
+    # Reported, never asserted — structurally debatable by this truth's OWN rule
+    # ("measure-bearing = fact, pure reference = dimension"):
+    #   journal_entries / sales_orders — event headers carrying no measure
+    #   fx_rates / products — reference rows that DO carry rate-like measures
+    #     (rate; standard_cost/list_price), so neither branch of the rule fits.
+    "ambiguous": ["journal_entries", "fx_rates", "sales_orders", "products"],
 }
 
 # semantic_role per column: measure graded recall+precision, timestamp graded recall
@@ -245,6 +255,19 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         "trial_balance.credit_balance",
         "balance_sheet.ending_balance",
         "fx_rates.rate",
+        # DAT-884 operating chain. `units` is a count and `unit_price` a rate — both
+        # are measures in the graded sense (numeric, driver/slicing input); whether
+        # they SUM is the additivity verdict's question, not this role's.
+        "sales_order_lines.units",
+        "sales_order_lines.unit_price",
+        "sales_order_lines.line_amount",
+        "sales_order_lines.line_cost",
+        "ar_invoices.amount",
+        "receipts.amount",
+        # Prices on a product row: constant per entity, but the same shape as the
+        # already-declared fx_rates.rate — a rate living on a reference row.
+        "products.standard_cost",
+        "products.list_price",
     ],
     "timestamp": [
         "journal_entries.date",
@@ -255,6 +278,11 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         "fx_rates.date",
         "trial_balance.period",
         "balance_sheet.period",
+        # DAT-884 operating chain.
+        "sales_orders.order_date",
+        "ar_invoices.invoice_date",
+        "ar_invoices.due_date",
+        "receipts.receipt_date",
     ],
 }
 
