@@ -479,3 +479,61 @@ def test_run_scenario_roleplay_end_to_end(tmp_path: Path) -> None:
     rolefk = [i for i in emap["injections"] if i["injection_type"] == "inject_role_playing_fks"]
     assert len(rolefk) == 3
     assert all(i["parameters"]["stratum"] == "genuine_clean" for i in rolefk)
+
+
+def test_flat_drops_fk_claims_whose_target_stopped_being_a_key() -> None:
+    """A merge that folds a parent into a finer grain destroys the target's key-ness,
+    and an edge pointing at a non-key is not a foreign key (measured on clean-flat
+    2026-07-29: general_ledger.entry_id at 0.455 uniqueness).
+
+    ``direction_reliable`` covers only the softer half — an orientation that may flip.
+    It cannot rescue an edge that is not an inclusion dependency in EITHER direction, so
+    the truth must stop asserting it. Derived from the frames, never declared: a merge
+    that PRESERVES uniqueness keeps its edge.
+    """
+    from testdata.canonical.finance.generators import generate_finance_dataset
+    from testdata.export import dataset_to_dataframes
+    from testdata.metadata_truth import _apply_relationship_assertability
+
+    dfs = dataset_to_dataframes(generate_finance_dataset(seed=42, months=2))
+    normalized, mapping = apply_normalization(dict(dfs), "flat")
+    truth = remap_metadata_truth(canonical_metadata_truth(), table_mapping=mapping, level="flat")
+
+    before = {(r["from"], r["to"]) for r in truth["relationships"]}
+    _apply_relationship_assertability(truth, normalized)
+    after = {(r["from"], r["to"]) for r in truth["relationships"]}
+
+    dropped = before - after
+    assert dropped, "flat folds journal_entries into a line-grain fact — something must drop"
+
+    # every drop is JUSTIFIED by the data, and says so
+    for rel in truth["relationships_not_assertable"]:
+        table, _, column = str(rel["to"]).partition(".")
+        values = normalized[table][column].drop_nulls()
+        assert values.n_unique() < len(values), f"{rel['to']} is a key — should not have dropped"
+        assert "not a key in this shape" in rel["reason"]
+
+    # …and every SURVIVING edge really does point at a key
+    for rel in truth["relationships"]:
+        table, _, column = str(rel["to"]).partition(".")
+        if table not in normalized or column not in normalized[table].columns:
+            continue
+        values = normalized[table][column].drop_nulls()
+        assert values.n_unique() == len(values), f"{rel['to']} kept but is not a key"
+
+
+def test_canonical_relationships_all_survive_assertability() -> None:
+    """The guard must not fire where no merge happened — at `full` every parent keeps
+    its grain, so nothing may drop. A filter that quietly eats real FKs would make the
+    corpus look easier than it is."""
+    from testdata.canonical.finance.generators import generate_finance_dataset
+    from testdata.export import dataset_to_dataframes
+    from testdata.metadata_truth import _apply_relationship_assertability
+
+    dfs = dataset_to_dataframes(generate_finance_dataset(seed=42, months=2))
+    truth = remap_metadata_truth(canonical_metadata_truth(), level="full")
+    before = len(truth["relationships"])
+    _apply_relationship_assertability(truth, dict(dfs))
+
+    assert len(truth["relationships"]) == before
+    assert "relationships_not_assertable" not in truth

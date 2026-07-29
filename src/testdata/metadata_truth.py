@@ -858,6 +858,64 @@ _ROLEPLAY_RELATIONSHIPS: list[dict[str, str]] = [
 ]
 
 
+def _apply_relationship_assertability(
+    truth: dict[str, Any], dataframes: Mapping[str, Any]
+) -> None:
+    """Drop FK claims whose TARGET column is no longer a key in the exported frames.
+
+    A foreign key references a KEY — a column whose values are unique. A merge can fold
+    a parent into a finer grain (``journal_entries`` into ``general_ledger`` at ``flat``,
+    where ``entry_id`` repeats once per GL line), and the surviving column is then an
+    ordinary repeating attribute. The edge is no longer a foreign key at that shape, so
+    asserting one states something false about the corpus.
+
+    ``direction_reliable`` (2026-07-16) already covers the softer half of this — a merged
+    parent can make the engine's uniqueness-canonical orientation flip, so grade the edge
+    undirected. It does NOT cover the case measured on clean-flat 2026-07-29, where the
+    target's uniqueness collapses to 0.455 and the edge is unrecoverable in EITHER
+    orientation (the reverse containment is ~0.18). Undirected grading cannot rescue an
+    edge that is not an inclusion dependency in any direction.
+
+    DATA-DERIVED, on purpose — the ``cross_unit`` precedent. The static remap knows a
+    merge happened but not what it did to the values; only the frames know whether the
+    key survived. Deriving it means a merge that PRESERVES uniqueness keeps its edge
+    asserted, and no hand-maintained exception list can drift.
+
+    The test is the DEFINITION of a key (no duplicate values), deliberately not the
+    engine's ``REF_UNIQUENESS_MIN`` tolerance. Filtering our truth through the detector's
+    own gate would make the oracle unable to ever fail on that gate — the instrument
+    tuned to the thing it measures.
+
+    Dropped edges are recorded under ``relationships_not_assertable`` rather than
+    deleted silently: a truth that quietly shrinks reads as a corpus that got easier.
+    """
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for rel in truth.get("relationships") or []:
+        table, _, column = str(rel["to"]).partition(".")
+        df = dataframes.get(table)
+        if df is None or column not in df.columns:
+            kept.append(rel)
+            continue
+        values = df[column].drop_nulls()
+        if len(values) and values.n_unique() < len(values):
+            dropped.append(
+                {
+                    **rel,
+                    "reason": (
+                        f"target {rel['to']} is not a key in this shape "
+                        f"({values.n_unique()}/{len(values)} distinct) — a merge folded "
+                        "the parent into a finer grain, so no foreign key exists here"
+                    ),
+                }
+            )
+            continue
+        kept.append(rel)
+    truth["relationships"] = kept
+    if dropped:
+        truth["relationships_not_assertable"] = dropped
+
+
 def _apply_roleplay_truth(truth: dict[str, Any], dataframes: Mapping[str, Any]) -> None:
     """Extend *truth* with the role-play sections when the shape is present (data-
     conditional, like cross_unit): relationships (+fk_role on the roled edges),
@@ -927,6 +985,7 @@ def export_metadata_truth(
             df = dataframes.get(table)
             if df is not None and unit_col in df.columns:
                 entry["cross_unit"] = df[unit_col].drop_nulls().n_unique() > 1
+        _apply_relationship_assertability(truth, dataframes)
         # role-play shape truth (DAT-788): emitted only when the frames carry it
         _apply_roleplay_truth(truth, dataframes)
     with open(output_dir / "metadata_truth.yaml", "w") as f:
