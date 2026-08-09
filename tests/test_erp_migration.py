@@ -54,7 +54,8 @@ def test_erp_export_creates_files():
 
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
-        assert manifest["parameters"]["scenario"] == "erp-migration"
+        assert manifest["corpus"]["scenario"] == "erp-migration"
+        assert manifest["corpus"]["normalization"] == "partial"
         assert len(manifest["files"]) == len(default_tables()) - 3
 
 

@@ -66,10 +66,36 @@ Set via `generator.normalization` in `config/scenarios/month_end_close.yaml`.
 
 Each generation produces:
 - **CSV files** — one per table (varies by normalization level)
-- **manifest.yaml** — file list, row counts, generation parameters
+- **manifest.yaml** — corpus identity, file list, row counts
 - **entropy_map.yaml** — defect ground truth: every injection with its target rows, layer, defect class and severity
 - **ground_truth.yaml** — known-correct financial metrics (see [Ground Truth](#ground-truth))
 - **metadata_truth.yaml** — structural ground truth (see [Metadata Truth](#metadata-truth))
+
+### Corpus identity
+
+`output/` is gitignored and stays that way. A corpus is not an artifact to preserve; it is
+a **function of its parameters**, and every output file carries them as a `corpus:` block:
+
+```yaml
+corpus:
+  id: ac1792ab578f
+  generator: dataraum-testdata
+  version: 0.2.0
+  scenario: month-end-close
+  strategy: clean
+  seed: 42
+  months: 12
+  normalization: full
+  families: [core_ledger, operating_chain, inventory]
+  lever: null
+```
+
+Pin the `id`, regenerate when you want the bytes, and assert which corpus you graded
+against. The digest is sha256 over exactly the fields shown, so you can **recompute it**
+rather than trust it. Two directories with the same id hold the same data; a different id
+means something upstream moved — most often a new family, which changes the corpus under
+an unchanged seed by design. `intervention.yaml` additionally names
+`counterfactual_corpus_id`, so a lever's baseline pair can be verified rather than assumed.
 
 ### Defect labels are consumer-agnostic
 
@@ -187,6 +213,9 @@ output/
 └── ground_truth.yaml    # financial ground truth
 ```
 
+Every source carries the **same** corpus id — they are one set of events exported through
+different conventions, which is the premise a reconciliation scenario rests on.
+
 Define sources in scenario YAML:
 ```yaml
 sources:
@@ -222,6 +251,7 @@ See `docs/operating-model.md` §7 and §9.
 ## Backlog
 
 The ordered plan is [`docs/operating-model.md`](docs/operating-model.md) §10 — next up are
-scale profiles, then the Supply, Capacity and Throughput families. Independent of that:
+scale profiles (which also add `profile` to the corpus identity), then the Supply, Capacity
+and Throughput families. Independent of that:
 
 - Format profiles (DATEV, SAP, Salesforce, HubSpot) via YAML config + OpenAPI specs

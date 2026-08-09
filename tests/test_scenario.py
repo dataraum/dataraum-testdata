@@ -48,7 +48,7 @@ def test_export_creates_files():
         # Verify manifest structure
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
-        assert manifest["generator"] == "dataraum-testdata"
+        assert manifest["corpus"]["generator"] == "dataraum-testdata"
         assert len(manifest["files"]) == len(default_tables())
 
         # Verify entropy map has injections

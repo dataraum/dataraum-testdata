@@ -31,6 +31,7 @@ from testdata.ground_truth import (
     estimate_injection_impact,
     export_ground_truth,
 )
+from testdata.identity import CorpusIdentity
 from testdata.metadata_truth import export_metadata_truth
 from testdata.schema_transforms import (
     ColumnStyle,
@@ -225,6 +226,18 @@ def run_scenario(
 
     lever_spec = Lever(**lever) if lever is not None else None
 
+    # The corpus is a function of these parameters (§6). Built before generation
+    # rather than at export, so it is knowable without writing anything — a consumer
+    # can pin the id and only then decide it needs the bytes.
+    identity = CorpusIdentity(
+        scenario=scenario_name,
+        strategy=strategy_name,
+        seed=seed,
+        months=months,
+        normalization=config.normalization,
+        lever=lever,
+    )
+
     # Step 1: Generate clean data
     dataset = generate_finance_dataset(
         seed=seed,
@@ -269,15 +282,7 @@ def run_scenario(
 
     # Step 7: Export
     if output_dir is not None:
-        generation_params = {
-            "scenario": scenario_name,
-            "strategy": strategy_name,
-            "seed": seed,
-            "months": months,
-            "normalization": config.normalization,
-            "injection_count": len(registry),
-            "lever": lever,
-        }
+        run_facts = {"injection_count": len(registry)}
         if config.sources:
             _export_multi_source(
                 dataframes=dataframes,
@@ -285,17 +290,19 @@ def run_scenario(
                 output_dir=output_dir,
                 seed=seed,
                 entropy_records=registry.export_dicts(),
-                generation_params=generation_params,
+                identity=identity,
+                run_facts=run_facts,
             )
         else:
             export_dataframes(
                 dataframes=dataframes,
                 output_dir=output_dir,
                 entropy_records=registry.export_dicts(),
-                generation_params=generation_params,
+                identity=identity,
+                run_facts=run_facts,
                 fmt=fmt,
             )
-        export_ground_truth(ground_truth, output_dir)
+        export_ground_truth(ground_truth, output_dir, identity)
         # Agent-layer ground truth — top-level like entropy_map/ground_truth,
         # table names remapped to this run's normalization, canonical (snake) columns.
         # ``level`` drives the folded-dimension truth for denormalized shapes.
@@ -305,9 +312,12 @@ def run_scenario(
             level=config.normalization,
             # post-injection frames drive the data-derived measured_in.cross_unit flags
             dataframes=dataframes,
+            identity=identity,
         )
         if lever_spec is not None:
-            _export_intervention(lever_spec, output_dir, fiscal_start=config.fiscal_start, months=months)
+            _export_intervention(
+                lever_spec, output_dir, fiscal_start=config.fiscal_start, months=months, identity=identity
+            )
 
     return {
         "dataframes": dataframes,
@@ -315,16 +325,28 @@ def run_scenario(
         "dataset": dataset,
         "config": config,
         "ground_truth": ground_truth,
+        "identity": identity,
     }
 
 
-def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date | None, months: int) -> None:
+def _export_intervention(
+    lever: Lever,
+    output_dir: Path,
+    *,
+    fiscal_start: date | None,
+    months: int,
+    identity: CorpusIdentity | None = None,
+) -> None:
     """Write intervention.yaml — the lever's ground-truth record.
 
     Analogous to entropy_map.yaml for injections: the spec of what was done to
     the DGP plus the analytic effect statement. The numeric per-period true
     effect is obtained by the consumer via the exact same-seed counterfactual
     pair (run the identical scenario without ``lever``).
+
+    That instruction is only actionable if the baseline can be named, so the record
+    carries the counterfactual's corpus id alongside its own. A pair compared across
+    a generator change is not a counterfactual, and until now nothing said so.
     """
     start = fiscal_start if fiscal_start is not None else date(2025, 1, 1)
     activation = date(start.year + (start.month - 1 + lever.period_k) // 12, (start.month - 1 + lever.period_k) % 12 + 1, 1)
@@ -358,17 +380,19 @@ def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date |
             "so contribution margin moves by the full price delta."
         )
 
-    payload = {
-        "intervention": {
-            "type": lever.type,
-            "period_k": lever.period_k,
-            "activation_period": activation.strftime("%Y-%m"),
-            "factor": lever.factor,
-            "months_total": months,
-            "affected": affected,
-            "analytic_effect": analytic_effect,
-            "counterfactual": "re-run the identical scenario (same seed/months/strategy) without `lever`",
-        }
+    payload: dict = {}
+    if identity is not None:
+        payload["corpus"] = identity.as_dict()
+        payload["counterfactual_corpus_id"] = identity.baseline().corpus_id
+    payload["intervention"] = {
+        "type": lever.type,
+        "period_k": lever.period_k,
+        "activation_period": activation.strftime("%Y-%m"),
+        "factor": lever.factor,
+        "months_total": months,
+        "affected": affected,
+        "analytic_effect": analytic_effect,
+        "counterfactual": "re-run the identical scenario (same seed/months/strategy) without `lever`",
     }
     with (output_dir / "intervention.yaml").open("w") as fh:
         yaml.safe_dump(payload, fh, sort_keys=False)
@@ -380,12 +404,17 @@ def _export_multi_source(
     output_dir: Path,
     seed: int,
     entropy_records: list[dict],
-    generation_params: dict,
+    identity: CorpusIdentity,
+    run_facts: dict,
 ) -> None:
     """Export data split across multiple source directories.
 
     Each source gets its own subdirectory with per-source column/key transforms.
     A top-level ``sources.yaml`` indexes all sources.
+
+    Every source carries the *same* corpus id: they are one corpus exported through
+    different conventions, and a reconciliation scenario whose sources could not be
+    shown to share an origin would be missing its own premise.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -405,12 +434,12 @@ def _export_multi_source(
 
         # Export to source subdirectory
         src_dir = output_dir / src.name
-        src_params = {**generation_params, "source": src.name, "column_style": src.column_style}
         export_dataframes(
             dataframes=src_dfs,
             output_dir=src_dir,
             entropy_records=None,  # Entropy map goes at top level
-            generation_params=src_params,
+            identity=identity,
+            run_facts={**run_facts, "source": src.name, "column_style": src.column_style},
             fmt=src.format,
         )
 
@@ -429,7 +458,7 @@ def _export_multi_source(
     # Write top-level sources.yaml
     with open(output_dir / "sources.yaml", "w") as f:
         yaml.dump(
-            {"sources": source_index, "generation": generation_params},
+            {"corpus": identity.as_dict(), "run": run_facts, "sources": source_index},
             f,
             default_flow_style=False,
             sort_keys=False,
@@ -437,6 +466,7 @@ def _export_multi_source(
 
     # Write top-level entropy map
     entropy_data = {
+        "corpus": identity.as_dict(),
         "injections": entropy_records or [],
         "total_injections": len(entropy_records) if entropy_records else 0,
     }

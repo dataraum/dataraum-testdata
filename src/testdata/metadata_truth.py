@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from testdata.families import foreign_keys
+from testdata.identity import CorpusIdentity
 from testdata.schema_transforms import ColumnStyle, restyle_column_name
 
 if TYPE_CHECKING:
@@ -998,6 +999,7 @@ def export_metadata_truth(
     column_style: ColumnStyle = "snake_case",
     level: str = "full",
     dataframes: Mapping[str, pl.DataFrame] | None = None,
+    identity: CorpusIdentity | None = None,
 ) -> None:
     """Write ``metadata_truth.yaml`` to *output_dir*, remapped to the run's schema.
 
@@ -1013,6 +1015,10 @@ def export_metadata_truth(
     injection config is deliberate (the corrupt_dates lesson): an injector that
     silently no-ops can never produce a false truth, and the undeclared mix_units
     variant (values converted, unit column untouched) correctly stays False.
+
+    ``identity`` stamps which corpus this structure describes. Structural truth moves
+    with the family set more than any other file does — a new family adds tables,
+    joins and roles — so it is the file most worth being able to date.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     truth = remap_metadata_truth(
@@ -1029,6 +1035,8 @@ def export_metadata_truth(
         _apply_relationship_assertability(truth, dataframes)
         # role-play shape truth: emitted only when the frames carry it
         _apply_roleplay_truth(truth, dataframes)
+    if identity is not None:
+        truth = {"corpus": identity.as_dict(), **truth}
     with open(output_dir / "metadata_truth.yaml", "w") as f:
         f.write(_HEADER)
         yaml.dump(truth, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

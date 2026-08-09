@@ -263,6 +263,16 @@ def default_tables() -> tuple[str, ...]:
     return tuple(table for fam in FAMILIES if not fam.optional for table in fam.tables)
 
 
+def default_families() -> tuple[str, ...]:
+    """The families every corpus carries — the family set in the corpus identity.
+
+    Optional probe families are activated by the *strategy*, which is itself part of
+    that identity, so they are not listed separately: the whole tuple stays knowable
+    before generation runs, and therefore pinnable.
+    """
+    return tuple(fam.name for fam in FAMILIES if not fam.optional)
+
+
 def _claims() -> dict[str, set[str]]:
     """Key column -> the set of tables claiming it as their primary key."""
     claims: dict[str, set[str]] = {}

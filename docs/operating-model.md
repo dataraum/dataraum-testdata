@@ -86,6 +86,7 @@ Still to come, and the reason this is only half of S0:
 | `export.TABLE_NAMES` | a literal list of finance tables | **registry** |
 | `schema_transforms` | `_KEY_COLUMNS`, `_NATURAL_KEYS`, `_LEGACY_NAMES` | **registry** |
 | `metadata_truth._RELATIONSHIPS` | the FK topology re-listed away from the tables | **registry** |
+| `export._write_manifest` | a literal version string, and run parameters repeated under `parameters` | **identity** (§6) |
 | `schema_transforms` | the merge/inline functions name finance tables | open |
 | `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
 | `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob | open |
@@ -302,30 +303,58 @@ The rest of the contract:
   matched, bank reconciliation rate) and grow per family (§4). The reconciliation rate is
   an *authored expectation*, never assumed to be 1.0 — a consumer reporting a perfect rate
   has overcleaned, and that is a failure.
-- **Provenance stamp** on every truth file: generator version, scenario, strategy, seed,
-  months, family set. A figure that must be synthesized without a real basis (Throughput
-  cost variance is the known case) is marked as such rather than footnoted.
+- **Provenance stamp** on every truth file — **shipped**, see §6. Still open here: a figure
+  that must be synthesized without a real basis (Throughput cost variance is the known
+  case) is marked as such rather than footnoted.
 - `metadata_truth.yaml` keeps carrying the structural layer — FK topology, table roles,
   semantic roles, stock vs flow per column, additivity, cycles, the conformed-dimension
   matrix. That is the floor a consumer's own structure detection is graded against, and
   it is a property of the data, not of any engine.
 
-## 6. Corpus identity — reproducible, not frozen
+## 6. Corpus identity — reproducible, not frozen · **shipped**
 
 `output/` is gitignored and stays that way. A corpus is not an artifact to preserve; it
 is a **function of its parameters**, and the parameters are the contract:
 
 ```
-(generator version, scenario, strategy, seed, months, family set) → corpus
+(version, scenario, strategy, seed, months, normalization, family set, lever) → corpus
 ```
 
-That tuple is stamped into `manifest.yaml` and into every truth file. A consumer pins the
-identity string, regenerates when it wants the bytes, and can assert which corpus it
-graded against. Regeneration is the migration path — freezing a directory is not.
+`CorpusIdentity` in `src/testdata/identity.py`; stamped as a `corpus:` block into
+`manifest.yaml`, `ground_truth.yaml`, `metadata_truth.yaml`, `entropy_map.yaml`,
+`sources.yaml` and `intervention.yaml`. A consumer pins the id, regenerates when it wants
+the bytes, and can assert which corpus it graded against. Regeneration is the migration
+path — freezing a directory is not.
 
 Consequence to state plainly: **when a family lands, the same seed produces a different
-corpus.** That is correct behaviour, not drift. It is also why the stamp matters — a
-consumer holding a stale directory must be able to detect that, and today it cannot.
+corpus.** That is correct behaviour, not drift. It is also why the stamp matters — and S1
+is the proof: the inventory family invalidated every previously generated directory, under
+the same seed and the same version string, and nothing on disk said so.
+
+Two additions to the tuple as originally written, both for the same reason — they change
+the bytes:
+
+- **Normalization.** `partial` drops three tables relative to `full`. Two directories that
+  do not contain the same tables are not the same corpus.
+- **The lever.** This is the sharp one. A levered run and its baseline are *defined* by
+  differing; an identity that could not separate them would certify the wrong corpus in
+  the one place where being wrong is worst. `intervention.yaml` therefore also carries
+  `counterfactual_corpus_id` — the id of the same run without the lever — so "re-run
+  without `lever`" is an instruction a consumer can check it followed.
+
+**The digest is computed over exactly the published fields**, so a consumer can recompute
+it rather than trust it. That is a constraint on what may enter the identity, not just a
+courtesy: a hidden input would make the id unverifiable.
+
+What the stamp deliberately does not capture is edits to `config/scenarios/*.yaml` and
+`config/strategies/*.yaml` — the scenario and strategy *names* stand in for those, and the
+version is the proxy for "the generator's own definitions moved". Which puts a standing
+obligation on this repo: **bump the version whenever generation semantics change.** A stamp
+that never moves is worse than no stamp, because it asserts a sameness nobody checked. The
+version is read from package metadata, never restated in code — `export.py` used to carry
+its own `"0.1.0"` literal beside `pyproject.toml`'s, the same one-fact-in-two-places shape
+as the key maps. Landing this stamp bumped the version to **0.2.0**, which is the S1 corpus
+change finally getting a name.
 
 ## 7. Known defects
 
@@ -416,7 +445,8 @@ case they actually fail on.
 | :-- | :-- | :-- |
 | **S0** | The prune (§8) and the family registry (§3) | a family is added without editing export, schema transforms, ground truth and the runner |
 | **S1** ✅ | Inventory + settle the replenishment payable | **met** — DPO 271 → 59.2 days; CCC gradeable monthly and annually; roll-forward and the GL tie hold per product, location and period |
-| **S1a** | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | `tiny`/`mid`/`large` selectable; gross profit stops being an artifact of a fixed invoice count (§7) |
+| **S1½** ✅ | Corpus identity (§6) | **met** — one stamp across all six output files, digest recomputable from the published fields, levered run separable from its baseline |
+| **S1a** | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | `tiny`/`mid`/`large` selectable; gross profit stops being an artifact of a fixed invoice count (§7). Adds `profile` to the identity tuple |
 | **S1b** | Oracle contract v2 (§5) | every metric carries its definition and variants; a consumer's alternative grades as a named variant, not as an unexplained delta |
 | **S2** | Supply | OTIF, price variance, lead-time spread and effective cost per unit gradeable per supplier; three-way match exists with a declared exception rate |
 | **S3** | Capacity | cost per capacity hour and utilization gradeable per asset against a declared ceiling; depreciation becomes asset-derived |

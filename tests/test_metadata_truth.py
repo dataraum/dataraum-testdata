@@ -285,7 +285,9 @@ def test_export_table_mapping_matches_live_normalization() -> None:
 def test_run_scenario_emits_metadata_truth(tmp_path: Path) -> None:
     run_scenario("month-end-close", strategy_name="clean", months=2, output_dir=tmp_path)
     written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
-    # month-end-close is `full` normalization → canonical.
+    # month-end-close is `full` normalization → canonical, plus the corpus stamp
+    # (which says WHICH corpus this structure describes, not what the structure is).
+    assert written.pop("corpus")["scenario"] == "month-end-close"
     assert written == canonical_metadata_truth()
 
 

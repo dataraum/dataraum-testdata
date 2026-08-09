@@ -57,6 +57,10 @@ def generate(
     registry = result["registry"]
     dataframes = result["dataframes"]
 
+    # The identity, not the path, is what a consumer pins — so print it where the
+    # person running the generator will see it.
+    typer.echo(f"Corpus: {result['identity'].describe()}")
+
     typer.echo(f"\nGenerated {sum(len(df) for df in dataframes.values())} total rows across {len(dataframes)} tables:")
     for name, df in dataframes.items():
         typer.echo(f"  {name}: {len(df)} rows, {len(df.columns)} columns")

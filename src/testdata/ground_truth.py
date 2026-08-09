@@ -21,6 +21,7 @@ from testdata.canonical.finance.models import (
     InvoiceStatus,
     JournalStatus,
 )
+from testdata.identity import CorpusIdentity
 
 # Account range prefixes for metric classification
 _REVENUE_PREFIX = "4"
@@ -554,10 +555,18 @@ def _check_inventory(
 # --- Export ---
 
 
-def export_ground_truth(truth: GroundTruth, output_dir: Path) -> None:
-    """Write ground_truth.yaml to the output directory."""
+def export_ground_truth(truth: GroundTruth, output_dir: Path, identity: CorpusIdentity | None = None) -> None:
+    """Write ground_truth.yaml to the output directory.
+
+    ``identity`` stamps the corpus these numbers were computed from. Without it a
+    consumer holding a stale directory grades against the wrong answer key and has no
+    way to notice — which is exactly what happened when the inventory family landed
+    and every previously-generated corpus silently stopped matching its own seed.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     data = _to_yaml_dict(truth.model_dump())
+    if identity is not None:
+        data = {"corpus": identity.as_dict(), **data}
     with open(output_dir / "ground_truth.yaml", "w") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 

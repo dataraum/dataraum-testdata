@@ -12,6 +12,7 @@ import yaml
 
 from testdata.canonical.finance.models import FinanceDataset
 from testdata.families import all_tables
+from testdata.identity import CorpusIdentity
 
 
 ExportFormat = Literal["csv", "parquet", "json", "jsonl", "both"]
@@ -88,7 +89,8 @@ def export_dataset(
     dataset: FinanceDataset,
     output_dir: Path,
     entropy_records: list[dict] | None = None,
-    generation_params: dict | None = None,
+    identity: CorpusIdentity | None = None,
+    run_facts: dict | None = None,
     fmt: ExportFormat = "csv",
 ) -> None:
     """Export dataset to files with manifest and optional entropy map.
@@ -97,7 +99,8 @@ def export_dataset(
         dataset: The finance dataset to export.
         output_dir: Directory to write files into.
         entropy_records: Optional list of entropy injection records for the map.
-        generation_params: Optional dict of generation parameters for the manifest.
+        identity: The corpus identity to stamp into the manifest and entropy map.
+        run_facts: Non-identity facts about this run (injection count, source name).
         fmt: Export format — "csv", "parquet", or "both".
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -107,15 +110,16 @@ def export_dataset(
     for table_name, df in dataframes.items():
         file_manifest.extend(_write_table(df, output_dir, table_name, fmt))
 
-    _write_manifest(output_dir, file_manifest, generation_params)
-    _write_entropy_map(output_dir, entropy_records)
+    _write_manifest(output_dir, file_manifest, identity, run_facts)
+    _write_entropy_map(output_dir, entropy_records, identity)
 
 
 def export_dataframes(
     dataframes: dict[str, pl.DataFrame],
     output_dir: Path,
     entropy_records: list[dict] | None = None,
-    generation_params: dict | None = None,
+    identity: CorpusIdentity | None = None,
+    run_facts: dict | None = None,
     fmt: ExportFormat = "csv",
 ) -> None:
     """Export pre-built DataFrames (after injection) to files + manifest.
@@ -127,7 +131,8 @@ def export_dataframes(
         dataframes: Table name → DataFrame mapping.
         output_dir: Directory to write files into.
         entropy_records: Optional list of entropy injection records.
-        generation_params: Optional dict of generation parameters.
+        identity: The corpus identity to stamp into the manifest and entropy map.
+        run_facts: Non-identity facts about this run (injection count, source name).
         fmt: Export format — "csv", "parquet", or "both".
     """
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -136,23 +141,28 @@ def export_dataframes(
     for table_name, df in dataframes.items():
         file_manifest.extend(_write_table(df, output_dir, table_name, fmt))
 
-    _write_manifest(output_dir, file_manifest, generation_params)
-    _write_entropy_map(output_dir, entropy_records)
+    _write_manifest(output_dir, file_manifest, identity, run_facts)
+    _write_entropy_map(output_dir, entropy_records, identity)
 
 
 def _write_manifest(
     output_dir: Path,
     file_manifest: list[dict[str, Any]],
-    generation_params: dict | None,
+    identity: CorpusIdentity | None,
+    run_facts: dict | None,
 ) -> None:
-    """Write manifest.yaml."""
-    manifest = {
-        "generated_at": datetime.now().isoformat(),
-        "generator": "dataraum-testdata",
-        "version": "0.1.0",
-        "parameters": generation_params or {},
-        "files": file_manifest,
-    }
+    """Write manifest.yaml.
+
+    The run parameters live in ``corpus`` and nowhere else. They used to be repeated
+    under ``parameters`` beside a hand-written generator version, which is how a file
+    that claims to be an answer key starts disagreeing with itself. ``run`` carries
+    what is *not* a parameter — counts and per-source facts that follow from the run.
+    """
+    manifest: dict[str, Any] = {"generated_at": datetime.now().isoformat()}
+    if identity is not None:
+        manifest["corpus"] = identity.as_dict()
+    manifest["run"] = run_facts or {}
+    manifest["files"] = file_manifest
     with open(output_dir / "manifest.yaml", "w") as f:
         yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
 
@@ -160,11 +170,13 @@ def _write_manifest(
 def _write_entropy_map(
     output_dir: Path,
     entropy_records: list[dict] | None,
+    identity: CorpusIdentity | None = None,
 ) -> None:
     """Write entropy_map.yaml."""
-    entropy_data = {
-        "injections": entropy_records or [],
-        "total_injections": len(entropy_records) if entropy_records else 0,
-    }
+    entropy_data: dict[str, Any] = {}
+    if identity is not None:
+        entropy_data["corpus"] = identity.as_dict()
+    entropy_data["injections"] = entropy_records or []
+    entropy_data["total_injections"] = len(entropy_records) if entropy_records else 0
     with open(output_dir / "entropy_map.yaml", "w") as f:
         yaml.dump(entropy_data, f, default_flow_style=False, sort_keys=False)
