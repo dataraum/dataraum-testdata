@@ -234,6 +234,7 @@ def run_scenario(
         strategy=strategy_name,
         seed=seed,
         months=months,
+        fiscal_start=config.fiscal_start.isoformat(),
         normalization=config.normalization,
         lever=lever,
     )
@@ -257,8 +258,6 @@ def run_scenario(
     # Step 2: Compute ground truth from clean data (before injection)
     ground_truth = calculate_ground_truth(
         dataset,
-        seed=seed,
-        strategy=strategy_name,
         fiscal_start=config.fiscal_start,
         months=months,
     )

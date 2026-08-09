@@ -526,7 +526,7 @@ def test_db1_truth_ties_to_the_two_cuts_and_to_the_ledger() -> None:
     from testdata.ground_truth import calculate_ground_truth
 
     d = _chain_dataset()
-    gt = calculate_ground_truth(d, seed=42)
+    gt = calculate_ground_truth(d)
     assert gt.db1_by_customer and gt.db1_by_product_group
 
     by_customer = sum(c.db1 for c in gt.db1_by_customer)

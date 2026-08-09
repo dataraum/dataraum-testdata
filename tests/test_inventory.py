@@ -138,7 +138,7 @@ def test_goods_receipts_raise_payables_that_actually_settle() -> None:
     settled = sum(i.amount for i in goods if i.invoice_id in paid)
     assert settled / receipts_value > 0.5, "most goods payables must actually clear"
 
-    truth = calculate_ground_truth(dataset, seed=42)
+    truth = calculate_ground_truth(dataset)
     assert 15 < truth.annual.annual_dpo < 120, truth.annual.annual_dpo
 
 
@@ -161,7 +161,7 @@ def test_shrinkage_account_carries_only_counted_differences() -> None:
 
 def test_cash_conversion_cycle_is_gradeable_monthly_and_annually() -> None:
     """CCC = DIO + DSO − DPO, at both grains, with its components published."""
-    truth = calculate_ground_truth(_dataset(), seed=42)
+    truth = calculate_ground_truth(_dataset())
 
     annual = truth.annual
     assert annual.annual_dio > 0 and annual.annual_dso > 0 and annual.annual_dpo > 0
@@ -178,7 +178,7 @@ def test_cash_conversion_cycle_is_gradeable_monthly_and_annually() -> None:
 
 
 def test_invariants_report_the_inventory_ties() -> None:
-    truth = calculate_ground_truth(_dataset(), seed=42)
+    truth = calculate_ground_truth(_dataset())
     assert truth.invariants.inventory_rollforward_holds
     assert truth.invariants.inventory_ties_to_gl
 

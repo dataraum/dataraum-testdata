@@ -12,11 +12,12 @@ from testdata.ground_truth import (
     estimate_injection_impact,
     export_ground_truth,
 )
+from testdata.identity import CorpusIdentity
 
 
 def _truth():
     ds = generate_finance_dataset(seed=42, months=12)
-    return calculate_ground_truth(ds, seed=42, strategy="clean", months=12)
+    return calculate_ground_truth(ds, months=12)
 
 
 def test_annual_revenue_positive():
@@ -123,11 +124,16 @@ def test_deterministic():
 
 
 def test_export_creates_yaml():
-    """export_ground_truth writes a valid YAML file."""
+    """export_ground_truth writes a valid YAML file.
+
+    Provenance is the corpus stamp's, not the metric file's own: seed, strategy and
+    months used to be restated here beside the numbers they did not affect.
+    """
     truth = _truth()
+    identity = CorpusIdentity(scenario="month-end-close", strategy="clean", seed=42, months=12)
     with tempfile.TemporaryDirectory() as tmpdir:
         output = Path(tmpdir)
-        export_ground_truth(truth, output)
+        export_ground_truth(truth, output, identity)
 
         gt_path = output / "ground_truth.yaml"
         assert gt_path.exists()
@@ -135,8 +141,9 @@ def test_export_creates_yaml():
         with open(gt_path) as f:
             data = yaml.safe_load(f)
 
-        assert data["generator"] == "finance"
-        assert data["seed"] == 42
+        assert data["corpus"]["seed"] == 42
+        assert data["corpus"]["id"] == identity.corpus_id
+        assert not {"generator", "seed", "strategy", "months"} & set(data)
         assert data["annual"]["total_revenue"] > 0
         assert len(data["monthly"]) == 12
         assert data["invariants"]["journal_balanced"] is True

@@ -62,6 +62,7 @@ class CorpusIdentity:
     strategy: str
     seed: int
     months: int
+    fiscal_start: str = "2025-01-01"
     normalization: str = "full"
     lever: Mapping[str, Any] | None = None
     families: tuple[str, ...] = field(default_factory=default_families)
@@ -103,6 +104,7 @@ class CorpusIdentity:
             "strategy": self.strategy,
             "seed": self.seed,
             "months": self.months,
+            "fiscal_start": self.fiscal_start,
             "normalization": self.normalization,
             "families": list(self.families),
             "lever": dict(self.lever) if self.lever is not None else None,

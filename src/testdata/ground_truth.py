@@ -138,13 +138,14 @@ class InjectionImpact(BaseModel):
 
 
 class GroundTruth(BaseModel):
-    """Complete ground truth for a generated finance dataset."""
+    """Complete ground truth for a generated finance dataset.
 
-    generator: str = "finance"
-    seed: int
-    strategy: str
-    fiscal_year_start: str
-    months: int
+    Metrics only. *Which* corpus these are true of is ``CorpusIdentity``'s job, and
+    stating it twice is how the two answers start to disagree — the seed, strategy,
+    months and fiscal start used to be restated here beside a ``generator: finance``
+    that named the vertical rather than the generator.
+    """
+
     annual: AnnualMetrics
     monthly: list[PeriodMetrics]
     invariants: Invariants
@@ -161,17 +162,16 @@ class GroundTruth(BaseModel):
 def calculate_ground_truth(
     dataset: FinanceDataset,
     *,
-    seed: int,
-    strategy: str = "clean",
     fiscal_start: date | None = None,
     months: int = 12,
 ) -> GroundTruth:
     """Compute all ground truth metrics from a clean FinanceDataset.
 
+    Takes only what it computes with. ``seed`` and ``strategy`` were arguments that
+    were recorded and never read — provenance wearing the shape of a parameter.
+
     Args:
         dataset: The finance dataset (ideally clean, pre-injection).
-        seed: The random seed used for generation.
-        strategy: Strategy name (for labeling).
         fiscal_start: First day of fiscal year.
         months: Number of months in the dataset.
 
@@ -373,10 +373,6 @@ def calculate_ground_truth(
     invariants = _check_invariants(dataset, entry_info)
 
     return GroundTruth(
-        seed=seed,
-        strategy=strategy,
-        fiscal_year_start=fiscal_start.isoformat(),
-        months=months,
         annual=annual,
         monthly=monthly_metrics,
         invariants=invariants,

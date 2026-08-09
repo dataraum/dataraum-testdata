@@ -78,13 +78,14 @@ a **function of its parameters**, and every output file carries them as a `corpu
 
 ```yaml
 corpus:
-  id: ac1792ab578f
+  id: 524369963d65
   generator: dataraum-testdata
   version: 0.2.0
   scenario: month-end-close
   strategy: clean
   seed: 42
   months: 12
+  fiscal_start: '2025-01-01'
   normalization: full
   families: [core_ledger, operating_chain, inventory]
   lever: null
@@ -234,6 +235,9 @@ Each scenario run computes `ground_truth.yaml` with known-correct financial metr
 - **Contribution margin**: true DB1 per customer and per product group, exact from the order lines
 - **Invariants**: journal balanced, TB balanced, invoice-payment matched, bank reconciliation rate, inventory roll-forward, inventory-to-GL tie
 - **Injection impact**: estimated metric deviations from known injection parameters
+
+The file holds metrics and nothing else — *which* corpus they are true of is the
+`corpus:` stamp's job, so seed, strategy, months and fiscal start appear there once.
 
 **Two DPOs, both correct.** `dpo` divides the payable by *purchases* (vendor-bill credits
 to AP) — the textbook definition, computable only since goods bills became separable from

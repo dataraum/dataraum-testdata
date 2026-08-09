@@ -317,7 +317,7 @@ The rest of the contract:
 is a **function of its parameters**, and the parameters are the contract:
 
 ```
-(version, scenario, strategy, seed, months, normalization, family set, lever) → corpus
+(version, scenario, strategy, seed, months, fiscal start, normalization, family set, lever) → corpus
 ```
 
 `CorpusIdentity` in `src/testdata/identity.py`; stamped as a `corpus:` block into
@@ -331,11 +331,16 @@ corpus.** That is correct behaviour, not drift. It is also why the stamp matters
 is the proof: the inventory family invalidated every previously generated directory, under
 the same seed and the same version string, and nothing on disk said so.
 
-Two additions to the tuple as originally written, both for the same reason — they change
+Three additions to the tuple as originally written, all for the same reason — they change
 the bytes:
 
 - **Normalization.** `partial` drops three tables relative to `full`. Two directories that
   do not contain the same tables are not the same corpus.
+- **Fiscal start.** Every date in the corpus hangs off it. It moved here out of
+  `ground_truth.yaml`, which is now metrics only: seed, strategy and months were restated
+  in that file's header beside a `generator: finance` that named the *vertical*, not the
+  generator. `calculate_ground_truth` took `seed` and `strategy` as arguments it recorded
+  and never read — provenance wearing the shape of a parameter.
 - **The lever.** This is the sharp one. A levered run and its baseline are *defined* by
   differing; an identity that could not separate them would certify the wrong corpus in
   the one place where being wrong is worst. `intervention.yaml` therefore also carries
