@@ -12,7 +12,7 @@ import functools
 from decimal import Decimal
 
 from testdata.canonical.finance.generators import generate_finance_dataset
-from testdata.canonical.finance.models import FinanceDataset
+from testdata.canonical.finance.models import Corpus
 from testdata.ground_truth import calculate_ground_truth
 
 _INVENTORY_ACCOUNT = "1400"
@@ -22,11 +22,11 @@ _AP_ACCOUNTS = {"2110", "2120"}
 
 
 @functools.lru_cache(maxsize=2)
-def _dataset(seed: int = 42, months: int = 12) -> FinanceDataset:
+def _dataset(seed: int = 42, months: int = 12) -> Corpus:
     return generate_finance_dataset(seed=seed, months=months)
 
 
-def _gl_balance(dataset: FinanceDataset, account: str) -> Decimal:
+def _gl_balance(dataset: Corpus, account: str) -> Decimal:
     return sum(
         (line.debit - line.credit for line in dataset.journal_lines if line.account_id == account),
         Decimal("0"),

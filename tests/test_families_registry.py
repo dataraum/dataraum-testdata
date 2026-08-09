@@ -8,12 +8,12 @@ what happened to the operating chain before the registry existed.
 
 from __future__ import annotations
 
-from testdata.canonical.finance.models import FinanceDataset
-from testdata.export import TABLE_NAMES
+from testdata.canonical.finance.models import Corpus
 from testdata.families import (
     FAMILIES,
     all_tables,
     ambiguous_key_columns,
+    default_tables,
     folds,
     key_columns,
     legacy_names,
@@ -25,13 +25,46 @@ from testdata.schema_transforms import apply_key_strategy, apply_normalization
 
 def test_every_dataset_table_is_declared_by_a_family() -> None:
     declared = set(all_tables())
-    on_the_dataset = set(FinanceDataset.model_fields)
+    on_the_dataset = set(Corpus.model_fields)
     assert on_the_dataset - declared == set(), "dataset tables missing a family declaration"
     assert declared - on_the_dataset == set(), "families declare tables the dataset does not carry"
 
 
+def test_each_container_fragment_carries_exactly_its_family() -> None:
+    """The corpus composes one fragment per family, not one growing list of lists.
+
+    A family declaring a table with no home on the container — or a fragment carrying a
+    table no family declares — fails here, at the declaration, rather than at the first
+    key transform that quietly skips it.
+    """
+    from testdata.canonical.finance.models import (
+        CoreLedgerTables,
+        InventoryTables,
+        OperatingChainTables,
+        ProbeTables,
+    )
+
+    fragments = {
+        "core_ledger": CoreLedgerTables,
+        "operating_chain": OperatingChainTables,
+        "inventory": InventoryTables,
+        "probes": ProbeTables,
+    }
+    by_name = {fam.name: fam for fam in FAMILIES}
+    assert set(fragments) == set(by_name), "a family exists without a container fragment"
+    for name, fragment in fragments.items():
+        assert set(fragment.model_fields) == set(by_name[name].tables), name
+
+
 def test_exporter_follows_the_registry() -> None:
-    assert set(TABLE_NAMES) == set(all_tables())
+    """The exporter reads ``Corpus.tables``, so it emits what the families declare."""
+    from testdata.canonical.finance.generators import generate_finance_dataset
+
+    corpus = generate_finance_dataset(seed=42, months=1)
+    assert list(corpus.tables) == [t for t in all_tables() if t in Corpus.model_fields]
+    # Probe tables are empty unless a strategy asks for them, and an empty table is
+    # omitted from the export rather than written as a headerless file.
+    assert {t for t, rows in corpus.tables.items() if rows} == set(default_tables())
 
 
 def test_every_declared_table_declares_a_primary_key() -> None:

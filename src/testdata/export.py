@@ -10,16 +10,11 @@ from typing import Any, Literal
 import polars as pl
 import yaml
 
-from testdata.canonical.finance.models import FinanceDataset
-from testdata.families import all_tables
+from testdata.canonical.finance.models import Corpus
 from testdata.identity import CorpusIdentity
 
 
 ExportFormat = Literal["csv", "parquet", "json", "jsonl", "both"]
-
-# Table name -> model field name mapping, from the family registry: a family
-# declares its tables once and the exporter follows.
-TABLE_NAMES: dict[str, str] = {table: table for table in all_tables()}
 
 
 def _serialize_value(v: Any) -> Any:
@@ -35,12 +30,15 @@ def _serialize_value(v: Any) -> Any:
     return str(v)
 
 
-def dataset_to_dataframes(dataset: FinanceDataset) -> dict[str, pl.DataFrame]:
-    """Convert a FinanceDataset into a dict of Polars DataFrames."""
+def dataset_to_dataframes(dataset: Corpus) -> dict[str, pl.DataFrame]:
+    """Convert a Corpus into a dict of Polars DataFrames.
+
+    Reads ``Corpus.tables`` — the family-ordered view — so the exporter never learns a
+    table's name. A new family appears here by being declared, not by being added.
+    """
     result: dict[str, pl.DataFrame] = {}
 
-    for table_name, field_name in TABLE_NAMES.items():
-        records = getattr(dataset, field_name)
+    for table_name, records in dataset.tables.items():
         if not records:
             # An empty table (e.g. measure_probes when no stock/flow strategy is
             # active) is omitted entirely rather than emitted as a headerless CSV.
@@ -86,7 +84,7 @@ def _write_table(
 
 
 def export_dataset(
-    dataset: FinanceDataset,
+    dataset: Corpus,
     output_dir: Path,
     entropy_records: list[dict] | None = None,
     identity: CorpusIdentity | None = None,

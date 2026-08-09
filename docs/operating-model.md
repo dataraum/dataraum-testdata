@@ -96,6 +96,15 @@ dimension→concept map. All four now read the declarations that perform the tra
 `tests/test_families_registry.py` runs a stand-in family through `apply_normalization` and
 asserts it reshapes, which is the exit criterion exercised rather than asserted.
 
+Then the **container**. `FinanceDataset` was one flat model of eight-plus lists that grew
+with every release and belonged to nobody — nothing connected `stock_movements` to the
+family that declares it. It is now `Corpus`, *composed* from one fragment per family
+(`CoreLedgerTables`, `OperatingChainTables`, `InventoryTables`, `ProbeTables`), with a test
+asserting each fragment carries exactly its family's declared tables. Attribute access
+stays typed, which a `dict[str, list[BaseModel]]` would have cost: every consumer would
+need a cast to touch a column. `Corpus.tables` is the untyped view for the generic
+consumers, and the exporter reads it instead of a name map.
+
 Still to come, and the reason this is only most of S0:
 
 | Site | Hardcoding | State |
@@ -108,7 +117,7 @@ Still to come, and the reason this is only most of S0:
 | `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
 | `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob | open |
 | `scenarios/runner` | imports `generate_finance_dataset` directly | open |
-| `FinanceDataset` | one fixed container of eight-plus lists | open |
+| `Corpus` | one fixed container of eight-plus lists | **registry** |
 
 **Proposal — a family registry.** A *family* is a cohesive set of tables with its own
 generator, GL postings, truth fragment and schema metadata:

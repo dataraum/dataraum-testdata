@@ -1,6 +1,6 @@
 """Ground truth calculator for deterministic finance datasets.
 
-Computes known-correct financial metrics from clean FinanceDataset Pydantic
+Computes known-correct financial metrics from clean Corpus Pydantic
 models. Outputs a GroundTruth object that can be serialized to ground_truth.yaml
 for use by downstream evaluators and test assertions.
 """
@@ -17,7 +17,7 @@ import yaml
 from pydantic import BaseModel
 
 from testdata.canonical.finance.models import (
-    FinanceDataset,
+    Corpus,
     InvoiceStatus,
     JournalStatus,
 )
@@ -201,12 +201,12 @@ class GroundTruth(BaseModel):
 
 
 def calculate_ground_truth(
-    dataset: FinanceDataset,
+    dataset: Corpus,
     *,
     fiscal_start: date | None = None,
     months: int = 12,
 ) -> GroundTruth:
-    """Compute all ground truth metrics from a clean FinanceDataset.
+    """Compute all ground truth metrics from a clean Corpus.
 
     Takes only what it computes with. ``seed`` and ``strategy`` were arguments that
     were recorded and never read — provenance wearing the shape of a parameter.
@@ -454,7 +454,7 @@ def calculate_ground_truth(
 
 
 def _contribution_margin(
-    dataset: FinanceDataset, *, by: str
+    dataset: Corpus, *, by: str
 ) -> list[ContributionMargin]:
     """True DB1 per customer or per product group, from the order lines.
 
@@ -519,7 +519,7 @@ def _all_accounts_with_prefix(
 
 
 def _check_invariants(
-    dataset: FinanceDataset,
+    dataset: Corpus,
     entry_info: dict[str, tuple[date, JournalStatus]],
 ) -> Invariants:
     """Check structural invariants on the dataset."""
@@ -565,7 +565,7 @@ def _check_invariants(
 
 
 def _check_inventory(
-    dataset: FinanceDataset,
+    dataset: Corpus,
     entry_info: dict[str, tuple[date, JournalStatus]],
 ) -> tuple[bool, bool]:
     """The stock subledger's two contracts. ``(True, True)`` when there is no stock.

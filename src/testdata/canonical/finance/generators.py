@@ -27,7 +27,7 @@ from .models import (
     Currency,
     Customer,
     Delivery,
-    FinanceDataset,
+    Corpus,
     FormulaProbe,
     FXRate,
     InventoryPosition,
@@ -2220,7 +2220,7 @@ def generate_finance_dataset(
     roleplay_deliveries: int = 0,
     lever: Lever | None = None,
     profile: str | ScaleProfile | None = None,
-) -> FinanceDataset:
+) -> Corpus:
     """Generate a complete finance dataset with closed-loop accounting.
 
     Business events cascade across tables: sales create GL entries and AR,
@@ -2238,7 +2238,7 @@ def generate_finance_dataset(
         profile: Scale profile name or object (§9). Defaults to ``tiny``.
 
     Returns:
-        FinanceDataset with all 8 tables populated and numerically consistent.
+        Corpus with all 8 tables populated and numerically consistent.
     """
     rng = random.Random(seed)
     if fiscal_start is None:
@@ -2389,7 +2389,7 @@ def generate_finance_dataset(
         roleplay_addresses, roleplay_orders, roleplay_deliveries, fiscal_start, months
     )
 
-    return FinanceDataset(
+    return Corpus(
         chart_of_accounts=chart,
         journal_entries=all_entries,
         journal_lines=all_lines,

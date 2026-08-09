@@ -14,13 +14,13 @@ from collections import Counter
 from decimal import Decimal
 
 from testdata.canonical.finance.generators import Lever, generate_finance_dataset
-from testdata.canonical.finance.models import FinanceDataset
+from testdata.canonical.finance.models import Corpus
 from testdata.ground_truth import calculate_ground_truth
 from testdata.scale import PROFILES, get_profile
 
 
 @functools.lru_cache(maxsize=4)
-def _dataset(profile: str = "tiny", months: int = 12, seed: int = 42) -> FinanceDataset:
+def _dataset(profile: str = "tiny", months: int = 12, seed: int = 42) -> Corpus:
     return generate_finance_dataset(seed=seed, months=months, profile=profile)
 
 
@@ -168,7 +168,7 @@ def test_the_scale_anchor_ignores_the_lever() -> None:
         seed=42, months=6, profile="tiny", lever=Lever(type="volume", period_k=2, factor=1.5)
     )
 
-    def expense_bills(dataset: FinanceDataset) -> list[tuple[str, Decimal]]:
+    def expense_bills(dataset: Corpus) -> list[tuple[str, Decimal]]:
         return [(i.invoice_id, i.amount) for i in dataset.invoices if i.category == "expense"]
 
     # A VOLUME lever is the case that bites: it changes the order lines the anchor is

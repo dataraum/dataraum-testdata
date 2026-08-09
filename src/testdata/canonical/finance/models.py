@@ -5,8 +5,11 @@ from __future__ import annotations
 import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
+
+from testdata.families import all_tables
 
 
 class AccountType(StrEnum):
@@ -411,8 +414,18 @@ class InventoryPosition(BaseModel):
     value: Decimal = Field(description="units_on_hand × unit_cost")
 
 
-class FinanceDataset(BaseModel):
-    """Container for a complete finance dataset."""
+# --- the corpus container, one fragment per family --------------------------
+#
+# One flat container of eight-plus lists was the shape before: a family's tables were
+# appended to a list that grew with every release and belonged to nobody, so nothing
+# connected `stock_movements` to the family that declares it in `families.py`. Each
+# fragment below carries exactly one family's tables and ``test_families_registry``
+# asserts the two agree, which is how a family that declares a table without giving it a
+# home — or the reverse — fails immediately rather than at the first key transform.
+
+
+class CoreLedgerTables(BaseModel):
+    """`core_ledger` — the double-entry ledger and its subledgers."""
 
     chart_of_accounts: list[ChartOfAccounts]
     journal_entries: list[JournalEntry]
@@ -423,6 +436,29 @@ class FinanceDataset(BaseModel):
     fx_rates: list[FXRate]
     trial_balance: list[TrialBalance]
     balance_sheet: list[BalanceSheet]
+
+
+class OperatingChainTables(BaseModel):
+    """`operating_chain` — present on EVERY corpus, unlike the probe shapes."""
+
+    customers: list[Customer] = []
+    products: list[Product] = []
+    sales_orders: list[SalesOrder] = []
+    sales_order_lines: list[SalesOrderLine] = []
+    ar_invoices: list[ARInvoice] = []
+    receipts: list[Receipt] = []
+
+
+class InventoryTables(BaseModel):
+    """`inventory` — the stock subledger under GL 1400."""
+
+    stock_movements: list[StockMovement] = []
+    inventory_positions: list[InventoryPosition] = []
+
+
+class ProbeTables(BaseModel):
+    """`probes` — labelled shapes, materialized only when a strategy asks for them."""
+
     measure_probes: list[MeasureProbe] = []
     formula_probes: list[FormulaProbe] = []
     ref_entities: list[RefEntity] = []
@@ -430,14 +466,22 @@ class FinanceDataset(BaseModel):
     addresses: list[Address] = []
     orders: list[Order] = []
     deliveries: list[Delivery] = []
-    # The operating chain — present on EVERY corpus, unlike the probe
-    # shapes above, which stay conditional and empty by default.
-    customers: list[Customer] = []
-    products: list[Product] = []
-    sales_orders: list[SalesOrder] = []
-    sales_order_lines: list[SalesOrderLine] = []
-    ar_invoices: list[ARInvoice] = []
-    receipts: list[Receipt] = []
-    # The inventory family — the stock subledger under GL 1400.
-    stock_movements: list[StockMovement] = []
-    inventory_positions: list[InventoryPosition] = []
+
+
+class Corpus(CoreLedgerTables, OperatingChainTables, InventoryTables, ProbeTables):
+    """One corpus: every family's tables, over one key space and one calendar.
+
+    Composed from the family fragments rather than accumulating their fields, so adding
+    a family is writing its fragment and listing it here — not appending to a list that
+    belongs to nobody. Attribute access stays typed (``corpus.journal_lines`` is
+    ``list[JournalLine]``), which is what a table-keyed ``dict[str, list[BaseModel]]``
+    would have cost: every consumer would then need a cast to touch a column.
+
+    ``tables`` is the untyped view the generic consumers want — the exporter and the
+    schema transforms work table-by-table and should never learn a table's name.
+    """
+
+    @property
+    def tables(self) -> dict[str, list[Any]]:
+        """``{table name: rows}`` for every declared table, in family order."""
+        return {name: getattr(self, name) for name in all_tables() if hasattr(self, name)}

@@ -8,7 +8,7 @@ from testdata.canonical.finance.models import (
     BankTransaction,
     ChartOfAccounts,
     Currency,
-    FinanceDataset,
+    Corpus,
     FXRate,
     Invoice,
     InvoiceStatus,
@@ -114,7 +114,7 @@ def test_trial_balance():
 
 
 def test_finance_dataset_container():
-    ds = FinanceDataset(
+    ds = Corpus(
         chart_of_accounts=[],
         journal_entries=[],
         journal_lines=[],

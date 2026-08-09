@@ -314,10 +314,10 @@ def test_measured_in_binds_the_models() -> None:
     import typing
     from decimal import Decimal
 
-    from testdata.canonical.finance.models import Currency, FinanceDataset
+    from testdata.canonical.finance.models import Currency, Corpus
 
     expected: dict[str, str | None] = {}
-    for table, field in FinanceDataset.model_fields.items():
+    for table, field in Corpus.model_fields.items():
         (model,) = typing.get_args(field.annotation)
         currency_cols = [name for name, f in model.model_fields.items() if f.annotation is Currency]
         measures = [name for name, f in model.model_fields.items() if f.annotation is Decimal]
