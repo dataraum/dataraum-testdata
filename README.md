@@ -71,7 +71,7 @@ declared fraction of the catalogue priced **below the contribution threshold**, 
 master row.
 
 The profile also sizes the **expense base**: operating expense is a declared share of the
-contribution the order lines actually produce, so gross profit is a property of the firm
+contribution the order lines actually produce, so the bottom line is a property of the firm
 rather than of a row count. See `docs/operating-model.md` §9.
 
 ## Normalization Levels
@@ -260,23 +260,59 @@ sources:
 
 ## Ground Truth
 
-Each scenario run computes `ground_truth.yaml` with known-correct financial metrics:
-- **Annual**: revenue, expenses, gross profit, COGS, purchases, AR/AP/cash/inventory balances, DSO, DPO, DIO, CCC, FCF
-- **Monthly**: same metrics per period plus revenue growth MoM
-- **Contribution margin**: true DB1 per customer and per product group, exact from the order lines
-- **Invariants**: journal balanced, TB balanced, invoice-payment matched, bank reconciliation rate, inventory roll-forward, inventory-to-GL tie
-- **Injection impact**: estimated metric deviations from known injection parameters
+Each scenario run computes `ground_truth.yaml`. **Every metric ships with the definition
+that produced it**, so grading is mechanical: a consumer's alternative matches a *named
+variant* instead of reading as a delta to be argued.
 
-The file holds metrics and nothing else — *which* corpus they are true of is the
-`corpus:` stamp's job, so seed, strategy, months and fiscal start appear there once.
+```yaml
+metrics:
+  - id: dpo
+    title: Days payable outstanding
+    unit: days
+    kind: ratio                # → window: recompute (never average monthly ratios)
+    grains: [month, year]
+    definition: "ap_balance[end of w] / purchases[w] * days[w]"
+    scope: "Closing payable over the window's purchases; 0.0 when purchases are 0."
+    values:
+      month: {2025-01: 16.3, …}
+      year:  {2025: 47.2}
+    variants:
+      - id: dpo_on_total_expenses
+        definition: "ap_balance[end of w] / expenses[w] * days[w]"
+        rationale: "what a consumer without a separable purchases figure necessarily computes"
+        values: {…}
+```
+
+24 metrics, 5 variants. `kind` fixes the **window rule** a consumer needs to read a
+quarter out of monthly values: a `flow`/`count` sums, a `stock` takes the window's last
+period, a `ratio` is recomputed on the window's own aggregates. `basis` is `derived`
+everywhere today — a future figure synthesized without a real basis is marked, not
+footnoted. The registry is `src/testdata/oracle.py`; publishing a metric without values,
+or values without a definition, raises.
+
+Also in the file: **invariants** (journal balanced, TB balanced, invoice-payment matched,
+bank reconciliation rate, inventory roll-forward, inventory-to-GL tie) and **injection
+impact** (estimated deviations, reported only against a defined metric or a declared
+integrity surface). *Which* corpus the numbers are true of is the `corpus:` stamp's job,
+so seed, strategy, months and fiscal start appear there once.
+
+**Per-entity unit metrics are first-class.** `db1`, `db1_pct`, `units_sold`, `order_count`,
+`revenue` and `cogs` all publish at `customer` and `product_group` grain, derived from the
+order lines — a GL posting cannot be attributed to a customer, which is why the operating
+chain exists.
 
 **Two DPOs, both correct.** `dpo` divides the payable by *purchases* (vendor-bill credits
 to AP) — the textbook definition, computable only since goods bills became separable from
-expense bills. `dpo_on_expenses` carries the total-expense denominator, which is what a
-consumer without a separable purchases figure necessarily computes. They are named
-alternatives, not one right and one wrong answer; `cash_conversion_cycle` uses the first.
-CCC is composed from the *published, rounded* DIO/DSO/DPO, so recombining them reproduces
-it exactly.
+expense bills. The `dpo_on_total_expenses` variant carries the total-expense denominator.
+They are named alternatives, not one right and one wrong answer; `cash_conversion_cycle`
+uses the first and publishes a variant on the second. CCC is composed from the *published,
+rounded* DIO/DSO/DPO, so recombining them reproduces it exactly.
+
+**Gross profit means revenue less cost of sale.** It carried the operating-income formula
+until the contract pinned a definition beside it — which is the failure the contract
+exists to prevent. `operating_income`, `gross_margin` and `operating_margin` are published
+separately. Entity-grain revenue sums to the `operating_revenue` variant, not to `revenue`:
+the gap is 43xx other income, which belongs to no customer.
 
 **Free cash flow is a cold start.** FCF is negative at every profile while operating profit
 is positive, and the arithmetic is right: the corpus begins with zero receivables and zero
@@ -286,8 +322,8 @@ worth knowing before benchmarking it against a going concern.
 
 ## Backlog
 
-The ordered plan is [`docs/operating-model.md`](docs/operating-model.md) §10 — next up are
-scale profiles (which also add `profile` to the corpus identity), then the Supply, Capacity
-and Throughput families. Independent of that:
+The ordered plan is [`docs/operating-model.md`](docs/operating-model.md) §10 — next up is
+the rest of the family registry (§3), which has to land before the Supply, Capacity and
+Throughput families. Independent of that:
 
 - Format profiles (DATEV, SAP, Salesforce, HubSpot) via YAML config + OpenAPI specs

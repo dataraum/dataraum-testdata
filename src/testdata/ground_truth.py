@@ -22,9 +22,14 @@ from testdata.canonical.finance.models import (
     JournalStatus,
 )
 from testdata.identity import CorpusIdentity
+from testdata.oracle import INTEGRITY_SURFACES, METRIC_IDS, build_contract
 
 # Account range prefixes for metric classification
 _REVENUE_PREFIX = "4"
+# Product (41xx) and service (42xx) revenue — the operating top line, excluding 43xx
+# other income. This is the split the order lines can reconstruct: every sales posting
+# lands in 41xx/42xx, and interest income belongs to no customer.
+_OPERATING_REVENUE_PREFIXES = ("41", "42")
 _EXPENSE_PREFIX = "5"
 _AR_ACCOUNTS = {"1210", "1220"}
 _AP_ACCOUNTS = {"2110", "2120"}
@@ -37,11 +42,21 @@ def _q(d: Decimal) -> Decimal:
     return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _ratio_pct(numerator: Decimal, denominator: Decimal) -> float:
+    """A margin in percent, 0.0 on a zero base — never a division by nothing."""
+    return round(float(numerator / denominator * 100), 2) if denominator else 0.0
+
+
 # --- Models ---
 
 
 class PeriodMetrics(BaseModel):
     """Financial metrics for a single month.
+
+    The definitions these fields carry are published beside them — see
+    :mod:`testdata.oracle`, which pins each one and names its legitimate variants.
+    Every ``*_on_expenses`` / ``operating_*`` field here is the value behind one of
+    those variants, computed once so the two files cannot disagree.
 
     ``dpo`` divides the payable by **purchases** — the vendor-bill credits to AP —
     which is the textbook definition and became computable only once goods bills
@@ -49,23 +64,35 @@ class PeriodMetrics(BaseModel):
     named alternative rather than an unexplained delta: it is what a consumer without
     a separable purchases figure necessarily computes, and both are correct answers
     to different questions. ``cash_conversion_cycle`` uses the purchases one.
+
+    ``gross_profit`` is ``revenue - cogs``. It used to be ``revenue - total expenses``,
+    which is operating income — a mislabelling that survived precisely because no
+    definition was published next to the number.
     """
 
     period: str
     revenue: Decimal
+    operating_revenue: Decimal
     expenses: Decimal
+    operating_expenses: Decimal
     gross_profit: Decimal
+    gross_profit_on_operating_revenue: Decimal
+    operating_income: Decimal
+    gross_margin: float
+    operating_margin: float
     cogs: Decimal
     purchases: Decimal
     ar_balance: Decimal
     ap_balance: Decimal
     cash_balance: Decimal
     inventory_balance: Decimal
+    free_cash_flow: Decimal
     dso: float
     dpo: float
     dpo_on_expenses: float
     dio: float
     cash_conversion_cycle: float
+    cash_conversion_cycle_on_expenses: float
     revenue_growth_pct: float | None = None
     invoice_count: dict[str, int]
     payment_count: dict[str, int]
@@ -75,8 +102,14 @@ class AnnualMetrics(BaseModel):
     """Aggregate annual financial metrics. See :class:`PeriodMetrics` on the two DPOs."""
 
     total_revenue: Decimal
+    total_operating_revenue: Decimal
     total_expenses: Decimal
+    total_operating_expenses: Decimal
     gross_profit: Decimal
+    gross_profit_on_operating_revenue: Decimal
+    operating_income: Decimal
+    gross_margin: float
+    operating_margin: float
     total_cogs: Decimal
     total_purchases: Decimal
     ending_ar_balance: Decimal
@@ -88,6 +121,7 @@ class AnnualMetrics(BaseModel):
     annual_dpo_on_expenses: float
     annual_dio: float
     annual_cash_conversion_cycle: float
+    annual_cash_conversion_cycle_on_expenses: float
     free_cash_flow: Decimal
 
 
@@ -130,7 +164,14 @@ class Invariants(BaseModel):
 
 
 class InjectionImpact(BaseModel):
-    """Estimated impact of an injection on a financial metric."""
+    """Estimated impact of an injection on a metric or an integrity surface.
+
+    ``metric`` is either a metric id from :mod:`testdata.oracle` — in which case the
+    reader can look up the definition the estimate is against — or one of that module's
+    declared ``INTEGRITY_SURFACES``, which are properties of the corpus rather than
+    figures with a value. Nothing else may appear: a target that looks like a metric id
+    and has no definition behind it is the shape this contract exists to remove.
+    """
 
     metric: str
     expected_error_pct: float
@@ -247,6 +288,13 @@ def calculate_ground_truth(
         counts = payment_by_period.setdefault(p, {})
         counts[pay.method.value] = counts.get(pay.method.value, 0) + 1
 
+    # Free cash flow per period: net bank movement, inflows positive.
+    fcf_by_period: dict[str, Decimal] = {}
+    for bt in dataset.bank_transactions:
+        p = bt.date.strftime("%Y-%m")
+        if p in periods:
+            fcf_by_period[p] = fcf_by_period.get(p, Decimal("0")) + bt.amount
+
     monthly_metrics: list[PeriodMetrics] = []
 
     for period_str in periods:
@@ -258,6 +306,14 @@ def calculate_ground_truth(
         revenue = Decimal("0")
         for acct_id in _all_accounts_with_prefix(period_account_credits, period_str, _REVENUE_PREFIX):
             revenue += period_account_credits.get((period_str, acct_id), Decimal("0"))
+
+        # Operating revenue: product + service only. The order lines reconstruct this
+        # figure to the cent; they cannot reconstruct `revenue`, which carries 43xx
+        # other income on top.
+        operating_revenue = Decimal("0")
+        for prefix in _OPERATING_REVENUE_PREFIXES:
+            for acct_id in _all_accounts_with_prefix(period_account_credits, period_str, prefix):
+                operating_revenue += period_account_credits.get((period_str, acct_id), Decimal("0"))
 
         # Expenses: debits to expense accounts
         expenses = Decimal("0")
@@ -303,14 +359,21 @@ def calculate_ground_truth(
             PeriodMetrics(
                 period=period_str,
                 revenue=_q(revenue),
+                operating_revenue=_q(operating_revenue),
                 expenses=_q(expenses),
-                gross_profit=_q(revenue - expenses),
+                operating_expenses=_q(expenses - cogs),
+                gross_profit=_q(revenue - cogs),
+                gross_profit_on_operating_revenue=_q(operating_revenue - cogs),
+                operating_income=_q(revenue - expenses),
+                gross_margin=_ratio_pct(revenue - cogs, revenue),
+                operating_margin=_ratio_pct(revenue - expenses, revenue),
                 cogs=_q(cogs),
                 purchases=_q(purchases),
                 ar_balance=_q(cumulative_ar),
                 ap_balance=_q(cumulative_ap),
                 cash_balance=_q(cumulative_cash),
                 inventory_balance=_q(cumulative_inventory),
+                free_cash_flow=_q(fcf_by_period.get(period_str, Decimal("0"))),
                 dso=round(dso, 1),
                 dpo=round(dpo, 1),
                 dpo_on_expenses=round(dpo_expenses, 1),
@@ -320,6 +383,9 @@ def calculate_ground_truth(
                 # published DIO, DSO and DPO must land on the published CCC, or the
                 # oracle is grading its own rounding error.
                 cash_conversion_cycle=round(round(dio, 1) + round(dso, 1) - round(dpo, 1), 1),
+                cash_conversion_cycle_on_expenses=round(
+                    round(dio, 1) + round(dso, 1) - round(dpo_expenses, 1), 1
+                ),
                 revenue_growth_pct=growth,
                 invoice_count=invoice_by_period.get(period_str, {}),
                 payment_count=payment_by_period.get(period_str, {}),
@@ -330,15 +396,12 @@ def calculate_ground_truth(
 
     # --- Annual metrics ---
     total_revenue = sum((m.revenue for m in monthly_metrics), Decimal("0"))
+    total_operating_revenue = sum((m.operating_revenue for m in monthly_metrics), Decimal("0"))
     total_expenses = sum((m.expenses for m in monthly_metrics), Decimal("0"))
     last = monthly_metrics[-1] if monthly_metrics else None
 
     # FCF: sum of all bank transaction amounts (positive = inflow, negative = outflow)
-    fcf = Decimal("0")
-    for bt in dataset.bank_transactions:
-        bt_period = bt.date.strftime("%Y-%m")
-        if bt_period in periods:
-            fcf += bt.amount
+    fcf = sum(fcf_by_period.values(), Decimal("0"))
 
     total_cogs = sum((m.cogs for m in monthly_metrics), Decimal("0"))
     total_purchases = sum((m.purchases for m in monthly_metrics), Decimal("0"))
@@ -351,8 +414,14 @@ def calculate_ground_truth(
 
     annual = AnnualMetrics(
         total_revenue=_q(total_revenue),
+        total_operating_revenue=_q(total_operating_revenue),
         total_expenses=_q(total_expenses),
-        gross_profit=_q(total_revenue - total_expenses),
+        total_operating_expenses=_q(total_expenses - total_cogs),
+        gross_profit=_q(total_revenue - total_cogs),
+        gross_profit_on_operating_revenue=_q(total_operating_revenue - total_cogs),
+        operating_income=_q(total_revenue - total_expenses),
+        gross_margin=_ratio_pct(total_revenue - total_cogs, total_revenue),
+        operating_margin=_ratio_pct(total_revenue - total_expenses, total_revenue),
         total_cogs=_q(total_cogs),
         total_purchases=_q(total_purchases),
         ending_ar_balance=_q(last.ar_balance) if last else Decimal("0"),
@@ -365,6 +434,9 @@ def calculate_ground_truth(
         annual_dio=round(annual_dio, 1),
         annual_cash_conversion_cycle=round(
             round(annual_dio, 1) + round(annual_dso, 1) - round(annual_dpo, 1), 1
+        ),
+        annual_cash_conversion_cycle_on_expenses=round(
+            round(annual_dio, 1) + round(annual_dso, 1) - round(annual_dpo_exp, 1), 1
         ),
         free_cash_flow=_q(fcf),
     )
@@ -548,11 +620,135 @@ def _check_inventory(
     return rollforward, ties_to_gl
 
 
+# --- The oracle contract ---
+
+# (metric id, PeriodMetrics field, AnnualMetrics field). One row per period-grain
+# metric, so a metric published without a definition is a missing row in ``oracle``
+# rather than a silent divergence between the two files.
+_PERIOD_METRICS: tuple[tuple[str, str, str], ...] = (
+    ("revenue", "revenue", "total_revenue"),
+    ("cogs", "cogs", "total_cogs"),
+    ("expenses", "expenses", "total_expenses"),
+    ("gross_profit", "gross_profit", "gross_profit"),
+    ("operating_income", "operating_income", "operating_income"),
+    ("gross_margin", "gross_margin", "gross_margin"),
+    ("operating_margin", "operating_margin", "operating_margin"),
+    ("purchases", "purchases", "total_purchases"),
+    ("ar_balance", "ar_balance", "ending_ar_balance"),
+    ("ap_balance", "ap_balance", "ending_ap_balance"),
+    ("cash_balance", "cash_balance", "ending_cash_balance"),
+    ("inventory_balance", "inventory_balance", "ending_inventory_balance"),
+    ("free_cash_flow", "free_cash_flow", "free_cash_flow"),
+    ("dso", "dso", "annual_dso"),
+    ("dpo", "dpo", "annual_dpo"),
+    ("dio", "dio", "annual_dio"),
+    ("cash_conversion_cycle", "cash_conversion_cycle", "annual_cash_conversion_cycle"),
+)
+
+# The same, for the variant values. Each variant is computed once, here, and published
+# under the metric it is an alternative to.
+_PERIOD_VARIANTS: tuple[tuple[str, str, str], ...] = (
+    ("operating_revenue", "operating_revenue", "total_operating_revenue"),
+    ("operating_expenses", "operating_expenses", "total_operating_expenses"),
+    (
+        "gross_profit_on_operating_revenue",
+        "gross_profit_on_operating_revenue",
+        "gross_profit_on_operating_revenue",
+    ),
+    ("dpo_on_total_expenses", "dpo_on_expenses", "annual_dpo_on_expenses"),
+    (
+        "cash_conversion_cycle_on_expense_dpo",
+        "cash_conversion_cycle_on_expenses",
+        "annual_cash_conversion_cycle_on_expenses",
+    ),
+)
+
+# (metric id, ContributionMargin field) for the per-entity unit metrics. §5: a
+# dimension without at least one graded per-entity metric is not lit.
+_ENTITY_METRICS: tuple[tuple[str, str], ...] = (
+    ("revenue", "revenue"),
+    ("cogs", "cost_of_sale"),
+    ("db1", "db1"),
+    ("db1_pct", "db1_pct"),
+    ("units_sold", "units"),
+    ("order_count", "orders"),
+)
+
+
+def _year_label(periods: list[str]) -> str:
+    """The key the ``year`` grain is published under.
+
+    A 12-month corpus starting in January is just its year. Anything else says so
+    explicitly rather than picking one of the years it spans and hoping.
+    """
+    if not periods:
+        return "year"
+    years = sorted({p[:4] for p in periods})
+    return years[0] if len(years) == 1 else f"{years[0]}..{years[-1]}"
+
+
+def _sum_counts(rows: list[dict[str, int]]) -> dict[str, int]:
+    total: dict[str, int] = {}
+    for row in rows:
+        for key, count in row.items():
+            total[key] = total.get(key, 0) + count
+    return dict(sorted(total.items()))
+
+
+def metric_contract(truth: GroundTruth) -> list[dict[str, Any]]:
+    """The §5 contract: every metric with its pinned definition, variants and values.
+
+    Derived from *truth* rather than stored on it. The computed metrics are the single
+    source; this is the view a consumer grades against, and building it on demand is
+    what keeps the definition and the number from drifting into two facts.
+    """
+    year = _year_label([m.period for m in truth.monthly])
+    values: dict[str, dict[str, dict[str, Any]]] = {}
+    variant_values: dict[str, dict[str, dict[str, Any]]] = {}
+
+    for metric_id, month_field, annual_field in _PERIOD_METRICS:
+        values[metric_id] = {
+            "month": {m.period: getattr(m, month_field) for m in truth.monthly},
+            "year": {year: getattr(truth.annual, annual_field)},
+        }
+    for variant_id, month_field, annual_field in _PERIOD_VARIANTS:
+        variant_values[variant_id] = {
+            "month": {m.period: getattr(m, month_field) for m in truth.monthly},
+            "year": {year: getattr(truth.annual, annual_field)},
+        }
+
+    # Month grain only — the first period has no prior month inside the corpus.
+    values["revenue_growth_pct"] = {"month": {m.period: m.revenue_growth_pct for m in truth.monthly}}
+
+    for metric_id, field_name in (("invoice_count", "invoice_count"), ("payment_count", "payment_count")):
+        per_month = {m.period: dict(getattr(m, field_name)) for m in truth.monthly}
+        values[metric_id] = {
+            "month": per_month,
+            "year": {year: _sum_counts(list(per_month.values()))},
+        }
+
+    entities = {"customer": truth.db1_by_customer, "product_group": truth.db1_by_product_group}
+    for metric_id, cm_field in _ENTITY_METRICS:
+        entry = values.setdefault(metric_id, {})
+        for grain, rows in entities.items():
+            entry[grain] = {row.entity: getattr(row, cm_field) for row in rows}
+
+    return build_contract(values, variant_values)
+
+
 # --- Export ---
 
 
 def export_ground_truth(truth: GroundTruth, output_dir: Path, identity: CorpusIdentity | None = None) -> None:
     """Write ground_truth.yaml to the output directory.
+
+    What ships is the **contract**: every metric with the definition that produced it,
+    its variants, and its values at every grain it is published at. The raw ``annual`` /
+    ``monthly`` / ``db1_by_*`` blocks are gone from the file — each of their numbers now
+    appears exactly once, under a definition. They are still on :class:`GroundTruth` for
+    callers computing in-process; publishing them beside the contract would restate every
+    figure without its definition, which is how ``gross_profit`` spent a release meaning
+    operating income.
 
     ``identity`` stamps the corpus these numbers were computed from. Without it a
     consumer holding a stale directory grades against the wrong answer key and has no
@@ -560,11 +756,14 @@ def export_ground_truth(truth: GroundTruth, output_dir: Path, identity: CorpusId
     and every previously-generated corpus silently stopped matching its own seed.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    data = _to_yaml_dict(truth.model_dump())
+    data: dict[str, Any] = {}
     if identity is not None:
-        data = {"corpus": identity.as_dict(), **data}
+        data["corpus"] = identity.as_dict()
+    data["metrics"] = metric_contract(truth)
+    data["invariants"] = truth.invariants.model_dump()
+    data["injection_impact"] = [impact.model_dump() for impact in truth.injection_impact]
     with open(output_dir / "ground_truth.yaml", "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(_to_yaml_dict(data), f, default_flow_style=False, sort_keys=False)
 
 
 def _to_yaml_dict(obj: Any) -> Any:
@@ -625,6 +824,16 @@ _IMPACT_RULES: dict[str, list[tuple[str, str]]] = {
         ("temporal_stability", "shift_factor"),
     ],
 }
+
+
+_UNDEFINED_IMPACT_TARGETS = {
+    metric for rules in _IMPACT_RULES.values() for metric, _ in rules
+} - METRIC_IDS - INTEGRITY_SURFACES
+if _UNDEFINED_IMPACT_TARGETS:  # pragma: no cover — a wiring error, and loud at import
+    raise ValueError(
+        f"injection impact reports against undefined targets: {sorted(_UNDEFINED_IMPACT_TARGETS)}. "
+        "Add a Metric to testdata.oracle, or declare it in INTEGRITY_SURFACES."
+    )
 
 
 def estimate_injection_impact(

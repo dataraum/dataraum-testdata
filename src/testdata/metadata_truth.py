@@ -127,7 +127,10 @@ def _metric_additivity() -> dict[str, Any]:
         "net_margin": {**_RATIO, "note": _MARGIN_NOTE},
         "operating_margin": {**_RATIO, "note": _MARGIN_NOTE},
         "dso": {**_RATIO, "note": "days-sales-outstanding — a ratio (AR / revenue × days); non-additive."},
-        "dpo": {**_RATIO, "note": "days-payable-outstanding — a ratio (AP / COGS × days); non-additive."},
+        # The pinned denominator is PURCHASES (testdata.oracle), not COGS — this note
+        # described the old formula for a release after the definition moved, which is
+        # what `test_oracle` now pins the two files together to prevent.
+        "dpo": {**_RATIO, "note": "days-payable-outstanding — a ratio (AP / purchases × days); non-additive."},
         "transaction_count": {
             "determinism": "label_dependent",
             "categorical_additive": True,

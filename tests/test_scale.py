@@ -133,22 +133,25 @@ def test_the_customer_book_grows_by_appending() -> None:
 
 
 def test_the_expense_base_follows_the_firm() -> None:
-    """The §7 defect. Gross profit is a property of the business, not of a row count.
+    """The §7 defect. The bottom line is a property of the business, not of a row count.
 
     Before this, 3,000 fixed vendor invoices plus fixed monthly payroll made the P&L
     sign an artifact: -3.66M at the small profile, and implausibly profitable one
     profile up. Operating expense is now a declared share of contribution.
+
+    Stated on **operating income** — revenue less every expense. That is the figure the
+    defect moved; `gross_profit` now means revenue less cost of sale, which is a much
+    larger number and would pass this range for the wrong reason.
     """
     for name in ("tiny", "mid"):
         truth = calculate_ground_truth(_dataset(name), months=12)
         annual = truth.annual
-        assert annual.gross_profit > 0, (name, annual.gross_profit)
-
-        margin = annual.gross_profit / annual.total_revenue
-        assert 0.03 < margin < 0.15, (name, margin)
+        assert annual.operating_income > 0, (name, annual.operating_income)
+        assert 3.0 < annual.operating_margin < 15.0, (name, annual.operating_margin)
+        assert annual.gross_margin > annual.operating_margin, name
 
         contribution = annual.total_revenue - annual.total_cogs
-        opex = annual.total_expenses - annual.total_cogs
+        opex = annual.total_operating_expenses
         share = float(opex / contribution)
         assert abs(share - get_profile(name).opex_share_of_contribution) < 0.05, (name, share)
 

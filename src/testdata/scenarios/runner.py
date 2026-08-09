@@ -90,7 +90,11 @@ def load_scenario_config(scenario_name: str) -> ScenarioConfig:
     defaults = raw["defaults"]
     gen = raw.get("generator", {})
 
-    # Extract generator kwargs (everything except normalization and fiscal_start)
+    # Extract generator kwargs (everything except normalization and fiscal_start).
+    # An ALLOWLIST, not a passthrough: a scenario YAML naming a key the generator does
+    # not take is dropped here rather than reaching it. `generate_finance_dataset` used
+    # to end in `**_kwargs`, which meant a misspelled argument — `scale_profile=` for
+    # `profile=` — silently generated the default firm instead of raising.
     # Note: journal_entries_per_month, journal_entries_stddev, and
     # bank_transactions_count are legacy params ignored by event-driven generator
     gen_kwargs: dict = {}

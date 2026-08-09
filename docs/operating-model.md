@@ -266,50 +266,91 @@ utilization × realization) is a **second scenario** reusing Demand, Offer and C
 a different Capacity/Throughput pair — not a second repo and not a second truth format.
 Decide when S3 lands, not before.
 
-## 5. The oracle contract
+## 5. The oracle contract · **shipped**
 
-Today `ground_truth.yaml` publishes numbers without the definitions that produced them.
-Grading a consumer against it is therefore manual: a defensible alternative definition
-reads as a delta to be argued rather than a variant to be matched.
+`ground_truth.yaml` used to publish numbers without the definitions that produced them.
+Grading a consumer against it was therefore manual: a defensible alternative definition
+read as a delta to be argued rather than a variant to be matched.
 
-**Every metric publishes its definition and its legitimate variants, each with its own
-value.** Grading becomes mechanical, and the "which definition do we pin?" conversation
-happens once, here, instead of after every run.
+**Every metric now publishes its definition and its legitimate variants, each with its own
+values.** The registry is `src/testdata/oracle.py`; `ground_truth.metric_contract` binds
+values to it and refuses to publish a metric without values or values without a
+definition. 24 metrics, 5 variants.
 
 ```yaml
 metrics:
   - id: dpo
-    title: Days Payable Outstanding
+    title: Days payable outstanding
     unit: days
-    kind: ratio                 # stock over flow — a window takes the stock's LAST period
+    kind: ratio                 # stock over flow
+    window: recompute           # ← derived from kind; a stock takes the window's LAST period
+    basis: derived
     grains: [month, year]
     definition: "ap_balance[end of w] / purchases[w] * days[w]"
-    scope: "AP accounts 2110,2120; purchases = vendor-bill credits to AP"
-    values: {2025-01: 16.3, …, annual: 48.5}
+    scope: "Closing payable over the window's purchases; 0.0 when purchases are 0."
+    values:
+      month: {2025-01: 16.3, …}
+      year:  {2025: 47.2}
     variants:
       - id: dpo_on_total_expenses
-        definition: "ap_balance[end of w] / total_expenses[w] * days[w]"
+        definition: "ap_balance[end of w] / expenses[w] * days[w]"
         rationale: "the expense-denominator family; used where purchases are not separable"
         values: {…}
 ```
 
+Four things the shape does that the sketch above did not:
+
+- **`window` is published, not implied.** `flow`/`count` sums across a window, `stock`
+  takes its last period, `ratio` is recomputed on the window's own aggregates. A consumer
+  reading a quarter out of monthly values no longer has to infer which — averaging monthly
+  ratios is the classic way a correct series produces a wrong number.
+- **`values` is keyed by grain**, uniformly: `month`, `year`, `customer`, `product_group`.
+  So a per-entity metric and a per-period one have the same shape, and `grains` is exactly
+  the key set.
+- **`basis`** is `derived` for everything today. The slot exists so a figure synthesized
+  without a real basis — Throughput cost variance is the known case — is *marked* rather
+  than footnoted.
+- **The raw `annual` / `monthly` / `db1_by_*` blocks are gone from the file.** Every figure
+  they held appears once, under a definition. Publishing both would restate every number
+  without its definition, which is precisely how the defect below survived.
+
+**It caught its first mislabel immediately.** `gross_profit` carried `revenue - total
+expenses` — operating income. Nobody noticed because there was no definition beside it to
+disagree with. Pinned now as `revenue - cogs`, with `operating_income`, `gross_margin` and
+`operating_margin` published separately. §7's table already quoted a 26.6% "gross margin"
+next to a "gross profit" that was 6.4% of revenue; the two lines were always different
+things.
+
+**Variants earn their keep, they are not cosmetic.** `operating_revenue` (accounts 41xx +
+42xx, excluding 43xx other income) is the figure the order lines reconstruct to the cent —
+so entity-grain revenue sums to the *variant*, never to the pinned metric. Without it the
+gap reads as a reconciliation failure; with it, it is one named substitution. The same
+applies to `cash_conversion_cycle_on_expense_dpo`: the cycle a consumer lands on when it
+computes DPO the other way, published so the difference is not a mystery in a headline
+number.
+
 The rest of the contract:
 
-- **Per-entity unit metrics** are first-class, not an appendix: DB1 per customer and per
-  product group today; DIO per product, OTIF per supplier, cost per capacity hour per
-  asset as families land. A dimension without at least one graded per-entity metric is
-  not lit.
+- **Per-entity unit metrics** are first-class, not an appendix: `db1`, `db1_pct`,
+  `units_sold`, `order_count`, `revenue` and `cogs` at customer and product-group grain
+  today; DIO per product, OTIF per supplier, cost per capacity hour per asset as families
+  land. A dimension without at least one graded per-entity metric is not lit.
 - **Invariants** stay as they are (journal balanced, trial balance balanced, invoice↔payment
   matched, bank reconciliation rate) and grow per family (§4). The reconciliation rate is
   an *authored expectation*, never assumed to be 1.0 — a consumer reporting a perfect rate
   has overcleaned, and that is a failure.
-- **Provenance stamp** on every truth file — **shipped**, see §6. Still open here: a figure
-  that must be synthesized without a real basis (Throughput cost variance is the known
-  case) is marked as such rather than footnoted.
+- **Injection impact** may only report against a defined metric id or a declared
+  `INTEGRITY_SURFACE` (`referential_integrity`, `benford_compliance`, …). Enforced at
+  import: a target that looks like a metric id and has no definition behind it is the
+  shape this whole section removes.
+- **Provenance stamp** on every truth file — see §6.
 - `metadata_truth.yaml` keeps carrying the structural layer — FK topology, table roles,
   semantic roles, stock vs flow per column, additivity, cycles, the conformed-dimension
   matrix. That is the floor a consumer's own structure detection is graded against, and
-  it is a property of the data, not of any engine.
+  it is a property of the data, not of any engine. Where the two files name the same
+  metric, `tests/test_oracle.py` now pins the additivity verdict to the registry's `kind`
+  — `metadata_truth` had described DPO as AP over COGS for a release after the pinned
+  definition moved to purchases.
 
 ## 6. Corpus identity — reproducible, not frozen · **shipped**
 
@@ -380,7 +421,7 @@ vendor bill that ages and settles like any other. On `month-end-close / clean / 
 *Purchases* also became a computable quantity in the process — it needs goods bills to be
 separable from expense bills, which is why the pinned DPO could not use it before.
 
-**~~The expense base is sized independently of the firm.~~ Fixed in S1a.** Gross profit
+**~~The expense base is sized independently of the firm.~~ Fixed in S1a.** The bottom line
 read −3,660,147.05 against DB1 of ~+20.5M, because 24.2M of operating expense came from a
 *fixed* 3,000 vendor invoices plus fixed monthly payroll and rent — counts that did not
 move with the size of the business, so the P&L sign was an artifact of a knob rather than
@@ -390,10 +431,16 @@ contribution the order lines actually produce, times a declared
 
 | | `tiny` | `mid` |
 | :-- | --: | --: |
-| revenue | 28.3M | 178.1M |
+| revenue | 28.26M | 178.06M |
+| cost of sale | 20.74M | 122.86M |
+| gross profit (rev − COGS) | +7.52M | +55.20M |
 | gross margin | 26.6% | 31.0% |
-| gross profit | **+1.82M** | **+13.68M** |
+| operating income (rev − all expenses) | **+1.82M** | **+13.68M** |
 | operating margin | 6.4% | 7.7% |
+
+The last two rows are the ones the defect moved. This table originally called the 1.82M
+row "gross profit" while quoting a 26.6% gross margin above it — the same mislabelling
+`ground_truth.yaml` carried, and the reason S1b pins definitions to numbers.
 
 The anchor is computed at `lever=None` deliberately. A price or volume intervention must
 not mechanically move payroll, or `intervention.yaml`'s "unaffected: the expenditure
@@ -488,7 +535,7 @@ counterfactual.
 | **S1** ✅ | Inventory + settle the replenishment payable | **met** — DPO 271 → 59.2 days; CCC gradeable monthly and annually; roll-forward and the GL tie hold per product, location and period |
 | **S1½** ✅ | Corpus identity (§6) | **met** — one stamp across all six output files, digest recomputable from the published fields, levered run separable from its baseline |
 | **S1a** ✅ | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | **met** — `tiny`/`mid`/`large` selectable and stamped; gross profit positive and plausible at every profile (§7); Pareto revenue, log-normal order value, a priced-thin catalogue tail and real validity windows |
-| **S1b** | Oracle contract v2 (§5) | every metric carries its definition and variants; a consumer's alternative grades as a named variant, not as an unexplained delta |
+| **S1b** ✅ | Oracle contract v2 (§5) | **met** — 24 metrics and 5 variants, each with its pinned definition, scope, window rule and per-grain values; publishing a metric without values or values without a definition raises; the raw metric blocks are gone, so every figure appears once |
 | **S2** | Supply | OTIF, price variance, lead-time spread and effective cost per unit gradeable per supplier; three-way match exists with a declared exception rate |
 | **S3** | Capacity | cost per capacity hour and utilization gradeable per asset against a declared ceiling; depreciation becomes asset-derived |
 | **S4** | Throughput | yield, cycle-time efficiency and cost per step gradeable at team/line grain; the person-grain probe exists and no person column ships by default |
@@ -501,6 +548,11 @@ Allocation (§4) becomes urgent at S3 and is a hard predecessor of any what-if.
 1. **`metadata_truth.yaml` sections** — which structural sections earn their keep now that
    nothing external grades them. `relationships`, `table_roles`, `stock_flow` and
    `bus_matrix` clearly do; `metric_additivity` keyed by metric name is the one to review.
+   S1b tightened rather than resolved it: where a name appears in both files the verdict
+   is now pinned to the oracle's `kind`, but `metric_additivity` still carries entries for
+   metrics this corpus does not compute (`ebitda`, `net_income`, `current_ratio`,
+   `active_accounts`), which are engine vocabulary rather than corpus truth. Either they
+   become computed metrics or the section shrinks to what the registry declares.
 2. **The services archetype** as a second scenario (§4) — decide at S3.
 3. **Allocation schemes** — which named keys ship first (freight by weight vs. by revenue
    vs. by order count is the canonical trio).

@@ -2220,7 +2220,6 @@ def generate_finance_dataset(
     roleplay_deliveries: int = 0,
     lever: Lever | None = None,
     profile: str | ScaleProfile | None = None,
-    **_kwargs: object,
 ) -> FinanceDataset:
     """Generate a complete finance dataset with closed-loop accounting.
 

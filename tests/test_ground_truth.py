@@ -31,9 +31,18 @@ def test_annual_expenses_positive():
     assert truth.annual.total_expenses > 100_000
 
 
-def test_gross_profit_is_revenue_minus_expenses():
+def test_gross_profit_and_operating_income_are_different_lines():
+    """Gross profit is revenue less COST OF SALE; operating income is less everything.
+
+    `gross_profit` carried the operating-income formula until the oracle contract pinned
+    a definition next to it — the exact failure mode of publishing a number alone.
+    """
     truth = _truth()
-    assert truth.annual.gross_profit == truth.annual.total_revenue - truth.annual.total_expenses
+    annual = truth.annual
+    assert annual.gross_profit == annual.total_revenue - annual.total_cogs
+    assert annual.operating_income == annual.total_revenue - annual.total_expenses
+    assert annual.gross_profit > annual.operating_income
+    assert annual.gross_margin > annual.operating_margin
 
 
 def test_monthly_periods_count():
@@ -144,8 +153,12 @@ def test_export_creates_yaml():
         assert data["corpus"]["seed"] == 42
         assert data["corpus"]["id"] == identity.corpus_id
         assert not {"generator", "seed", "strategy", "months"} & set(data)
-        assert data["annual"]["total_revenue"] > 0
-        assert len(data["monthly"]) == 12
+        # The contract replaced the raw annual/monthly blocks: every figure appears
+        # once, under the definition that produced it.
+        assert not {"annual", "monthly", "db1_by_customer"} & set(data)
+        revenue = next(m for m in data["metrics"] if m["id"] == "revenue")
+        assert revenue["values"]["year"]["2025"] > 0
+        assert len(revenue["values"]["month"]) == 12
         assert data["invariants"]["journal_balanced"] is True
 
 
