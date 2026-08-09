@@ -14,6 +14,7 @@ from testdata.families import (
     all_tables,
     ambiguous_key_columns,
     default_tables,
+    event_fact,
     folds,
     key_columns,
     legacy_names,
@@ -178,3 +179,46 @@ def test_a_new_family_reshapes_without_editing_the_transform(monkeypatch) -> Non
     assert set(flat) == {"shipment_ledger"}
     assert mapping == {"shipment_lines": "shipment_ledger", "shipment_headers": "shipment_ledger"}
     assert "carrier_name" in flat["shipment_ledger"].columns
+
+
+def test_no_table_arrives_without_structural_truth() -> None:
+    """§1's second rule with teeth: a table that lands without its truth is not done.
+
+    Classification is the checkable half — every table a family declares must be a fact,
+    a dimension, or explicitly ambiguous. The operating chain shipped a release absent
+    from the published structural truth entirely; this is what would have caught it.
+
+    Probe families are exempt: their truth is DATA-conditional (emitted only when a
+    strategy materializes the shape), so asserting it unconditionally would publish
+    roles for tables the corpus does not carry.
+    """
+    for fam in FAMILIES:
+        if fam.optional:
+            continue
+        classified = set(fam.structure.facts) | set(fam.structure.dimensions) | set(fam.structure.ambiguous)
+        assert classified == set(fam.tables), fam.name
+
+
+def test_structural_truth_only_speaks_about_declared_tables() -> None:
+    """A role or unit on a column of a table nobody declares is unreachable truth."""
+    declared = set(all_tables())
+    for fam in FAMILIES:
+        st = fam.structure
+        qualified = (
+            set(st.measures)
+            | set(st.timestamps)
+            | set(st.stock_flow)
+            | set(st.reconciles_structurally)
+            | set(st.measured_in)
+            | set(st.business_concepts)
+        )
+        for column in qualified:
+            assert column.partition(".")[0] in declared, (fam.name, column)
+
+
+def test_the_corpus_has_exactly_one_event_fact() -> None:
+    """The finest grain a structural witness ties to. A subledger with its own finer
+    fact says so per measure (`subledger_event_fact`), not by claiming the corpus's."""
+    owners = [fam.name for fam in FAMILIES if fam.structure.event_fact]
+    assert owners == ["core_ledger"]
+    assert event_fact() == "journal_lines"

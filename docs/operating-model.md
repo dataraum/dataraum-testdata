@@ -96,6 +96,17 @@ dimension→concept map. All four now read the declarations that perform the tra
 `tests/test_families_registry.py` runs a stand-in family through `apply_normalization` and
 asserts it reshapes, which is the exit criterion exercised rather than asserted.
 
+Then **meaning**. `metadata_truth` authored one canonical blob naming finance tables:
+table roles, semantic roles, stock/flow, unit denomination, business concepts, cycles,
+reconciliation lineage and degenerate ids. A family's truth therefore lived one file away
+from its tables, which is how the operating chain shipped a release absent from the
+published structural truth entirely. All of it moved into `families.Structure`, declared
+beside the tables it describes; `metadata_truth` merges what it finds and derives the
+per-level views. `test_families_registry` fails if a declared table is not classified as a
+fact, a dimension or explicitly ambiguous — §1's "a table that lands without its truth
+fragment is not done", finally with teeth. The published truth is unchanged apart from
+list order, which is now family order.
+
 Then the **container**. `FinanceDataset` was one flat model of eight-plus lists that grew
 with every release and belonged to nobody — nothing connected `stock_movements` to the
 family that declares it. It is now `Corpus`, *composed* from one fragment per family
@@ -115,7 +126,8 @@ Still to come, and the reason this is only most of S0:
 | `export._write_manifest` | a literal version string, and run parameters repeated under `parameters` | **identity** (§6) |
 | `schema_transforms` | the merge/inline functions name finance tables | **registry** |
 | `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
-| `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob | open |
+| `metadata_truth` | one canonical authored blob of roles, units, cycles | **registry** |
+| `metadata_truth` | `VERTICAL = "finance"` | open — the last genuinely *vertical*-level constant |
 | `scenarios/runner` | imports `generate_finance_dataset` directly | open |
 | `Corpus` | one fixed container of eight-plus lists | **registry** |
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,49 @@ class Fold:
 
 
 @dataclass(frozen=True)
+class Structure:
+    """What a family declares about the *meaning* of its tables and columns.
+
+    ``metadata_truth.yaml`` publishes this; the family owns it. §1's second rule — "a
+    table that lands without its truth fragment is not done" — has no teeth while the
+    truth lives in a different file from the tables, which is how the operating chain
+    shipped a release with no FK topology and no semantic roles in the published truth.
+
+    Table classification (``facts`` / ``dimensions`` / ``ambiguous``) must cover every
+    table the family declares; ``tests/test_families_registry.py`` fails otherwise, so a
+    new table cannot arrive truth-free.
+
+    * ``facts`` / ``dimensions`` — HARD where structure decides: measure-bearing = fact,
+      pure reference = dimension.
+    * ``ambiguous`` — genuinely modelable either way (an event header carrying no
+      measure; a reference row that does carry a rate). Reported, never asserted.
+    * ``measures`` / ``timestamps`` — per-column semantic roles. key / dimension /
+      attribute are convention-dependent and deliberately absent.
+    * ``stock_flow`` — ``additive`` = per-period flow, ``point_in_time`` = level.
+    * ``reconciles_structurally`` — measures that tie out against a finer event fact.
+    * ``subledger_event_fact`` — the finer fact, when it is NOT the corpus event fact.
+    * ``measured_in`` — the unit column a MONETARY measure is denominated in, or None
+      when the table carries no unit source. Quantities are outside it entirely.
+    * ``event_fact`` — the family's event-grain fact, if it owns the corpus's.
+    """
+
+    facts: tuple[str, ...] = ()
+    dimensions: tuple[str, ...] = ()
+    ambiguous: tuple[str, ...] = ()
+    measures: tuple[str, ...] = ()
+    timestamps: tuple[str, ...] = ()
+    stock_flow: Mapping[str, str] = field(default_factory=dict)
+    reconciles_structurally: tuple[str, ...] = ()
+    subledger_event_fact: Mapping[str, str] = field(default_factory=dict)
+    measured_in: Mapping[str, str | None] = field(default_factory=dict)
+    dimensionless: tuple[str, ...] = ()
+    business_concepts: Mapping[str, str] = field(default_factory=dict)
+    cycles: tuple[Mapping[str, Any], ...] = ()
+    degenerate_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    event_fact: str | None = None
+
+
+@dataclass(frozen=True)
 class Family:
     """One cohesive group of tables and what it declares about their schema."""
 
@@ -89,6 +133,8 @@ class Family:
     # would simply never collapse — silently, and only visible as a table count.
     merges: tuple[Merge, ...] = ()
     folds: tuple[Fold, ...] = ()
+    # What the family's tables MEAN — published as metadata_truth.yaml.
+    structure: Structure = field(default_factory=Structure)
     # A probe family materializes only when a strategy injects into it.
     optional: bool = False
 
@@ -222,6 +268,117 @@ CORE_LEDGER = Family(
             attributes=("account_name", "account_type", "parent_account_id", "account_currency", "opened_date"),
         ),
     ),
+    structure=Structure(
+        facts=("journal_lines", "invoices", "payments", "bank_transactions", "trial_balance", "balance_sheet"),
+        dimensions=("chart_of_accounts",),
+        # journal_entries is an event header carrying no measure; fx_rates is a lookup
+        # row that DOES carry a rate-like measure. Neither branch of the rule fits, so
+        # both are reported rather than asserted.
+        ambiguous=("journal_entries", "fx_rates"),
+        measures=(
+            "journal_lines.debit",
+            "journal_lines.credit",
+            "journal_lines.net_amount",
+            "invoices.amount",
+            "payments.amount",
+            "bank_transactions.amount",
+            "trial_balance.debit_balance",
+            "trial_balance.credit_balance",
+            "balance_sheet.ending_balance",
+            "fx_rates.rate",
+        ),
+        timestamps=(
+            "journal_entries.date",
+            "invoices.date",
+            "invoices.due_date",
+            "payments.date",
+            "bank_transactions.date",
+            "fx_rates.date",
+            "trial_balance.period",
+            "balance_sheet.period",
+        ),
+        # TrialBalance is per-period movement (FLOW); BalanceSheet.ending_balance is a
+        # carry-forward level (STOCK); fx_rates.rate is a price level (STOCK).
+        stock_flow={
+            "journal_lines.debit": "additive",
+            "journal_lines.credit": "additive",
+            "journal_lines.net_amount": "additive",
+            "invoices.amount": "additive",
+            "payments.amount": "additive",
+            "bank_transactions.amount": "additive",
+            "trial_balance.debit_balance": "additive",
+            "trial_balance.credit_balance": "additive",
+            "balance_sheet.ending_balance": "point_in_time",
+            "fx_rates.rate": "point_in_time",
+        },
+        reconciles_structurally=(
+            "trial_balance.debit_balance",
+            "trial_balance.credit_balance",
+            "balance_sheet.ending_balance",
+        ),
+        # Every monetary measure sits beside the Currency-typed column of its own table.
+        # None = no same-table unit source, so NO measured_in edge may be projected:
+        # fx_rates.rate is DIMENSIONLESS (a ratio BETWEEN two Currency columns), and the
+        # balance tables are denominated by the ACCOUNT dimension, reachable only via FK
+        # at canonical. The CoA fold changes that — see `metadata_truth._MEASURED_IN_FOLD`.
+        measured_in={
+            "journal_lines.debit": "journal_lines.currency",
+            "journal_lines.credit": "journal_lines.currency",
+            "journal_lines.net_amount": "journal_lines.currency",
+            "invoices.amount": "invoices.currency",
+            "payments.amount": "payments.currency",
+            "bank_transactions.amount": "bank_transactions.currency",
+            "fx_rates.rate": None,
+            "trial_balance.debit_balance": None,
+            "trial_balance.credit_balance": None,
+            "balance_sheet.ending_balance": None,
+        },
+        dimensionless=("fx_rates.rate",),
+        business_concepts={
+            "journal_lines.debit": "debit",
+            "journal_lines.credit": "credit",
+            "trial_balance.debit_balance": "account_balance",
+            "trial_balance.credit_balance": "account_balance",
+            "balance_sheet.ending_balance": "account_balance",
+            "invoices.amount": "transaction_amount",
+            "payments.amount": "transaction_amount",
+            "bank_transactions.amount": "transaction_amount",
+        },
+        cycles=(
+            {
+                "canonical_type": "journal_entry_cycle",
+                "key_tables": ["journal_entries", "journal_lines"],
+                "required": True,
+            },
+            # accounts_payable is the corpus's DIRECTED backbone cycle — family and
+            # direction are DECLARED truth (vendor→invoice→payment settles OUTGOING),
+            # never a truth patch. Undirected cycles carry neither.
+            {
+                "canonical_type": "accounts_payable",
+                "key_tables": ["invoices", "payments"],
+                "required": True,
+                "family": "settlement",
+                "direction": "outgoing",
+            },
+            {
+                "canonical_type": "bank_reconciliation",
+                "key_tables": ["bank_transactions", "payments"],
+                "required": True,
+            },
+            # Real but weakly signalled → soft.
+            {
+                "canonical_type": "period_close",
+                "key_tables": ["trial_balance", "balance_sheet"],
+                "required": False,
+            },
+        ),
+        # A fact's OWN operational primary key grounds to no dimension concept and
+        # carries NO cross-table identity, so the right answer is to ABSTAIN. This is
+        # the journal-line PK surviving the fold as the wide fact's own key — the exact
+        # surface on which a distinct-count ratio wrongly asserts a hierarchy.
+        degenerate_ids={"flat": ("general_ledger.line_id",), "single": ("mega_table.line_id",)},
+        event_fact="journal_lines",
+    ),
 )
 
 OPERATING_CHAIN = Family(
@@ -289,6 +446,54 @@ OPERATING_CHAIN = Family(
     # products stay as lookups at this level: they are dimension masters, not the
     # order's parent.
     merges=(Merge(name="sales_data", spine="sales_order_lines", joined="sales_orders", on="order_id"),),
+    structure=Structure(
+        facts=("sales_order_lines", "ar_invoices", "receipts"),
+        dimensions=("customers",),
+        # sales_orders is an event header carrying no measure; products is a reference
+        # row that DOES carry rate-like measures (standard_cost / list_price).
+        ambiguous=("sales_orders", "products"),
+        measures=(
+            # `units` is a count and `unit_price` a rate — both are measures in the
+            # graded sense (numeric, driver/slicing input); whether they SUM is the
+            # additivity verdict's question, not this role's.
+            "sales_order_lines.units",
+            "sales_order_lines.unit_price",
+            "sales_order_lines.line_amount",
+            "sales_order_lines.line_cost",
+            "ar_invoices.amount",
+            "receipts.amount",
+            # Prices on a product row: constant per entity, the same shape as fx_rates.rate.
+            "products.standard_cost",
+            "products.list_price",
+        ),
+        timestamps=(
+            "sales_orders.order_date",
+            "ar_invoices.invoice_date",
+            "ar_invoices.due_date",
+            "receipts.receipt_date",
+            # Master-data validity windows (§9) — the birth/death evidence. A consumer
+            # computing a prior-period comparison without them reads a customer's
+            # non-existence as a collapse.
+            "customers.created_date",
+            "customers.churned_date",
+            "products.launched_date",
+            "products.discontinued_date",
+        ),
+        measured_in={
+            # No in-table currency column on either — the chain is single-currency there
+            # — so the unit source is undeclared, exactly like the derived balance
+            # tables. Authored as None deliberately: inventing a currency column to give
+            # these a unit source would be writing the schema to suit the truth file.
+            "products.standard_cost": None,
+            "products.list_price": None,
+            "sales_order_lines.unit_price": None,
+            "sales_order_lines.line_amount": None,
+            "sales_order_lines.line_cost": None,
+            # These two DO carry an in-table currency column.
+            "ar_invoices.amount": "ar_invoices.currency",
+            "receipts.amount": "receipts.currency",
+        },
+    ),
 )
 
 INVENTORY = Family(
@@ -313,6 +518,52 @@ INVENTORY = Family(
         ("stock_movements.product_id", "products.product_id"),
         ("stock_movements.entry_id", "journal_entries.entry_id"),
         ("inventory_positions.product_id", "products.product_id"),
+    ),
+    structure=Structure(
+        # The movement is an event fact, the position a periodic snapshot fact — both
+        # measure-bearing, neither a reference table.
+        facts=("stock_movements", "inventory_positions"),
+        measures=(
+            "stock_movements.units",
+            "stock_movements.unit_cost",
+            "stock_movements.value",
+            "inventory_positions.units_on_hand",
+            "inventory_positions.unit_cost",
+            "inventory_positions.value",
+        ),
+        # `inventory_positions.period` is the same shape as the balance tables' period:
+        # a period label, not a date.
+        timestamps=("stock_movements.date", "inventory_positions.period"),
+        # The corpus's second stock/flow PAIR, and a sharper one than the balance
+        # tables: the movement and the position sit in different tables over the same
+        # key space, so nothing but meaning separates "how much moved" from "how much is
+        # there". Signed movement units sum across time; on-hand does not.
+        stock_flow={
+            "stock_movements.units": "additive",
+            "stock_movements.value": "additive",
+            "inventory_positions.units_on_hand": "point_in_time",
+            "inventory_positions.value": "point_in_time",
+        },
+        # The position reconciles `cumulative` against its movements, exactly as
+        # balance_sheet does against journal_lines — the same witness over a second,
+        # independent subledger.
+        reconciles_structurally=("inventory_positions.units_on_hand", "inventory_positions.value"),
+        # A position is the cumulative sum of stock_movements at its own (product,
+        # location) key and only incidentally equal to a GL balance, so pointing its
+        # lineage at the corpus event fact would name the wrong finer grain.
+        subledger_event_fact={
+            "inventory_positions.units_on_hand": "stock_movements",
+            "inventory_positions.value": "stock_movements",
+        },
+        # Money columns only, and no in-table currency column to bind them to. The
+        # quantity columns are outside this map entirely — it pairs MONETARY measures
+        # with their denomination, and a count of pieces has no currency.
+        measured_in={
+            "stock_movements.unit_cost": None,
+            "stock_movements.value": None,
+            "inventory_positions.unit_cost": None,
+            "inventory_positions.value": None,
+        },
     ),
 )
 
@@ -440,6 +691,91 @@ def merge_column_renames() -> dict[str, str]:
         for merge in fam.merges
         for old, new in merge.rename.items()
     }
+
+
+# --- the structural truth, merged across families ---------------------------
+#
+# Every accessor below merges in family order. `metadata_truth` publishes what it finds
+# and authors nothing about tables — which is the point: it used to hold one canonical
+# blob listing finance tables by name, so a family's roles, units and cycles were a
+# second place to remember.
+
+
+def table_roles() -> dict[str, list[str]]:
+    """``{facts, dimensions, ambiguous}`` — the table classification, merged."""
+    return {
+        "facts": [t for fam in FAMILIES for t in fam.structure.facts],
+        "dimensions": [t for fam in FAMILIES for t in fam.structure.dimensions],
+        "ambiguous": [t for fam in FAMILIES for t in fam.structure.ambiguous],
+    }
+
+
+def semantic_roles() -> dict[str, list[str]]:
+    """``{measure, timestamp}`` per qualified column, merged.
+
+    key / dimension / attribute are deliberately absent — they are convention-dependent,
+    so the oracle reports them rather than asserting them.
+    """
+    return {
+        "measure": [c for fam in FAMILIES for c in fam.structure.measures],
+        "timestamp": [c for fam in FAMILIES for c in fam.structure.timestamps],
+    }
+
+
+def stock_flow() -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for fam in FAMILIES:
+        merged.update(fam.structure.stock_flow)
+    return merged
+
+
+def reconciles_structurally() -> list[str]:
+    return [c for fam in FAMILIES for c in fam.structure.reconciles_structurally]
+
+
+def subledger_event_facts() -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for fam in FAMILIES:
+        merged.update(fam.structure.subledger_event_fact)
+    return merged
+
+
+def measured_in() -> dict[str, str | None]:
+    merged: dict[str, str | None] = {}
+    for fam in FAMILIES:
+        merged.update(fam.structure.measured_in)
+    return merged
+
+
+def dimensionless_measures() -> frozenset[str]:
+    return frozenset(c for fam in FAMILIES for c in fam.structure.dimensionless)
+
+
+def business_concepts() -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for fam in FAMILIES:
+        merged.update(fam.structure.business_concepts)
+    return merged
+
+
+def cycles() -> list[dict[str, Any]]:
+    return [dict(cycle) for fam in FAMILIES for cycle in fam.structure.cycles]
+
+
+def degenerate_ids(level: str) -> list[str]:
+    return [q for fam in FAMILIES for q in fam.structure.degenerate_ids.get(level, ())]
+
+
+def event_fact() -> str | None:
+    """The corpus's event-grain fact — the finest table a structural witness ties to.
+
+    One family owns it (the ledger's ``journal_lines``); a subledger that reconciles
+    against its OWN finer fact says so in ``subledger_event_fact`` instead.
+    """
+    for fam in FAMILIES:
+        if fam.structure.event_fact:
+            return fam.structure.event_fact
+    return None
 
 
 def folded_dimensions() -> frozenset[str]:

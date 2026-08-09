@@ -13,6 +13,17 @@ The truth is authored from the models and the generator design
 (``canonical/finance/models.py``, ``generators.py``, ``ground_truth.py``), never
 measured from the output — measuring it would grade the data against itself.
 
+**Authored by the FAMILIES, published here.** Roles, stock/flow, units, concepts,
+cycles and reconciliation lineage are declared in ``families.Structure``, beside the
+tables they describe; this module merges what it finds and derives the per-level views
+(remap, folds, bus matrix, measured_in). It used to hold one canonical blob naming
+finance tables, which made a family's truth a second thing to remember one file away
+from its tables — and ``test_families_registry`` now fails if a declared table is not
+classified at all, so a table cannot arrive truth-free. What is still authored here is
+``metric_additivity`` (engine vocabulary, not corpus truth — §11 open decision 1) and
+the data-conditional role-play block, which is emitted only when a strategy has
+materialized the shape.
+
 Determinism split, because not every verdict is equally hard:
   * ``function_symmetry`` — fixed by structure alone (AVG / COUNT(DISTINCT) / ratio
     never reconcile across a partition; the hard structural relationships and roles).
@@ -52,7 +63,22 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from testdata.families import foreign_keys, folded_dimensions, merge_column_renames
+from testdata.families import (
+    business_concepts,
+    cycles,
+    degenerate_ids,
+    dimensionless_measures,
+    event_fact,
+    folded_dimensions,
+    foreign_keys,
+    measured_in,
+    merge_column_renames,
+    reconciles_structurally,
+    semantic_roles,
+    stock_flow,
+    subledger_event_facts,
+    table_roles,
+)
 from testdata.families import folds as family_folds
 from testdata.families import table_mapping as family_table_mapping
 from testdata.identity import CorpusIdentity
@@ -181,55 +207,13 @@ def _metric_additivity() -> dict[str, Any]:
     return {"metrics": metrics, "measures": measures}
 
 
-# --- stock/flow per measure column --------------------------------
-# The generator-known temporal_behavior: `additive` = per-period flow (sums across
-# time); `point_in_time` = stock/level (does not sum across time). Design oracle:
-# TrialBalance is per-period movement (FLOW); BalanceSheet.ending_balance is a
-# carry-forward level (STOCK); fx_rates.rate is a price level (STOCK).
-_STOCK_FLOW: dict[str, str] = {
-    "journal_lines.debit": "additive",
-    "journal_lines.credit": "additive",
-    "journal_lines.net_amount": "additive",
-    "invoices.amount": "additive",
-    "payments.amount": "additive",
-    "bank_transactions.amount": "additive",
-    "trial_balance.debit_balance": "additive",
-    "trial_balance.credit_balance": "additive",
-    "balance_sheet.ending_balance": "point_in_time",
-    "fx_rates.rate": "point_in_time",
-    # The inventory family — the corpus's second stock/flow PAIR, and a sharper one
-    # than the balance tables: the movement and the position sit in different tables
-    # over the same key space, so nothing but meaning separates "how much moved" from
-    # "how much is there". Signed movement units sum across time; on-hand does not.
-    "stock_movements.units": "additive",
-    "stock_movements.value": "additive",
-    "inventory_positions.units_on_hand": "point_in_time",
-    "inventory_positions.value": "point_in_time",
-}
-
-# Measures that reconcile against a finer event fact via the structural
-# stock/flow witness: the per-period movement tables reconcile `per_period` (FLOW),
-# the carry-forward level reconciles `cumulative` (STOCK) vs journal_lines.
-_RECONCILES_STRUCTURALLY: list[str] = [
-    "trial_balance.debit_balance",
-    "trial_balance.credit_balance",
-    "balance_sheet.ending_balance",
-    # The inventory position reconciles `cumulative` against its movements, exactly as
-    # balance_sheet does against journal_lines — the same witness over a second,
-    # independent subledger.
-    "inventory_positions.units_on_hand",
-    "inventory_positions.value",
-]
-
-# Which finer fact a measure reconciles against, when it is NOT the ledger's event
-# fact. A position is the cumulative sum of stock_movements at its own (product,
-# location) key and only incidentally equal to a GL balance, so pointing its lineage
-# at journal_lines would name the wrong finer grain. Keyed at canonical names;
-# measures absent here fall back to the corpus's event fact.
-_SUBLEDGER_EVENT_FACT: dict[str, str] = {
-    "inventory_positions.units_on_hand": "stock_movements",
-    "inventory_positions.value": "stock_movements",
-}
+# --- stock/flow, reconciliation lineage, roles, units, concepts, cycles -----
+# All READ from the family registry's `Structure` declarations. This module used to
+# author one canonical blob naming finance tables — a second place to remember a
+# family's roles, units and cycles, one file away from where its tables are declared.
+_STOCK_FLOW: dict[str, str] = stock_flow()
+_RECONCILES_STRUCTURALLY: list[str] = reconciles_structurally()
+_SUBLEDGER_EVENT_FACT: dict[str, str] = subledger_event_facts()
 
 # --- FK topology --------------------------------------------------
 # The generator's TRUE FK topology, read from the family registry rather than
@@ -244,141 +228,21 @@ _RELATIONSHIPS: list[dict[str, str]] = [
 
 # --- table + column roles -----------------------------------------
 # is_fact_table HARD where structure decides: measure-bearing = fact, pure reference =
-# dimension. journal_entries (event header, no measure) and fx_rates (rate lookup that
-# also carries a measure) are genuinely modelable either way → reported, not asserted.
-_TABLE_ROLES: dict[str, list[str]] = {
-    "facts": [
-        "journal_lines", "invoices", "payments", "bank_transactions",
-        "trial_balance", "balance_sheet",
-        # operating chain: each carries its own measures at its own grain.
-        "sales_order_lines", "ar_invoices", "receipts",
-        # inventory: the movement is an event fact, the position a periodic snapshot
-        # fact — both measure-bearing, neither a reference table.
-        "stock_movements", "inventory_positions",
-    ],
-    "dimensions": ["chart_of_accounts", "customers"],
-    # Reported, never asserted — structurally debatable by this truth's OWN rule
-    # ("measure-bearing = fact, pure reference = dimension"):
-    #   journal_entries / sales_orders — event headers carrying no measure
-    #   fx_rates / products — reference rows that DO carry rate-like measures
-    #     (rate; standard_cost/list_price), so neither branch of the rule fits.
-    "ambiguous": ["journal_entries", "fx_rates", "sales_orders", "products"],
-}
-
-# semantic_role per column: measure graded recall+precision, timestamp graded recall
-# (both load-bearing — drivers_phase filters measure, slicing reads timestamps). key /
-# dimension / attribute are convention-dependent → reported by the oracle, not asserted.
-_SEMANTIC_ROLES: dict[str, list[str]] = {
-    "measure": [
-        "journal_lines.debit",
-        "journal_lines.credit",
-        "journal_lines.net_amount",
-        "invoices.amount",
-        "payments.amount",
-        "bank_transactions.amount",
-        "trial_balance.debit_balance",
-        "trial_balance.credit_balance",
-        "balance_sheet.ending_balance",
-        "fx_rates.rate",
-        # operating chain. `units` is a count and `unit_price` a rate — both
-        # are measures in the graded sense (numeric, driver/slicing input); whether
-        # they SUM is the additivity verdict's question, not this role's.
-        "sales_order_lines.units",
-        "sales_order_lines.unit_price",
-        "sales_order_lines.line_amount",
-        "sales_order_lines.line_cost",
-        "ar_invoices.amount",
-        "receipts.amount",
-        # Prices on a product row: constant per entity, but the same shape as the
-        # already-declared fx_rates.rate — a rate living on a reference row.
-        "products.standard_cost",
-        "products.list_price",
-        # inventory. `unit_cost` is a rate on both tables, like the product prices.
-        "stock_movements.units",
-        "stock_movements.unit_cost",
-        "stock_movements.value",
-        "inventory_positions.units_on_hand",
-        "inventory_positions.unit_cost",
-        "inventory_positions.value",
-    ],
-    "timestamp": [
-        "journal_entries.date",
-        "invoices.date",
-        "invoices.due_date",
-        "payments.date",
-        "bank_transactions.date",
-        "fx_rates.date",
-        "trial_balance.period",
-        "balance_sheet.period",
-        # operating chain.
-        "sales_orders.order_date",
-        "ar_invoices.invoice_date",
-        "ar_invoices.due_date",
-        "receipts.receipt_date",
-        # inventory. `inventory_positions.period` is the same shape as the balance
-        # tables' period: a period label, not a date.
-        "stock_movements.date",
-        "inventory_positions.period",
-        # Master-data validity windows (§9). These are the birth/death evidence: a
-        # consumer that computes a prior-period comparison without them will read a
-        # customer's non-existence as a collapse.
-        "customers.created_date",
-        "customers.churned_date",
-        "products.launched_date",
-        "products.discontinued_date",
-    ],
-}
+# dimension. The `ambiguous` bucket is genuinely modelable either way (an event header
+# with no measure; a reference row that does carry a rate) -> reported, not asserted.
+# semantic_role per column: measure graded recall+precision, timestamp graded recall.
+_TABLE_ROLES: dict[str, list[str]] = table_roles()
+_SEMANTIC_ROLES: dict[str, list[str]] = semantic_roles()
 
 # --- measured_in / units --------------------
-# The unit column each measure is DENOMINATED in, authored from the MODELS: every
-# monetary measure sits beside the Currency-typed column of its own table
-# (JournalLine/Invoice/Payment/BankTransaction .currency). None = no same-table unit
-# source → NO measured_in edge may be projected:
-#   * fx_rates.rate is DIMENSIONLESS — a ratio BETWEEN two Currency columns
-#     (from_ccy/to_ccy), flagged so the oracle can assert no-edge for that reason;
-#   * trial_balance / balance_sheet balances are denominated by the ACCOUNT dimension
-#     (chart_of_accounts.currency, reachable only via FK) — no in-table unit column at
-#     canonical. A fold changes that: `_MEASURED_IN_FOLD` below.
-# ``cross_unit`` (declared unit column carries >1 distinct value) is DATA-DERIVED at
-# export from the generated frames — never authored. All-USD by model default, so it
-# is False everywhere unless an injector writes a second currency INTO the unit
-# column (mix_units' declared variant); the undeclared variant converts values only
-# and correctly leaves cross_unit False (the gate grades the DECLARED surface).
-_MEASURED_IN: dict[str, str | None] = {
-    "journal_lines.debit": "journal_lines.currency",
-    "journal_lines.credit": "journal_lines.currency",
-    "journal_lines.net_amount": "journal_lines.currency",
-    "invoices.amount": "invoices.currency",
-    "payments.amount": "payments.currency",
-    "bank_transactions.amount": "bank_transactions.currency",
-    "fx_rates.rate": None,
-    "trial_balance.debit_balance": None,
-    "trial_balance.credit_balance": None,
-    "balance_sheet.ending_balance": None,
-    # The operating chain. No in-table currency column on either table —
-    # the corpus is single-currency there — so the unit source is undeclared, exactly
-    # like the derived balance tables above. Authored as None deliberately: inventing
-    # a currency column just to give these a unit source would be writing the schema
-    # to suit the truth file.
-    "products.standard_cost": None,
-    "products.list_price": None,
-    "sales_order_lines.unit_price": None,
-    "sales_order_lines.line_amount": None,
-    "sales_order_lines.line_cost": None,
-    # These two DO carry an in-table currency column, so the unit source is declared
-    # — the same shape as invoices/payments.
-    "ar_invoices.amount": "ar_invoices.currency",
-    "receipts.amount": "receipts.currency",
-    # inventory. Money columns only, and no in-table currency column to bind them to.
-    # The quantity columns (`units`, `units_on_hand`) are outside this map entirely —
-    # it pairs MONETARY measures with their denomination, and a count of pieces has no
-    # currency to be denominated in. Same treatment as sales_order_lines.units.
-    "stock_movements.unit_cost": None,
-    "stock_movements.value": None,
-    "inventory_positions.unit_cost": None,
-    "inventory_positions.value": None,
-}
-_DIMENSIONLESS: frozenset[str] = frozenset({"fx_rates.rate"})
+# The unit column each MONETARY measure is denominated in, declared by the family that
+# owns the table. ``cross_unit`` (declared unit column carries >1 distinct value) is
+# DATA-DERIVED at export from the generated frames — never authored. All-USD by model
+# default, so it is False everywhere unless an injector writes a second currency INTO
+# the unit column (mix_units' declared variant); the undeclared variant converts values
+# only and correctly leaves cross_unit False (the gate grades the DECLARED surface).
+_MEASURED_IN: dict[str, str | None] = measured_in()
+_DIMENSIONLESS: frozenset[str] = dimensionless_measures()
 
 # Pairings CREATED by the CoA fold: ``account_currency`` lands ON the balance facts at
 # ``flat``/``single``, becoming their same-table unit source. general_ledger's
@@ -398,28 +262,16 @@ _MEASURED_IN_FOLD: dict[str, dict[str, str]] = {
 }
 
 
-# The measure→concept bindings a metric's grounding depends on (a missing one
-# means the metric cannot ground). Graded HARD for recall. Dimension-concept bindings
-# are LLM-selective discriminators → reported, not required.
-_BUSINESS_CONCEPTS: dict[str, dict[str, str]] = {
-    "required": {
-        "journal_lines.debit": "debit",
-        "journal_lines.credit": "credit",
-        "trial_balance.debit_balance": "account_balance",
-        "trial_balance.credit_balance": "account_balance",
-        "balance_sheet.ending_balance": "account_balance",
-        "invoices.amount": "transaction_amount",
-        "payments.amount": "transaction_amount",
-        "bank_transactions.amount": "transaction_amount",
-    }
-}
+# The measure→concept bindings a metric's grounding depends on (a missing one means
+# the metric cannot ground). Graded HARD for recall. Dimension-concept bindings are
+# LLM-selective discriminators → reported, not required.
+_BUSINESS_CONCEPTS: dict[str, dict[str, str]] = {"required": business_concepts()}
 
 # --- reconciles_with -------------------------------------------
-# The event fact the structural witness reconciles measures against:
-# trial_balance and balance_sheet are DERIVED by aggregating journal lines
-# (``generators._derive_trial_balance`` / ``_derive_balance_sheet``), so the
-# generator knows the event side of every structural reconciliation.
-_EVENT_FACT = "journal_lines"
+# The event fact the structural witness reconciles measures against: trial_balance and
+# balance_sheet are DERIVED by aggregating journal lines, so the generator knows the
+# event side of every structural reconciliation.
+_EVENT_FACT = event_fact()
 
 
 def _build_reconciles_with(
@@ -464,28 +316,10 @@ def _build_reconciles_with(
 
 
 # --- business cycles ----------------------------------------------
-# The cycles this finance-9 corpus REALISTICALLY supports, derived from the finance
-# cycle vocabulary × the corpus's actual tables + completion columns. Three have a
-# strong structural backbone → required (a miss is a real recall gap); period_close is
-# real but weakly signalled → soft.
-_CYCLES: list[dict[str, Any]] = [
-    {"canonical_type": "journal_entry_cycle", "key_tables": ["journal_entries", "journal_lines"], "required": True},
-    # three-state grading: accounts_payable is the corpus's DIRECTED backbone
-    # cycle — family + direction are DECLARED ground truth from the finance vertical's
-    # family declaration (vendor→invoice→payment settles OUTGOING), never a truth
-    # patch. Undirected cycles carry
-    # no family/direction and grade exactly as before.
-    {
-        "canonical_type": "accounts_payable",
-        "key_tables": ["invoices", "payments"],
-        "required": True,
-        "family": "settlement",
-        "direction": "outgoing",
-    },
-    {"canonical_type": "bank_reconciliation", "key_tables": ["bank_transactions", "payments"], "required": True},
-    {"canonical_type": "period_close", "key_tables": ["trial_balance", "balance_sheet"], "required": False},
-]
-
+# The cycles this corpus REALISTICALLY supports, declared by the families that own the
+# tables backing them. Three have a strong structural backbone → required (a miss is a
+# real recall gap); period_close is real but weakly signalled → soft.
+_CYCLES: list[dict[str, Any]] = cycles()
 
 # --- folded dimensions --------------------------------------------
 # A folded dimension = a referenced dimension whose FK-target table a normalization
@@ -589,10 +423,7 @@ def _build_bus_matrix(
 # journal-line PK that survives the fold as the fact's own key. This is the exact
 # surface on which a distinct-count ratio wrongly asserts a hierarchy over wide data
 # (a near-key guard misses a heavy-tailed id).
-_DEGENERATE_IDS: dict[str, list[str]] = {
-    "flat": ["general_ledger.line_id"],
-    "single": ["mega_table.line_id"],
-}
+# Declared by the family that owns the surviving key.
 
 
 def _build_measured_in(
@@ -722,7 +553,7 @@ def _build_degenerate_ids(
 ) -> list[str]:
     """Degenerate operational-ID columns for *level* (``table.column``, column restyled)."""
     return [
-        _remap_qualified(q, table_mapping, column_style) for q in _DEGENERATE_IDS.get(level or "", [])
+        _remap_qualified(q, table_mapping, column_style) for q in degenerate_ids(level or "")
     ]
 
 
@@ -782,7 +613,7 @@ def remap_metadata_truth(
     out["reconciles_with"] = _build_reconciles_with(
         out["business_concepts"]["required"],
         out["reconciles_structurally"],
-        None if _EVENT_FACT in removed else _remap_table(_EVENT_FACT, tm),
+        None if _EVENT_FACT is None or _EVENT_FACT in removed else _remap_table(_EVENT_FACT, tm),
         tm,
     )
 
