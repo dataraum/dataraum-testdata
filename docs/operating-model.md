@@ -57,14 +57,31 @@ consumer's coverage map should read it off the corpus rather than be told.
 Finance is hardwired in six places. Adding Supply on top of that shape means editing all
 six again, and Capacity a third time.
 
-| Site | Hardcoding |
-| :-- | :-- |
-| `export.TABLE_NAMES` | a literal list of finance tables |
-| `schema_transforms` | `_KEY_COLUMNS`, `_NATURAL_KEYS`, `_LEGACY_NAMES`, and the merge/inline functions name finance tables |
-| `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) |
-| `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob |
-| `scenarios/runner` | imports `generate_finance_dataset` directly |
-| `FinanceDataset` | one fixed container of eight-plus lists |
+**The cost is not hypothetical — it already bit.** The operating chain reached
+`export.TABLE_NAMES` but never `_KEY_COLUMNS`, `_NATURAL_KEYS` or `_LEGACY_NAMES`, so
+`customer_id`, `product_id`, `order_line_id`, `ar_invoice_id` and `receipt_id` were
+silently skipped by every key strategy and left unspelled in a legacy export. One of four
+maps was updated and nothing said so.
+
+`src/testdata/families.py` now holds the declarations — tables, primary keys, natural-key
+prefixes, legacy spellings — and the exporter and both schema transforms read from it.
+`tests/test_families_registry.py` fails if a table exists on the dataset without a
+declaration, so the next family cannot repeat the omission. It also surfaced a genuine
+ambiguity: `order_id` is claimed by both the sales order and the role-play probe fact over
+unrelated id spaces, so key strategies now leave it alone rather than fuse two populations
+into one.
+
+Still to come, and the reason this is only half of S0:
+
+| Site | Hardcoding | State |
+| :-- | :-- | :-- |
+| `export.TABLE_NAMES` | a literal list of finance tables | **registry** |
+| `schema_transforms` | `_KEY_COLUMNS`, `_NATURAL_KEYS`, `_LEGACY_NAMES` | **registry** |
+| `schema_transforms` | the merge/inline functions name finance tables | open |
+| `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
+| `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob | open |
+| `scenarios/runner` | imports `generate_finance_dataset` directly | open |
+| `FinanceDataset` | one fixed container of eight-plus lists | open |
 
 **Proposal — a family registry.** A *family* is a cohesive set of tables with its own
 generator, GL postings, truth fragment and schema metadata:

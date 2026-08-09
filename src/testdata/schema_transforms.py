@@ -18,6 +18,13 @@ from typing import Literal
 
 import polars as pl
 
+from testdata.families import (
+    ambiguous_key_columns,
+    key_columns,
+    legacy_names,
+    natural_key_prefixes,
+)
+
 NormalizationLevel = Literal["full", "partial", "flat", "single"]
 
 
@@ -25,46 +32,7 @@ NormalizationLevel = Literal["full", "partial", "flat", "single"]
 
 ColumnStyle = Literal["snake_case", "camelCase", "PascalCase", "legacy"]
 
-_LEGACY_NAMES: dict[str, str] = {
-    "entry_id": "JRNL_ID",
-    "line_id": "LN_ID",
-    "account_id": "ACCT_NO",
-    "account_name": "ACCT_NM",
-    "account_type": "ACCT_TYP",
-    "parent_id": "PRNT_ACCT",
-    "parent_account_id": "PRNT_ACCT",
-    "debit": "DR_AMT",
-    "credit": "CR_AMT",
-    "debit_balance": "DR_BAL",
-    "credit_balance": "CR_BAL",
-    "cost_center": "CC",
-    "invoice_id": "INV_NO",
-    "vendor_id": "VNDR_ID",
-    "due_date": "DUE_DT",
-    "payment_terms": "PMT_TERMS",
-    "payment_id": "PMT_ID",
-    "payment_date": "PMT_DT",
-    "payment_amount": "PMT_AMT",
-    "payment_currency": "PMT_CCY",
-    "payment_method": "PMT_MTHD",
-    "txn_id": "TXN_ID",
-    "counterparty": "CNTRPRTY",
-    "reconciled": "RECON_FLG",
-    "from_ccy": "FROM_CCY",
-    "to_ccy": "TO_CCY",
-    "created_by": "CRTD_BY",
-    "date": "TXN_DT",
-    "amount": "AMT",
-    "currency": "CCY",
-    "description": "DESC",
-    "status": "STAT",
-    "reference": "REF",
-    "period": "PRD",
-    "rate": "FX_RATE",
-    "source": "SRC",
-    "method": "MTHD",
-    "account_currency": "ACCT_CCY",
-}
+_LEGACY_NAMES: dict[str, str] = legacy_names()
 
 
 def _to_camel(s: str) -> str:
@@ -116,26 +84,11 @@ def apply_column_style(
 KeyStrategy = Literal["surrogate", "natural", "uuid", "composite"]
 
 # Columns that are primary or foreign keys (column_name → table where it's the PK)
-_KEY_COLUMNS: dict[str, str] = {
-    "entry_id": "journal_entries",
-    "line_id": "journal_lines",
-    "account_id": "chart_of_accounts",
-    "invoice_id": "invoices",
-    "payment_id": "payments",
-    "txn_id": "bank_transactions",
-    "vendor_id": "invoices",
-}
+_KEY_COLUMNS: dict[str, str] = key_columns()
+_AMBIGUOUS_KEYS: frozenset[str] = ambiguous_key_columns()
 
-# Natural key mappings: surrogate → human-readable pattern
-_NATURAL_KEYS: dict[str, str] = {
-    "entry_id": "JE",
-    "line_id": "JL",
-    "account_id": "ACCT",
-    "invoice_id": "INV",
-    "payment_id": "PAY",
-    "txn_id": "BT",
-    "vendor_id": "V",
-}
+# Natural key mappings: surrogate -> human-readable prefix
+_NATURAL_KEYS: dict[str, str] = natural_key_prefixes()
 
 
 def apply_key_strategy(
@@ -162,6 +115,8 @@ def apply_key_strategy(
     for table_name, df in dataframes.items():
         for col in df.columns:
             if col not in _KEY_COLUMNS:
+                # Unknown, or claimed by two tables: remapping a column whose
+                # values come from two unrelated id spaces would fuse them.
                 continue
             if col in remap:
                 continue  # Already built from another table

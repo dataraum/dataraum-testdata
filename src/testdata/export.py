@@ -11,36 +11,14 @@ import polars as pl
 import yaml
 
 from testdata.canonical.finance.models import FinanceDataset
+from testdata.families import all_tables
 
 
 ExportFormat = Literal["csv", "parquet", "json", "jsonl", "both"]
 
-# Table name -> model field name mapping
-TABLE_NAMES: dict[str, str] = {
-    "chart_of_accounts": "chart_of_accounts",
-    "journal_entries": "journal_entries",
-    "journal_lines": "journal_lines",
-    "invoices": "invoices",
-    "payments": "payments",
-    "bank_transactions": "bank_transactions",
-    "fx_rates": "fx_rates",
-    "trial_balance": "trial_balance",
-    "balance_sheet": "balance_sheet",
-    "measure_probes": "measure_probes",
-    "formula_probes": "formula_probes",
-    "ref_entities": "ref_entities",
-    "ref_activity": "ref_activity",
-    "addresses": "addresses",
-    "orders": "orders",
-    "deliveries": "deliveries",
-    # The operating chain — always present, unlike the probe shapes above.
-    "customers": "customers",
-    "products": "products",
-    "sales_orders": "sales_orders",
-    "sales_order_lines": "sales_order_lines",
-    "ar_invoices": "ar_invoices",
-    "receipts": "receipts",
-}
+# Table name -> model field name mapping, from the family registry: a family
+# declares its tables once and the exporter follows.
+TABLE_NAMES: dict[str, str] = {table: table for table in all_tables()}
 
 
 def _serialize_value(v: Any) -> Any:
