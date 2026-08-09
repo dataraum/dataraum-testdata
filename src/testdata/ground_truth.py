@@ -28,6 +28,8 @@ _EXPENSE_PREFIX = "5"
 _AR_ACCOUNTS = {"1210", "1220"}
 _AP_ACCOUNTS = {"2110", "2120"}
 _CASH_ACCOUNTS = {"1110", "1120"}
+_INVENTORY_ACCOUNT = "1400"
+_COGS_ACCOUNT = "5100"
 
 
 def _q(d: Decimal) -> Decimal:
@@ -38,33 +40,53 @@ def _q(d: Decimal) -> Decimal:
 
 
 class PeriodMetrics(BaseModel):
-    """Financial metrics for a single month."""
+    """Financial metrics for a single month.
+
+    ``dpo`` divides the payable by **purchases** — the vendor-bill credits to AP —
+    which is the textbook definition and became computable only once goods bills
+    existed. ``dpo_on_expenses`` carries the older total-expense denominator as a
+    named alternative rather than an unexplained delta: it is what a consumer without
+    a separable purchases figure necessarily computes, and both are correct answers
+    to different questions. ``cash_conversion_cycle`` uses the purchases one.
+    """
 
     period: str
     revenue: Decimal
     expenses: Decimal
     gross_profit: Decimal
+    cogs: Decimal
+    purchases: Decimal
     ar_balance: Decimal
     ap_balance: Decimal
     cash_balance: Decimal
+    inventory_balance: Decimal
     dso: float
     dpo: float
+    dpo_on_expenses: float
+    dio: float
+    cash_conversion_cycle: float
     revenue_growth_pct: float | None = None
     invoice_count: dict[str, int]
     payment_count: dict[str, int]
 
 
 class AnnualMetrics(BaseModel):
-    """Aggregate annual financial metrics."""
+    """Aggregate annual financial metrics. See :class:`PeriodMetrics` on the two DPOs."""
 
     total_revenue: Decimal
     total_expenses: Decimal
     gross_profit: Decimal
+    total_cogs: Decimal
+    total_purchases: Decimal
     ending_ar_balance: Decimal
     ending_ap_balance: Decimal
     ending_cash_balance: Decimal
+    ending_inventory_balance: Decimal
     annual_dso: float
     annual_dpo: float
+    annual_dpo_on_expenses: float
+    annual_dio: float
+    annual_cash_conversion_cycle: float
     free_cash_flow: Decimal
 
 
@@ -90,12 +112,20 @@ class ContributionMargin(BaseModel):
 
 
 class Invariants(BaseModel):
-    """Structural integrity checks on the dataset."""
+    """Structural integrity checks on the dataset.
+
+    The two inventory ones are the stock subledger's contract: the roll-forward
+    ``opening + Σ movements = closing`` per product, location and period, and the tie
+    from Σ position value to the GL inventory account. A generator that produces a
+    stock table without both is producing a plausible table, not a gradeable one.
+    """
 
     journal_balanced: bool
     trial_balance_balanced: bool
     invoice_payment_matched: bool
     bank_reconciliation_rate: float
+    inventory_rollforward_holds: bool = True
+    inventory_ties_to_gl: bool = True
 
 
 class InjectionImpact(BaseModel):
@@ -185,7 +215,18 @@ def calculate_ground_truth(
     cumulative_ar = Decimal("0")
     cumulative_ap = Decimal("0")
     cumulative_cash = Decimal("0")
+    cumulative_inventory = Decimal("0")
     prev_revenue: Decimal | None = None
+
+    # Purchases per period: the vendor-bill credits to AP, read off the invoice
+    # documents rather than the GL. A cancelled bill never posted, so it never
+    # created a payable and is not a purchase.
+    purchases_by_period: dict[str, Decimal] = {}
+    for inv in dataset.invoices:
+        p = inv.date.strftime("%Y-%m")
+        if p not in periods or inv.status == InvoiceStatus.CANCELLED:
+            continue
+        purchases_by_period[p] = purchases_by_period.get(p, Decimal("0")) + inv.amount
 
     # Pre-compute invoice counts by period and status
     invoice_by_period: dict[str, dict[str, int]] = {}
@@ -235,11 +276,22 @@ def calculate_ground_truth(
             cumulative_cash += period_account_debits.get((period_str, acct), Decimal("0"))
             cumulative_cash -= period_account_credits.get((period_str, acct), Decimal("0"))
 
+        cumulative_inventory += period_account_debits.get((period_str, _INVENTORY_ACCOUNT), Decimal("0"))
+        cumulative_inventory -= period_account_credits.get((period_str, _INVENTORY_ACCOUNT), Decimal("0"))
+
+        cogs = period_account_debits.get((period_str, _COGS_ACCOUNT), Decimal("0"))
+        purchases = purchases_by_period.get(period_str, Decimal("0"))
+
         # DSO: (AR / Revenue) × days_in_period (avoid div by zero)
         dso = float(cumulative_ar / revenue * days_in_period) if revenue > 0 else 0.0
 
-        # DPO: (AP / Expenses) × days_in_period
-        dpo = float(cumulative_ap / expenses * days_in_period) if expenses > 0 else 0.0
+        # DPO: (AP / Purchases) × days_in_period — the pinned definition, plus the
+        # total-expense denominator as the named alternative.
+        dpo = float(cumulative_ap / purchases * days_in_period) if purchases > 0 else 0.0
+        dpo_expenses = float(cumulative_ap / expenses * days_in_period) if expenses > 0 else 0.0
+
+        # DIO: (Inventory / COGS) × days_in_period
+        dio = float(cumulative_inventory / cogs * days_in_period) if cogs > 0 else 0.0
 
         # Revenue growth MoM
         growth: float | None = None
@@ -252,11 +304,21 @@ def calculate_ground_truth(
                 revenue=_q(revenue),
                 expenses=_q(expenses),
                 gross_profit=_q(revenue - expenses),
+                cogs=_q(cogs),
+                purchases=_q(purchases),
                 ar_balance=_q(cumulative_ar),
                 ap_balance=_q(cumulative_ap),
                 cash_balance=_q(cumulative_cash),
+                inventory_balance=_q(cumulative_inventory),
                 dso=round(dso, 1),
                 dpo=round(dpo, 1),
+                dpo_on_expenses=round(dpo_expenses, 1),
+                dio=round(dio, 1),
+                # Composed from the ROUNDED components, not the raw ones. An answer
+                # key has to be self-consistent: a consumer that recombines the
+                # published DIO, DSO and DPO must land on the published CCC, or the
+                # oracle is grading its own rounding error.
+                cash_conversion_cycle=round(round(dio, 1) + round(dso, 1) - round(dpo, 1), 1),
                 revenue_growth_pct=growth,
                 invoice_count=invoice_by_period.get(period_str, {}),
                 payment_count=payment_by_period.get(period_str, {}),
@@ -277,19 +339,32 @@ def calculate_ground_truth(
         if bt_period in periods:
             fcf += bt.amount
 
+    total_cogs = sum((m.cogs for m in monthly_metrics), Decimal("0"))
+    total_purchases = sum((m.purchases for m in monthly_metrics), Decimal("0"))
+
     total_days = sum(calendar.monthrange(int(p[:4]), int(p[5:7]))[1] for p in periods)
     annual_dso = float(last.ar_balance / total_revenue * total_days) if last and total_revenue > 0 else 0.0
-    annual_dpo = float(last.ap_balance / total_expenses * total_days) if last and total_expenses > 0 else 0.0
+    annual_dpo = float(last.ap_balance / total_purchases * total_days) if last and total_purchases > 0 else 0.0
+    annual_dpo_exp = float(last.ap_balance / total_expenses * total_days) if last and total_expenses > 0 else 0.0
+    annual_dio = float(last.inventory_balance / total_cogs * total_days) if last and total_cogs > 0 else 0.0
 
     annual = AnnualMetrics(
         total_revenue=_q(total_revenue),
         total_expenses=_q(total_expenses),
         gross_profit=_q(total_revenue - total_expenses),
+        total_cogs=_q(total_cogs),
+        total_purchases=_q(total_purchases),
         ending_ar_balance=_q(last.ar_balance) if last else Decimal("0"),
         ending_ap_balance=_q(last.ap_balance) if last else Decimal("0"),
         ending_cash_balance=_q(last.cash_balance) if last else Decimal("0"),
+        ending_inventory_balance=_q(last.inventory_balance) if last else Decimal("0"),
         annual_dso=round(annual_dso, 1),
         annual_dpo=round(annual_dpo, 1),
+        annual_dpo_on_expenses=round(annual_dpo_exp, 1),
+        annual_dio=round(annual_dio, 1),
+        annual_cash_conversion_cycle=round(
+            round(annual_dio, 1) + round(annual_dso, 1) - round(annual_dpo, 1), 1
+        ),
         free_cash_flow=_q(fcf),
     )
 
@@ -408,12 +483,72 @@ def _check_invariants(
     reconciled = sum(1 for bt in dataset.bank_transactions if bt.reconciled)
     recon_rate = reconciled / total_bank if total_bank > 0 else 1.0
 
+    rollforward, ties_to_gl = _check_inventory(dataset, entry_info)
+
     return Invariants(
         journal_balanced=journal_balanced,
         trial_balance_balanced=tb_balanced,
         invoice_payment_matched=invoice_matched,
         bank_reconciliation_rate=round(recon_rate, 4),
+        inventory_rollforward_holds=rollforward,
+        inventory_ties_to_gl=ties_to_gl,
     )
+
+
+def _check_inventory(
+    dataset: FinanceDataset,
+    entry_info: dict[str, tuple[date, JournalStatus]],
+) -> tuple[bool, bool]:
+    """The stock subledger's two contracts. ``(True, True)`` when there is no stock.
+
+    * **Roll-forward** — for every (product, location, period),
+      ``closing[p-1] + Σ movement units in p == closing[p]``. This is the invariant
+      that distinguishes a stock table from a table of numbers that happen to look
+      like stock, and it holds per key, not just in aggregate.
+    * **Ties to GL** — Σ position value in a period equals the cumulative balance of
+      the inventory account. Both sides are valued at standard cost, so the tie is
+      exact rather than approximate; a tolerance here would be hiding something.
+    """
+    if not dataset.inventory_positions:
+        return True, True
+
+    periods = sorted({p.period for p in dataset.inventory_positions})
+
+    moved: dict[tuple[str, str, str], int] = {}
+    for movement in dataset.stock_movements:
+        key = (movement.product_id, movement.location_id, movement.date.strftime("%Y-%m"))
+        moved[key] = moved.get(key, 0) + movement.units
+
+    closing: dict[tuple[str, str, str], int] = {
+        (p.product_id, p.location_id, p.period): p.units_on_hand for p in dataset.inventory_positions
+    }
+    rollforward = True
+    for (product, location, period), units in closing.items():
+        index = periods.index(period)
+        opening = 0 if index == 0 else closing.get((product, location, periods[index - 1]), 0)
+        if opening + moved.get((product, location, period), 0) != units:
+            rollforward = False
+            break
+
+    value_by_period: dict[str, Decimal] = {}
+    for position in dataset.inventory_positions:
+        value_by_period[position.period] = value_by_period.get(position.period, Decimal("0")) + position.value
+
+    gl_balance = Decimal("0")
+    gl_by_period: dict[str, Decimal] = {}
+    movement_by_period: dict[str, Decimal] = {}
+    for line in dataset.journal_lines:
+        info = entry_info.get(line.entry_id)
+        if info is None or info[1] != JournalStatus.POSTED or line.account_id != _INVENTORY_ACCOUNT:
+            continue
+        period = info[0].strftime("%Y-%m")
+        movement_by_period[period] = movement_by_period.get(period, Decimal("0")) + line.debit - line.credit
+    for period in sorted(set(movement_by_period) | set(value_by_period)):
+        gl_balance += movement_by_period.get(period, Decimal("0"))
+        gl_by_period[period] = gl_balance
+
+    ties_to_gl = all(value_by_period[p] == gl_by_period.get(p) for p in value_by_period)
+    return rollforward, ties_to_gl
 
 
 # --- Export ---

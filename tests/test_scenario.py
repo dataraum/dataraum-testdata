@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from testdata.families import default_tables
 from testdata.scenarios.month_end_close import run_scenario
 
 
@@ -48,7 +49,7 @@ def test_export_creates_files():
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
         assert manifest["generator"] == "dataraum-testdata"
-        assert len(manifest["files"]) == 15  # 8 canonical + balance_sheet + 6 operating-chain (DAT-884)
+        assert len(manifest["files"]) == len(default_tables())
 
         # Verify entropy map has injections
         with open(output / "entropy_map.yaml") as f:

@@ -36,6 +36,12 @@ class Family:
     natural_prefixes: Mapping[str, str] = field(default_factory=dict)
     # canonical column -> its spelling in a `legacy` ERP export
     legacy_names: Mapping[str, str] = field(default_factory=dict)
+    # (from, to) qualified columns — the family's TRUE foreign keys, including the
+    # ones that point at another family's table. `metadata_truth` publishes these as
+    # the FK topology, so a family that declares its tables here declares its joins
+    # in the same breath. The operating chain shipped without them for exactly as
+    # long as it shipped without its key maps.
+    foreign_keys: tuple[tuple[str, str], ...] = ()
     # A probe family materializes only when a strategy injects into it.
     optional: bool = False
 
@@ -112,6 +118,20 @@ CORE_LEDGER = Family(
         "method": "MTHD",
         "account_currency": "ACCT_CCY",
     },
+    # Deliberately EXCLUDED, and the exclusions are the interesting half: `currency`
+    # (Currency is an enum — no dimension table exists) and trial_balance.period ↔
+    # balance_sheet.period (a shared conformed period, a fan trap, not an FK).
+    foreign_keys=(
+        ("journal_lines.entry_id", "journal_entries.entry_id"),
+        ("journal_lines.account_id", "chart_of_accounts.account_id"),
+        ("invoices.entry_id", "journal_entries.entry_id"),
+        ("payments.invoice_id", "invoices.invoice_id"),
+        ("bank_transactions.account_id", "chart_of_accounts.account_id"),
+        ("bank_transactions.payment_id", "payments.payment_id"),
+        ("trial_balance.account_id", "chart_of_accounts.account_id"),
+        ("balance_sheet.account_id", "chart_of_accounts.account_id"),
+        ("chart_of_accounts.parent_id", "chart_of_accounts.account_id"),
+    ),
 )
 
 OPERATING_CHAIN = Family(
@@ -162,6 +182,40 @@ OPERATING_CHAIN = Family(
         "units": "QTY",
         "name": "NM",
     },
+    foreign_keys=(
+        ("sales_orders.customer_id", "customers.customer_id"),
+        ("sales_order_lines.order_id", "sales_orders.order_id"),
+        ("sales_order_lines.product_id", "products.product_id"),
+        ("ar_invoices.order_id", "sales_orders.order_id"),
+        ("ar_invoices.customer_id", "customers.customer_id"),
+        ("receipts.ar_invoice_id", "ar_invoices.ar_invoice_id"),
+        ("receipts.customer_id", "customers.customer_id"),
+    ),
+)
+
+INVENTORY = Family(
+    name="inventory",
+    description="The stock subledger under GL 1400: movements at document grain, positions at period grain.",
+    tables=("stock_movements", "inventory_positions"),
+    primary_keys={
+        "stock_movements": "movement_id",
+        # inventory_positions is keyed by the compound (product, location, period).
+    },
+    natural_prefixes={"movement_id": "STK"},
+    legacy_names={
+        "movement_id": "STK_MVT",
+        "location_id": "LOC_ID",
+        "movement_type": "MVT_TYP",
+        "unit_cost": "UNIT_CST",
+        "units_on_hand": "QTY_OH",
+        "value": "VAL",
+        "source_document": "SRC_DOC",
+    },
+    foreign_keys=(
+        ("stock_movements.product_id", "products.product_id"),
+        ("stock_movements.entry_id", "journal_entries.entry_id"),
+        ("inventory_positions.product_id", "products.product_id"),
+    ),
 )
 
 PROBES = Family(
@@ -191,12 +245,22 @@ PROBES = Family(
     optional=True,
 )
 
-FAMILIES: tuple[Family, ...] = (CORE_LEDGER, OPERATING_CHAIN, PROBES)
+FAMILIES: tuple[Family, ...] = (CORE_LEDGER, OPERATING_CHAIN, INVENTORY, PROBES)
 
 
 def all_tables() -> tuple[str, ...]:
     """Every declared table, in family order."""
     return tuple(table for fam in FAMILIES for table in fam.tables)
+
+
+def default_tables() -> tuple[str, ...]:
+    """The tables every corpus carries — everything but the optional probe families.
+
+    This is the number a table-count assertion actually means. Spelling it as a
+    literal makes every such test a maintenance tax on the next family, and the tax
+    is paid in magic numbers that no longer say what they counted.
+    """
+    return tuple(table for fam in FAMILIES if not fam.optional for table in fam.tables)
 
 
 def _claims() -> dict[str, set[str]]:
@@ -238,3 +302,13 @@ def legacy_names() -> dict[str, str]:
     for fam in FAMILIES:
         merged.update(fam.legacy_names)
     return merged
+
+
+def foreign_keys() -> tuple[tuple[str, str], ...]:
+    """Every declared FK as ``(from_column, to_column)``, in family order.
+
+    The source of the FK topology `metadata_truth` publishes. Probe families are
+    included: their FKs are real when the shape materializes, and `metadata_truth`
+    already gates the role-play edges on the frames being present.
+    """
+    return tuple(fk for fam in FAMILIES for fk in fam.foreign_keys)

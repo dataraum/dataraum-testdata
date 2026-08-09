@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -26,7 +28,9 @@ from .models import (
     FinanceDataset,
     FormulaProbe,
     FXRate,
+    InventoryPosition,
     Invoice,
+    InvoiceCategory,
     InvoiceStatus,
     JournalEntry,
     JournalLine,
@@ -42,6 +46,8 @@ from .models import (
     RefEntity,
     SalesOrder,
     SalesOrderLine,
+    StockMovement,
+    StockMovementType,
     TrialBalance,
 )
 
@@ -133,6 +139,11 @@ def _month_end(year: int, month: int) -> date:
     return date(year, month + 1, 1) - timedelta(days=1)
 
 
+def _month_offset(fiscal_start: date, when: date) -> int:
+    """How many whole months *when* sits after the fiscal start."""
+    return (when.year - fiscal_start.year) * 12 + when.month - fiscal_start.month
+
+
 def _month_start_end(fiscal_start: date, month_offset: int) -> tuple[date, date]:
     """Return (first_day, last_day) for fiscal_start + month_offset months."""
     year = fiscal_start.year + (fiscal_start.month + month_offset - 1) // 12
@@ -188,6 +199,7 @@ class _Counters:
     invoice: int = 0
     payment: int = 0
     bank_txn: int = 0
+    movement: int = 0
 
     def next_entry(self) -> str:
         self.entry += 1
@@ -208,6 +220,10 @@ class _Counters:
     def next_bank_txn(self) -> str:
         self.bank_txn += 1
         return f"BT-{self.bank_txn:07d}"
+
+    def next_movement(self) -> str:
+        self.movement += 1
+        return f"STK-{self.movement:07d}"
 
 
 # --- Chart of Accounts ---
@@ -259,6 +275,11 @@ _ACCOUNT_TREE: list[tuple[str, str, AccountType, str | None]] = [
     # Expenses
     ("5000", "Expenses", AccountType.EXPENSE, None),
     ("5100", "Cost of Goods Sold", AccountType.EXPENSE, "5000"),
+    # A sibling of COGS, not a child of it: posting to a parent account while its
+    # children also carry postings is a real ERP shape but a muddy one, and the
+    # hierarchy truth would stop being a clean tree. Shrinkage is where the physical
+    # count disagrees with the book — the only inventory expense that is not a sale.
+    ("5150", "Inventory Shrinkage", AccountType.EXPENSE, "5000"),
     ("5200", "Salaries and Wages", AccountType.EXPENSE, "5000"),
     ("5210", "Salaries", AccountType.EXPENSE, "5200"),
     ("5220", "Benefits", AccountType.EXPENSE, "5200"),
@@ -536,7 +557,7 @@ def _generate_revenue_entries(
     fiscal_start: date,
     *,
     lever: Lever | None = None,
-) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord], dict[str, Decimal]]:
+) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord], dict[str, str]]:
     """Revenue and cost of sale, DERIVED from the order lines.
 
     Two GL entries per order, both derived rather than drawn:
@@ -548,9 +569,9 @@ def _generate_revenue_entries(
       random slice of vendor purchases with no link to any sale, so gross profit and
       every margin below it were ungradeable in principle.
 
-    Returns entries, lines, the sale records the receipt cycle consumes, and COGS
-    per fiscal month (which sizes inventory replenishment, so stock stays positive
-    and scales naturally under a volume lever).
+    Returns entries, lines, the sale records the receipt cycle consumes, and the
+    cost-of-sale entry per order — the link the stock subledger hangs its issue
+    movements off, so every issue names the GL posting it detailed.
 
     A ``price_level`` lever scales the realised unit price here — after every draw,
     exactly as before, so it remains an exact counterfactual. A ``volume`` lever acts
@@ -565,7 +586,7 @@ def _generate_revenue_entries(
     entries: list[JournalEntry] = []
     gl_lines: list[JournalLine] = []
     sales: list[_SaleRecord] = []
-    cogs_by_month: dict[str, Decimal] = {}
+    cogs_entry_by_order: dict[str, str] = {}
 
     price_factor = (
         Decimal(str(lever.factor))
@@ -578,11 +599,7 @@ def _generate_revenue_entries(
         if not rows:
             continue
         post = _stream(seed, "revenue_post", order.order_id)
-        month_key = order.order_date.strftime("%Y-%m")
-        month_offset = (
-            (order.order_date.year - fiscal_start.year) * 12
-            + order.order_date.month - fiscal_start.month
-        )
+        month_offset = _month_offset(fiscal_start, order.order_date)
         active = (
             price_factor is not None and lever is not None and month_offset >= lever.period_k
         )
@@ -657,7 +674,7 @@ def _generate_revenue_entries(
                     cost_center=cost_center,
                 )
             )
-            cogs_by_month[month_key] = cogs_by_month.get(month_key, Decimal("0.00")) + cost
+            cogs_entry_by_order[order.order_id] = cogs_entry
 
         sales.append(
             _SaleRecord(
@@ -670,7 +687,7 @@ def _generate_revenue_entries(
             )
         )
 
-    return entries, gl_lines, sales, cogs_by_month
+    return entries, gl_lines, sales, cogs_entry_by_order
 
 
 _TERMS_DAYS: dict[PaymentTerms, int] = {
@@ -738,49 +755,369 @@ def _settle_ar_invoices(
         )
 
 
-def _generate_inventory_replenishment(
-    seed: int,
-    cogs_by_month: dict[str, Decimal],
-    counters: _Counters,
-) -> tuple[list[JournalEntry], list[JournalLine]]:
-    """Stock purchases sized to the month's cost of sale: DR Inventory, CR AP.
+# --- Inventory: the stock subledger under GL 1400 ---
 
-    Without this the cost-of-sale leg would drive Inventory permanently negative and
-    the corpus would carry a defect we invented ourselves. Sizing it off the month's
-    COGS means stock scales naturally under a volume lever — the propagation a DGP
-    lever is supposed to have — and it gives ``dio`` and ``cash_conversion_cycle``
-    real data to bind to for the first time.
+_LOCATIONS = ["WH-MAIN", "WH-SOUTH"]
+_LOCATION_WEIGHTS = [70, 30]
+_SHRINKAGE_ACCOUNT = "5150"
+
+# Movements on the same day post in this order. Not cosmetic: a receipt landing after
+# the day's issues would drive on-hand negative on the fiscal year's first day, a
+# defect we would have invented ourselves.
+_MOVEMENT_RANK = {
+    StockMovementType.RECEIPT: 0,
+    StockMovementType.ISSUE: 1,
+    StockMovementType.ADJUSTMENT: 2,
+}
+
+
+@dataclass
+class _InventoryCycle:
+    """Everything the stock subledger produces, including its own payables."""
+
+    movements: list[StockMovement] = dataclass_field(default_factory=list)
+    positions: list[InventoryPosition] = dataclass_field(default_factory=list)
+    invoices: list[Invoice] = dataclass_field(default_factory=list)
+    payments: list[Payment] = dataclass_field(default_factory=list)
+    entries: list[JournalEntry] = dataclass_field(default_factory=list)
+    lines: list[JournalLine] = dataclass_field(default_factory=list)
+    bank_transactions: list[BankTransaction] = dataclass_field(default_factory=list)
+
+
+def _generate_inventory_cycle(
+    seed: int,
+    orders: list[SalesOrder],
+    order_lines: list[SalesOrderLine],
+    products: list[Product],
+    cogs_entry_by_order: dict[str, str],
+    fiscal_start: date,
+    months: int,
+    counters: _Counters,
+) -> _InventoryCycle:
+    """Stock movements, positions, and the supplier bills that actually get paid.
+
+    What this replaces and why. The previous replenishment posted one
+    ``DR Inventory / CR AP`` per month at 1.02–1.18 × the month's cost of sale and
+    nothing ever settled it: 95% of closing payables were permanently open and annual
+    DPO read 271 days. The credit leg dangled because there was no purchasing event
+    behind it — only a plug sized to make the asset side work.
+
+    Now every receipt IS a vendor bill (``category=goods``), so it flows through the
+    same payment cycle as every other payable, and *purchases* becomes a computable
+    quantity for the first time — the denominator a textbook DPO wants and the corpus
+    could not previously offer.
+
+    The policy is a designed coverage target, not a forecast: each (product, location)
+    holds roughly ``coverage`` months of its own average demand, replenished in whole
+    case-size batches. Stating it that way is deliberate — a synthetic generator may
+    use hindsight, but it must say so, because a consumer measuring "how good is this
+    firm's planning" would otherwise be measuring our omniscience.
+
+    Everything draws from entity-keyed streams, so a volume lever propagates into
+    stock (more sales → more issues → more receipts → more payables) without
+    perturbing any other cycle's draws.
     """
-    entries: list[JournalEntry] = []
-    lines: list[JournalLine] = []
-    for month_key in sorted(cogs_by_month):
-        cogs = cogs_by_month[month_key]
-        buy = _stream(seed, "replenish", month_key)
-        amount = _quantize(cogs * Decimal(str(round(buy.uniform(1.02, 1.18), 4))))
-        purchase_date = date(int(month_key[:4]), int(month_key[5:7]), buy.randint(2, 26))
+    cycle = _InventoryCycle()
+    order_date = {o.order_id: o.order_date for o in orders}
+    product_by_id = {p.product_id: p for p in products}
+
+    # ── Issues: one movement per order line ──
+    # Valued at the same standard cost the revenue cycle already posted to COGS, so
+    # Σ issue value == Σ COGS to the cent. No second GL entry: the issue movement is
+    # the subledger detail BEHIND the cost-of-sale entry, not another posting.
+    demand: dict[tuple[str, str, int], int] = {}
+    for line in order_lines:
+        entry_id = cogs_entry_by_order.get(line.order_id)
+        if entry_id is None:
+            continue
+        moved_on = order_date[line.order_id]
+        offset = _month_offset(fiscal_start, moved_on)
+        if not 0 <= offset < months:
+            continue
+        location = _stream(seed, "issue_location", line.order_line_id).choices(
+            _LOCATIONS, weights=_LOCATION_WEIGHTS
+        )[0]
+        product = product_by_id[line.product_id]
+        cycle.movements.append(
+            StockMovement(
+                movement_id="",
+                product_id=line.product_id,
+                location_id=location,
+                date=moved_on,
+                movement_type=StockMovementType.ISSUE,
+                units=-line.units,
+                unit_cost=product.standard_cost,
+                value=-line.line_cost,
+                source_document=line.order_line_id,
+                entry_id=entry_id,
+            )
+        )
+        key = (line.product_id, location, offset)
+        demand[key] = demand.get(key, 0) + line.units
+
+    # ── Replenishment and cycle counts, per (product, location) ──
+    for product in products:
+        for location in _LOCATIONS:
+            monthly = [demand.get((product.product_id, location, m), 0) for m in range(months)]
+            if sum(monthly) == 0:
+                continue
+            _replenish_one_stock(
+                seed, cycle, product, location, monthly, fiscal_start, months, counters
+            )
+
+    # ── Age and settle the goods payables ──
+    # The whole point of the family. A goods bill is never CANCELLED: the pallet is on
+    # the dock and the movement is on the books, so "this line was never really
+    # bought" is a story the stock ledger already contradicts.
+    fiscal_end = _month_start_end(fiscal_start, months - 1)[1]
+    for bill in cycle.invoices:
+        aging = _stream(seed, "goods_aging", bill.invoice_id)
+        status = _aged_invoice_status(
+            aging, (fiscal_end - bill.date).days, _TERMS_DAYS[bill.payment_terms]
+        )
+        bill.status = InvoiceStatus.PAID if status == InvoiceStatus.CANCELLED else status
+
+    payments, pay_entries, pay_lines, pay_bank = _generate_vendor_payments(
+        lambda inv: _stream(seed, "goods_payment", inv.invoice_id),
+        cycle.invoices,
+        counters,
+    )
+    cycle.payments.extend(payments)
+    cycle.entries.extend(pay_entries)
+    cycle.lines.extend(pay_lines)
+    cycle.bank_transactions.extend(pay_bank)
+
+    # ── Movement ids, minted after the whole ledger is ordered ──
+    cycle.movements.sort(
+        key=lambda m: (m.date, _MOVEMENT_RANK[m.movement_type], m.product_id, m.location_id, m.source_document)
+    )
+    for movement in cycle.movements:
+        movement.movement_id = counters.next_movement()
+
+    return cycle
+
+
+def _replenish_one_stock(
+    seed: int,
+    cycle: _InventoryCycle,
+    product: Product,
+    location: str,
+    monthly_demand: list[int],
+    fiscal_start: date,
+    months: int,
+    counters: _Counters,
+) -> None:
+    """Plan, receive, count and value one (product, location) across the year.
+
+    Appends receipts, adjustments, their GL and their vendor bills to *cycle*, and
+    emits one :class:`InventoryPosition` per period — the closing level, which is why
+    it is written even for a month with no movement at all.
+    """
+    policy = _stream(seed, "stock_policy", product.product_id, location)
+    average = sum(monthly_demand) / months
+    coverage = policy.uniform(0.8, 1.4)
+    target_close = int(round(coverage * average))
+    batch = max(1, int(round(average * 0.25)))
+    vendor_name = _stream(seed, "product_vendor", product.product_id).choice(VENDOR_NAMES)
+    vendor_id = f"V-{VENDOR_NAMES.index(vendor_name) + 1:04d}"
+
+    on_hand = 0
+    for offset in range(months):
+        m_start, _m_end = _month_start_end(fiscal_start, offset)
+        issued = monthly_demand[offset]
+
+        shortfall = issued + target_close - on_hand
+        received = 0
+        if shortfall > 0:
+            received = math.ceil(shortfall / batch) * batch
+            _receive_stock(
+                seed, cycle, product, location, received, offset, m_start,
+                vendor_id, vendor_name, counters,
+            )
+        on_hand += received - issued
+
+        # Quarterly cycle count — the only inventory expense that is not a sale.
+        if offset % 3 == 2 and on_hand > 0:
+            on_hand += _count_stock(
+                seed, cycle, product, location, on_hand, offset, fiscal_start, counters
+            )
+
+        cycle.positions.append(
+            InventoryPosition(
+                product_id=product.product_id,
+                location_id=location,
+                period=m_start.strftime("%Y-%m"),
+                units_on_hand=on_hand,
+                unit_cost=product.standard_cost,
+                value=_quantize(product.standard_cost * on_hand),
+            )
+        )
+
+
+def _receive_stock(
+    seed: int,
+    cycle: _InventoryCycle,
+    product: Product,
+    location: str,
+    units: int,
+    offset: int,
+    m_start: date,
+    vendor_id: str,
+    vendor_name: str,
+    counters: _Counters,
+) -> None:
+    """One month's replenishment, delivered on one or two vendor bills.
+
+    Each delivery is a real payable: an ``Invoice`` row with ``category=goods``, a
+    ``DR Inventory / CR AP`` entry, and — when the aging says so — a payment through
+    the ordinary vendor-payment cycle. Splitting into deliveries is not decoration:
+    one bill per product-month would make every goods payable land on the same day
+    and DPO would measure the calendar rather than the firm.
+    """
+    plan = _stream(seed, "stock_receipt", product.product_id, location, offset)
+    n_deliveries = plan.choices([1, 2], weights=[45, 55])[0]
+    splits = [units] if n_deliveries == 1 else _split_units(plan, units)
+
+    for i, delivery_units in enumerate(splits):
+        if delivery_units <= 0:
+            continue
+        # The fiscal year's first receipt lands on day one: opening stock has to be
+        # there before the first order ships out of it.
+        if offset == 0 and i == 0:
+            received_on = m_start
+        else:
+            received_on = m_start + timedelta(days=plan.randint(0, 3) + 12 * i)
+        value = _quantize(product.standard_cost * delivery_units)
+
+        invoice_id = counters.next_invoice()
+        bill = _stream(seed, "goods_bill", invoice_id)
+        terms = bill.choice(list(PaymentTerms))
         entry_id = counters.next_entry()
-        entries.append(
+        cycle.invoices.append(
+            Invoice(
+                invoice_id=invoice_id,
+                vendor_id=vendor_id,
+                date=received_on,
+                due_date=received_on + timedelta(days=_TERMS_DAYS[terms]),
+                amount=value,
+                status=InvoiceStatus.OPEN,  # set from the aging below
+                payment_terms=terms,
+                category=InvoiceCategory.GOODS,
+                entry_id=entry_id,
+            )
+        )
+        cycle.entries.append(
             JournalEntry(
                 entry_id=entry_id,
-                date=purchase_date,
-                description=f"Inventory replenishment - {month_key}",
+                date=received_on,
+                description=f"Goods receipt - {product.name} - {location} - {invoice_id}",
                 status=JournalStatus.POSTED,
-                created_by=buy.choice(USERS),
+                created_by=bill.choice(USERS),
             )
         )
-        lines.append(
+        cycle.lines.append(
             JournalLine(
                 line_id=counters.next_line(), entry_id=entry_id,
-                account_id=_INVENTORY_ACCOUNT, debit=amount, credit=Decimal("0.00"),
+                account_id=_INVENTORY_ACCOUNT, debit=value, credit=Decimal("0.00"),
             )
         )
-        lines.append(
+        cycle.lines.append(
             JournalLine(
                 line_id=counters.next_line(), entry_id=entry_id,
-                account_id=buy.choice(_AP_ACCOUNTS), debit=Decimal("0.00"), credit=amount,
+                account_id=bill.choice(_AP_ACCOUNTS), debit=Decimal("0.00"), credit=value,
             )
         )
-    return entries, lines
+        cycle.movements.append(
+            StockMovement(
+                movement_id="",
+                product_id=product.product_id,
+                location_id=location,
+                date=received_on,
+                movement_type=StockMovementType.RECEIPT,
+                units=delivery_units,
+                unit_cost=product.standard_cost,
+                value=value,
+                source_document=invoice_id,
+                entry_id=entry_id,
+            )
+        )
+
+
+def _split_units(draw: random.Random, units: int) -> list[int]:
+    """Split a receipt across two deliveries, the larger one first."""
+    first = max(1, int(round(units * draw.uniform(0.45, 0.75))))
+    return [min(first, units), units - min(first, units)]
+
+
+def _count_stock(
+    seed: int,
+    cycle: _InventoryCycle,
+    product: Product,
+    location: str,
+    on_hand: int,
+    offset: int,
+    fiscal_start: date,
+    counters: _Counters,
+) -> int:
+    """A quarterly physical count. Returns the unit delta it wrote to the books.
+
+    Mostly shrinkage (DR 5150 / CR 1400); occasionally the count finds more than the
+    book says, which posts the other way. Both directions matter: a corpus where the
+    only adjustment sign is negative makes "is this an adjustment?" answerable from
+    the sign alone.
+    """
+    count = _stream(seed, "stock_count", product.product_id, location, offset)
+    if count.random() >= 0.35:
+        return 0
+    delta = -int(round(on_hand * count.uniform(0.002, 0.015)))
+    if count.random() < 0.20:
+        delta = -delta
+    if delta == 0:
+        return 0
+
+    counted_on = _month_start_end(fiscal_start, offset)[1]
+    value = _quantize(product.standard_cost * abs(delta))
+    entry_id = counters.next_entry()
+    document = f"CNT-{product.product_id}-{location}-{offset:02d}"
+    cycle.entries.append(
+        JournalEntry(
+            entry_id=entry_id,
+            date=counted_on,
+            description=f"Cycle count adjustment - {product.name} - {location}",
+            status=JournalStatus.POSTED,
+            created_by=count.choice(USERS),
+        )
+    )
+    shrink = delta < 0
+    cycle.lines.append(
+        JournalLine(
+            line_id=counters.next_line(), entry_id=entry_id,
+            account_id=_SHRINKAGE_ACCOUNT if shrink else _INVENTORY_ACCOUNT,
+            debit=value, credit=Decimal("0.00"),
+        )
+    )
+    cycle.lines.append(
+        JournalLine(
+            line_id=counters.next_line(), entry_id=entry_id,
+            account_id=_INVENTORY_ACCOUNT if shrink else _SHRINKAGE_ACCOUNT,
+            debit=Decimal("0.00"), credit=value,
+        )
+    )
+    cycle.movements.append(
+        StockMovement(
+            movement_id="",
+            product_id=product.product_id,
+            location_id=location,
+            date=counted_on,
+            movement_type=StockMovementType.ADJUSTMENT,
+            units=delta,
+            unit_cost=product.standard_cost,
+            value=value if delta > 0 else -value,
+            source_document=document,
+            entry_id=entry_id,
+        )
+    )
+    return delta
 
 
 def _generate_cash_receipts(
@@ -898,6 +1235,32 @@ def _generate_cash_receipts(
 # --- Expenditure Cycle: Purchase Invoices → Vendor Payments ---
 
 
+def _aged_invoice_status(
+    draw: random.Random, days_since: int, terms_days: int
+) -> InvoiceStatus:
+    """Settlement status from the bill's age at fiscal close.
+
+    Shared by both payable populations — the expense bills the ledger draws
+    sequentially and the goods bills the stock subledger draws from entity-keyed
+    streams — so the two age by the same rule and DPO is not an artifact of which
+    cycle minted the invoice.
+    """
+    if days_since > terms_days + 30:
+        return draw.choices(
+            [InvoiceStatus.PAID, InvoiceStatus.CANCELLED],
+            weights=[95, 5],
+        )[0]
+    if days_since > terms_days:
+        return draw.choices(
+            [InvoiceStatus.PAID, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIAL],
+            weights=[70, 20, 10],
+        )[0]
+    return draw.choices(
+        [InvoiceStatus.OPEN, InvoiceStatus.PAID],
+        weights=[60, 40],
+    )[0]
+
+
 def _generate_purchase_invoices(
     rng: random.Random,
     fiscal_start: date,
@@ -908,12 +1271,14 @@ def _generate_purchase_invoices(
 ) -> tuple[list[Invoice], list[JournalEntry], list[JournalLine]]:
     """Generate vendor/purchase invoices with GL entries: DR Expense, CR AP."""
     leaf = _get_leaf_accounts()
-    # COGS is EXCLUDED: cost of goods sold is now derived from order lines
-    # (units x standard_cost) and posted by the revenue cycle. Letting vendor invoices
-    # land here too would make account 5100 a mix of real cost-of-sale and random
-    # purchases — ambiguous, and the reason gross profit was ungradeable before.
-    # Goods purchases reach the books as Inventory via replenishment instead.
-    expense_accounts = [a for a in leaf.get(AccountType.EXPENSE, []) if a != _COGS_ACCOUNT]
+    # COGS and shrinkage are EXCLUDED: both are derived from real events — cost of
+    # sale from the order line (units x standard_cost), shrinkage from a physical
+    # count that disagreed with the book. Letting random vendor invoices land there
+    # too would make 5100 a mix of cost-of-sale and unrelated purchases (the reason
+    # gross profit was ungradeable before) and would turn 5150 into a number that
+    # says nothing about stock at all. Goods purchases reach the books as Inventory.
+    derived_only = {_COGS_ACCOUNT, _SHRINKAGE_ACCOUNT}
+    expense_accounts = [a for a in leaf.get(AccountType.EXPENSE, []) if a not in derived_only]
 
     invoices: list[Invoice] = []
     entries: list[JournalEntry] = []
@@ -947,21 +1312,7 @@ def _generate_purchase_invoices(
 
         # Status depends on age relative to fiscal end
         days_since = (fiscal_end - inv_date).days
-        if days_since > terms_days[terms] + 30:
-            status = rng.choices(
-                [InvoiceStatus.PAID, InvoiceStatus.CANCELLED],
-                weights=[95, 5],
-            )[0]
-        elif days_since > terms_days[terms]:
-            status = rng.choices(
-                [InvoiceStatus.PAID, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIAL],
-                weights=[70, 20, 10],
-            )[0]
-        else:
-            status = rng.choices(
-                [InvoiceStatus.OPEN, InvoiceStatus.PAID],
-                weights=[60, 40],
-            )[0]
+        status = _aged_invoice_status(rng, days_since, terms_days[terms])
 
         invoice_id = counters.next_invoice()
         inv = Invoice(
@@ -1022,11 +1373,18 @@ def _generate_purchase_invoices(
 
 
 def _generate_vendor_payments(
-    rng: random.Random,
+    draw_for: Callable[[Invoice], random.Random],
     invoices: list[Invoice],
     counters: _Counters,
 ) -> tuple[list[Payment], list[JournalEntry], list[JournalLine], list[BankTransaction]]:
-    """Generate vendor payment events: DR AP, CR Cash + Bank Txn (debit)."""
+    """Generate vendor payment events: DR AP, CR Cash + Bank Txn (debit).
+
+    *draw_for* supplies the stream each invoice draws from, which is the whole reason
+    this is a parameter. The expense cycle hands back the ledger's shared sequential
+    ``rng``; the stock subledger hands back a stream keyed on the bill's own id, so a
+    volume lever can add goods payables without shifting a single expense-side draw.
+    Both populations otherwise settle by identical rules.
+    """
     payments: list[Payment] = []
     entries: list[JournalEntry] = []
     lines_out: list[JournalLine] = []
@@ -1039,6 +1397,7 @@ def _generate_vendor_payments(
         if inv.status not in (InvoiceStatus.PAID, InvoiceStatus.PARTIAL):
             continue
 
+        rng = draw_for(inv)
         pay_date = inv.date + timedelta(days=rng.randint(1, 45))
 
         if inv.status == InvoiceStatus.PARTIAL:
@@ -1777,7 +2136,7 @@ def generate_finance_dataset(
 
     # Vendor payments → Payment + GL + Bank (DR: AP, CR: Cash)
     payments, pay_entries, pay_lines, pay_bank = _generate_vendor_payments(
-        rng,
+        lambda _inv: rng,
         invoices,
         counters,
     )
@@ -1808,12 +2167,9 @@ def generate_finance_dataset(
     # between a same-seed pair. Last means the extra ids land at the end and nothing
     # before them moves. (A separate id prefix would also work but puts two formats
     # in one column — a self-inflicted format-consistency false positive on clean.)
-    sale_entries, sale_lines, sale_records, cogs_by_month = _generate_revenue_entries(
+    sale_entries, sale_lines, sale_records, cogs_entry_by_order = _generate_revenue_entries(
         seed, sales_orders, sales_order_lines, customers, products, counters,
         fiscal_start, lever=lever,
-    )
-    stock_entries, stock_lines = _generate_inventory_replenishment(
-        seed, cogs_by_month, counters
     )
     receipt_entries, receipt_lines, receipt_bank, receipts = _generate_cash_receipts(
         seed, sale_records, fiscal_start, months, counters,
@@ -1823,16 +2179,27 @@ def generate_finance_dataset(
     )
     _settle_ar_invoices(ar_invoices, receipts)
 
+    # ── The stock subledger, minted last of all ──
+    # It consumes the cost-of-sale entries, so it cannot run earlier; and it mints
+    # invoices, payments and bank transactions of its own, so running it last keeps
+    # every id the expenditure cycle already handed out exactly where it was.
+    stock = _generate_inventory_cycle(
+        seed, sales_orders, sales_order_lines, products, cogs_entry_by_order,
+        fiscal_start, months, counters,
+    )
+
     # ── Assembly ──
     all_entries = (
         inv_entries + pay_entries + op_entries + misc_entries
-        + sale_entries + stock_entries + receipt_entries
+        + sale_entries + receipt_entries + stock.entries
     )
     all_lines = (
         inv_lines + pay_lines + op_lines + misc_lines
-        + sale_lines + stock_lines + receipt_lines
+        + sale_lines + receipt_lines + stock.lines
     )
-    all_bank = receipt_bank + pay_bank + op_bank + misc_bank
+    all_bank = receipt_bank + pay_bank + op_bank + misc_bank + stock.bank_transactions
+    invoices = invoices + stock.invoices
+    payments = payments + stock.payments
 
     # Sort by date for chronological ordering
     all_entries.sort(key=lambda e: (e.date, e.entry_id))
@@ -1876,4 +2243,6 @@ def generate_finance_dataset(
         sales_order_lines=sales_order_lines,
         ar_invoices=ar_invoices,
         receipts=receipts,
+        stock_movements=stock.movements,
+        inventory_positions=stock.positions,
     )

@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from testdata.families import foreign_keys
 from testdata.schema_transforms import ColumnStyle, restyle_column_name
 
 if TYPE_CHECKING:
@@ -190,6 +191,14 @@ _STOCK_FLOW: dict[str, str] = {
     "trial_balance.credit_balance": "additive",
     "balance_sheet.ending_balance": "point_in_time",
     "fx_rates.rate": "point_in_time",
+    # The inventory family — the corpus's second stock/flow PAIR, and a sharper one
+    # than the balance tables: the movement and the position sit in different tables
+    # over the same key space, so nothing but meaning separates "how much moved" from
+    # "how much is there". Signed movement units sum across time; on-hand does not.
+    "stock_movements.units": "additive",
+    "stock_movements.value": "additive",
+    "inventory_positions.units_on_hand": "point_in_time",
+    "inventory_positions.value": "point_in_time",
 }
 
 # Measures that reconcile against a finer event fact via the structural
@@ -199,25 +208,32 @@ _RECONCILES_STRUCTURALLY: list[str] = [
     "trial_balance.debit_balance",
     "trial_balance.credit_balance",
     "balance_sheet.ending_balance",
+    # The inventory position reconciles `cumulative` against its movements, exactly as
+    # balance_sheet does against journal_lines — the same witness over a second,
+    # independent subledger.
+    "inventory_positions.units_on_hand",
+    "inventory_positions.value",
 ]
 
+# Which finer fact a measure reconciles against, when it is NOT the ledger's event
+# fact. A position is the cumulative sum of stock_movements at its own (product,
+# location) key and only incidentally equal to a GL balance, so pointing its lineage
+# at journal_lines would name the wrong finer grain. Keyed at canonical names;
+# measures absent here fall back to the corpus's event fact.
+_SUBLEDGER_EVENT_FACT: dict[str, str] = {
+    "inventory_positions.units_on_hand": "stock_movements",
+    "inventory_positions.value": "stock_movements",
+}
+
 # --- FK topology --------------------------------------------------
-# The generator's TRUE FK topology from the models' FK docstrings (not from what the
-# LLM accepted — that would be circular). Enumerates every FK-bearing column across
-# the 9 source tables. Deliberately EXCLUDES two near-misses: `currency` (Currency is
-# an enum, no dimension table exists) and trial_balance.period ↔ balance_sheet.period
-# (a shared conformed period dimension / fan trap, not an FK — the false
-# positive the precision test catches).
+# The generator's TRUE FK topology, read from the family registry rather than
+# re-listed here. That is the point: the operating chain shipped for a whole release
+# without its FKs in this file, because a second list is a second thing to forget. A
+# family now declares its joins where it declares its tables, and this file publishes
+# what it finds. The registry also records what is deliberately absent — `currency`
+# (an enum, no dimension table) and the trial_balance/balance_sheet period fan trap.
 _RELATIONSHIPS: list[dict[str, str]] = [
-    {"from": "journal_lines.entry_id", "to": "journal_entries.entry_id"},
-    {"from": "journal_lines.account_id", "to": "chart_of_accounts.account_id"},
-    {"from": "invoices.entry_id", "to": "journal_entries.entry_id"},
-    {"from": "payments.invoice_id", "to": "invoices.invoice_id"},
-    {"from": "bank_transactions.account_id", "to": "chart_of_accounts.account_id"},
-    {"from": "bank_transactions.payment_id", "to": "payments.payment_id"},
-    {"from": "trial_balance.account_id", "to": "chart_of_accounts.account_id"},
-    {"from": "balance_sheet.account_id", "to": "chart_of_accounts.account_id"},
-    {"from": "chart_of_accounts.parent_id", "to": "chart_of_accounts.account_id"},
+    {"from": source, "to": target} for source, target in foreign_keys()
 ]
 
 # --- table + column roles -----------------------------------------
@@ -230,6 +246,9 @@ _TABLE_ROLES: dict[str, list[str]] = {
         "trial_balance", "balance_sheet",
         # operating chain: each carries its own measures at its own grain.
         "sales_order_lines", "ar_invoices", "receipts",
+        # inventory: the movement is an event fact, the position a periodic snapshot
+        # fact — both measure-bearing, neither a reference table.
+        "stock_movements", "inventory_positions",
     ],
     "dimensions": ["chart_of_accounts", "customers"],
     # Reported, never asserted — structurally debatable by this truth's OWN rule
@@ -268,6 +287,13 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         # already-declared fx_rates.rate — a rate living on a reference row.
         "products.standard_cost",
         "products.list_price",
+        # inventory. `unit_cost` is a rate on both tables, like the product prices.
+        "stock_movements.units",
+        "stock_movements.unit_cost",
+        "stock_movements.value",
+        "inventory_positions.units_on_hand",
+        "inventory_positions.unit_cost",
+        "inventory_positions.value",
     ],
     "timestamp": [
         "journal_entries.date",
@@ -283,6 +309,10 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         "ar_invoices.invoice_date",
         "ar_invoices.due_date",
         "receipts.receipt_date",
+        # inventory. `inventory_positions.period` is the same shape as the balance
+        # tables' period: a period label, not a date.
+        "stock_movements.date",
+        "inventory_positions.period",
     ],
 }
 
@@ -326,6 +356,14 @@ _MEASURED_IN: dict[str, str | None] = {
     # — the same shape as invoices/payments.
     "ar_invoices.amount": "ar_invoices.currency",
     "receipts.amount": "receipts.currency",
+    # inventory. Money columns only, and no in-table currency column to bind them to.
+    # The quantity columns (`units`, `units_on_hand`) are outside this map entirely —
+    # it pairs MONETARY measures with their denomination, and a count of pieces has no
+    # currency to be denominated in. Same treatment as sales_order_lines.units.
+    "stock_movements.unit_cost": None,
+    "stock_movements.value": None,
+    "inventory_positions.unit_cost": None,
+    "inventory_positions.value": None,
 }
 _DIMENSIONLESS: frozenset[str] = frozenset({"fx_rates.rate"})
 
@@ -376,6 +414,7 @@ def _build_reconciles_with(
     required: dict[str, str],
     reconciles_structurally: list[str],
     event_table: str | None,
+    table_mapping: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The expected post-P2 ``reconciles_with`` edge set — derived, never authored.
 
@@ -393,15 +432,14 @@ def _build_reconciles_with(
       tables; a concept whose bindings collapse into ONE relation after a merge
       is dropped (nothing left to reconcile).
     """
-    lineage = (
-        []
-        if event_table is None
-        else [
-            {"measure": measure, "event_table": event_table}
-            for measure in reconciles_structurally
-            if measure.partition(".")[0] != event_table
-        ]
-    )
+    tm = table_mapping or {}
+    lineage: list[dict[str, Any]] = []
+    for measure in reconciles_structurally:
+        subledger = _SUBLEDGER_EVENT_FACT.get(measure)
+        fact = _remap_table(subledger, tm) if subledger is not None else event_table
+        if fact is None or measure.partition(".")[0] == fact:
+            continue
+        lineage.append({"measure": measure, "event_table": fact})
     fan_in: dict[str, set[str]] = {}
     for col, concept in required.items():
         fan_in.setdefault(concept, set()).add(col.partition(".")[0])
@@ -533,6 +571,8 @@ _LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
         "products": "mega_table",
         "ar_invoices": "mega_table",
         "receipts": "mega_table",
+        "stock_movements": "mega_table",
+        "inventory_positions": "mega_table",
     },
 }
 
@@ -772,6 +812,7 @@ def remap_metadata_truth(
         out["business_concepts"]["required"],
         out["reconciles_structurally"],
         None if _EVENT_FACT in removed else _remap_table(_EVENT_FACT, tm),
+        tm,
     )
 
     # relationships: remap both endpoints; drop cross-table FKs that a merge collapsed

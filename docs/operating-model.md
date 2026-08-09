@@ -38,7 +38,7 @@ provenance of the *shape*; generating the values is the point.
 | :-- | :-- | :-- | :-- |
 | **Demand** — your customers | customer, segment, region, order, order line | `customers`, `sales_orders`, `sales_order_lines`, `ar_invoices`, `receipts` | **lit** — DB1 per customer is exact |
 | **Offer** — what you sell | product, product group, price list | `products` (standard_cost, list_price) | **lit** — DB1 per product group is exact; price realization derivable |
-| **Capital** — where cash sits | receivable, payable, inventory position, WIP | AR + AP + `balance_sheet`; GL account 1400 moves | **partial** — no stock ledger, and the payable inventory creates is never settled (§7, S1) |
+| **Capital** — where cash sits | receivable, payable, inventory position, WIP | AR + AP + `balance_sheet` + `stock_movements`, `inventory_positions` | **lit** — CCC = DIO + DSO − DPO is gradeable at both grains; no WIP until Throughput |
 | **Supply** — your suppliers | supplier, PO, PO line, goods receipt, claim | none — `invoices.vendor_id` is a bare string | **dark** |
 | **Capacity** — what you run on | asset, site, line, shift, downtime, maintenance order | none | **dark** |
 | **Throughput** — how work flows | work order, operation, step, scrap, team | none | **dark** |
@@ -71,12 +71,21 @@ ambiguity: `order_id` is claimed by both the sales order and the role-play probe
 unrelated id spaces, so key strategies now leave it alone rather than fuse two populations
 into one.
 
+The registry then absorbed **FK topology** for the same reason. `metadata_truth`
+re-listed the joins in a second place, and the operating chain had shipped without its
+seven — `sales_orders.customer_id`, `sales_order_lines.order_id` and the rest were absent
+from the published structural truth for as long as they were absent from the key maps. A
+family now declares its joins where it declares its tables. Table-count assertions in the
+tests read `default_tables()` too, so a new family no longer costs a round of magic-number
+edits across five test files.
+
 Still to come, and the reason this is only half of S0:
 
 | Site | Hardcoding | State |
 | :-- | :-- | :-- |
 | `export.TABLE_NAMES` | a literal list of finance tables | **registry** |
 | `schema_transforms` | `_KEY_COLUMNS`, `_NATURAL_KEYS`, `_LEGACY_NAMES` | **registry** |
+| `metadata_truth._RELATIONSHIPS` | the FK topology re-listed away from the tables | **registry** |
 | `schema_transforms` | the merge/inline functions name finance tables | open |
 | `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
 | `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob | open |
@@ -118,9 +127,29 @@ This is the only structural work that is not a family. It should land before Sup
 The durable part of this document. Each family names its shape reference, its tables, the
 GL it posts, the metrics it lights, the truth it must export, and the levers it enables.
 
-### S1 · Inventory — completes Capital
+### S1 · Inventory — completes Capital · **shipped**
 
 *Shape reference: AdventureWorks `ProductInventory` + `TransactionHistory`.*
+
+Shipped as specified below, with three decisions worth recording because they were not
+obvious from the spec:
+
+- **Movements are signed.** `units` and `value` are positive on a receipt and negative on
+  an issue, so the roll-forward is a plain `SUM` rather than a case expression over
+  `movement_type` — which is also what makes the movement table a genuine additive flow
+  against the position's stock. The corpus's second stock/flow pair, and a sharper one
+  than the balance tables: same key space, different tables, only meaning separating them.
+- **Two locations, not one.** `location_id` over a single warehouse is a degenerate column
+  that teaches nothing; the roll-forward and the GL tie both hold per location.
+- **Receipts post before issues on the same day.** Ordering, not decoration: without it
+  the fiscal year's first orders ship stock that has not arrived and on-hand goes negative
+  on day one — a defect we would have invented ourselves.
+
+The replenishment policy is a **designed coverage target**, not a forecast: each (product,
+location) holds ~0.8–1.4 months of its own average demand, replenished in whole case-size
+batches. Stated that way deliberately — a synthetic generator may use hindsight, but it
+has to say so, or a consumer measuring "how good is this firm's planning" is measuring our
+omniscience instead.
 
 - `stock_movements` — `movement_id`, `product_id`, `location_id`, `date`,
   `movement_type` (receipt | issue | adjustment), `units`, `unit_cost`, `value`, and the
@@ -300,25 +329,32 @@ consumer holding a stale directory must be able to detect that, and today it can
 
 ## 7. Known defects
 
-**The inventory replenishment payable is never settled.** `_generate_inventory_replenishment`
-posts `DR Inventory / CR AP` once a month at 1.02–1.18 × the month's COGS, and no payment
-cycle ever clears it. Measured on `month-end-close / clean / seed 42 / 12 months`:
+**~~The inventory replenishment payable is never settled.~~ Fixed in S1.** The old
+replenishment posted `DR Inventory / CR AP` once a month at 1.02–1.18 × the month's COGS
+with no purchasing event behind it, so nothing ever cleared it. Every receipt is now a
+vendor bill that ages and settles like any other. On `month-end-close / clean / seed 42 /
+12 months`:
 
-| | value |
-| :-- | --: |
-| ending AP (GL net) | 49,033,085.45 |
-| … of which unsettled replenishment credits (12 entries) | 46,598,016.72 |
-| … ever debited back | 0.00 |
-| annual DPO | 271.1 days |
-| gross profit (revenue − all expenses) | −3,635,249.05 |
+| | before | after |
+| :-- | --: | --: |
+| ending AP (fiscal-window) | 49,033,085.45 | 11,443,737.61 |
+| … of which never debited back | 46,598,016.72 | 0.00 |
+| annual DPO | 271.1 days | 59.2 days (purchases) / 62.4 (expenses) |
+| annual DIO | — | 38.4 days |
+| annual CCC | ungradeable | 71.4 days |
 
-DB1 per product group is simultaneously ~+20.5M, so the corpus states that the firm has
-healthy unit economics and a negative P&L, with 95% of its payables permanently open. The
-inventory *asset* side is sound (closing 3.83M against COGS 42.77M ≈ 33 days). Only the
-credit leg dangles.
+*Purchases* also became a computable quantity in the process — it needs goods bills to be
+separable from expense bills, which is why the pinned DPO could not use it before.
 
-This is S1's first fix, and it is why S1 is first: the honest way to settle those payables
-is the supplier side, which is Supply's first vertebra.
+**The expense base is sized independently of the firm.** Gross profit is −3,660,147.05
+while DB1 per product group is ~+20.5M: revenue 63.3M less COGS 42.8M leaves 20.5M of
+contribution, against 24.2M of operating expense drawn from a *fixed* 3,000 vendor
+invoices plus fixed monthly payroll and rent. Those counts do not move with the size of
+the business, so the P&L sign is an artifact of a knob rather than a property of the firm
+— and at the `mid` profile the same knob would make the firm implausibly profitable
+instead. This is **§9's** problem, not the payable's: the fix is to size the expense base
+off a scale anchor, which is exactly what a scale profile has to declare. Until then, take
+gross profit and free cash flow as ungraded.
 
 **Master data is thin for the ladders it now carries.** 16 customers and 9 products across
 4 product groups will not support customer-concentration, portfolio-tail or peer-comparison
@@ -379,7 +415,8 @@ case they actually fail on.
 | | Work | Exit criterion |
 | :-- | :-- | :-- |
 | **S0** | The prune (§8) and the family registry (§3) | a family is added without editing export, schema transforms, ground truth and the runner |
-| **S1** | Inventory + settle the replenishment payable | DPO returns to a sane band; CCC = DIO + DSO − DPO gradeable monthly and annually; the roll-forward invariant holds |
+| **S1** ✅ | Inventory + settle the replenishment payable | **met** — DPO 271 → 59.2 days; CCC gradeable monthly and annually; roll-forward and the GL tie hold per product, location and period |
+| **S1a** | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | `tiny`/`mid`/`large` selectable; gross profit stops being an artifact of a fixed invoice count (§7) |
 | **S1b** | Oracle contract v2 (§5) | every metric carries its definition and variants; a consumer's alternative grades as a named variant, not as an unexplained delta |
 | **S2** | Supply | OTIF, price variance, lead-time spread and effective cost per unit gradeable per supplier; three-way match exists with a declared exception rate |
 | **S3** | Capacity | cost per capacity hour and utilization gradeable per asset against a declared ceiling; depreciation becomes asset-derived |

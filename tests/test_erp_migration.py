@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from testdata.families import default_tables
 from testdata.scenarios.erp_migration import run_scenario
 
 
@@ -35,7 +36,7 @@ def test_erp_uses_partial_normalization():
     assert "journal_entries" not in tables
     assert "invoices" not in tables
     assert "payments" not in tables
-    assert len(tables) == 12  # partial: 6 + balance_sheet + the operating chain
+    assert len(tables) == len(default_tables()) - 3  # partial folds three header/item pairs
 
 
 def test_erp_export_creates_files():
@@ -54,7 +55,7 @@ def test_erp_export_creates_files():
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
         assert manifest["parameters"]["scenario"] == "erp-migration"
-        assert len(manifest["files"]) == 12  # partial + balance_sheet + the operating chain
+        assert len(manifest["files"]) == len(default_tables()) - 3
 
 
 def test_erp_deterministic():

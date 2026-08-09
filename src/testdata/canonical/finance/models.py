@@ -53,6 +53,25 @@ class PaymentTerms(StrEnum):
     DUE_ON_RECEIPT = "due_on_receipt"
 
 
+class InvoiceCategory(StrEnum):
+    """What a vendor bill bought — the split DPO's denominator depends on.
+
+    ``goods`` bills debit Inventory and are the *purchases* a textbook DPO divides by;
+    ``expense`` bills debit an expense account directly. Before the inventory family
+    the corpus had only the second kind, so "purchases" was not a computable quantity
+    and every DPO had to fall back on total expenses.
+    """
+
+    EXPENSE = "expense"
+    GOODS = "goods"
+
+
+class StockMovementType(StrEnum):
+    RECEIPT = "receipt"
+    ISSUE = "issue"
+    ADJUSTMENT = "adjustment"
+
+
 class ChartOfAccounts(BaseModel):
     account_id: str = Field(description="Unique account identifier, e.g. '1000'")
     name: str = Field(description="Human-readable account name")
@@ -103,6 +122,10 @@ class Invoice(BaseModel):
     currency: Currency = Currency.USD
     status: InvoiceStatus = InvoiceStatus.OPEN
     payment_terms: PaymentTerms = PaymentTerms.NET_30
+    category: InvoiceCategory = Field(
+        default=InvoiceCategory.EXPENSE,
+        description="What the bill bought — goods bills are the purchases DPO divides by",
+    )
     entry_id: str | None = Field(default=None, description="FK to JournalEntry (None for cancelled)")
 
 
@@ -336,6 +359,49 @@ class Receipt(BaseModel):
     method: PaymentMethod = Field(description="How the money arrived")
 
 
+class StockMovement(BaseModel):
+    """One movement of stock — the subledger under GL account 1400.
+
+    ``units`` and ``value`` are **signed**: a receipt is positive, an issue negative,
+    an adjustment either. The sign convention is the movement type's arithmetic, and
+    it is what makes the table a genuine additive flow — the roll-forward
+    ``opening + Σ units = closing`` is a plain sum, not a case expression over
+    ``movement_type``. ``unit_cost`` stays positive; it is a rate, not a movement.
+
+    Every movement carries the document it came from (``source_document``: the order
+    line that issued it, the vendor bill that received it, the count that adjusted it)
+    and the GL entry that posted it, so the subledger ties to the ledger both ways.
+    """
+
+    movement_id: str = Field(description="Unique movement identifier")
+    product_id: str = Field(description="FK to Product")
+    location_id: str = Field(description="Stocking location")
+    date: datetime.date
+    movement_type: StockMovementType
+    units: int = Field(description="Signed quantity — receipt positive, issue negative")
+    unit_cost: Decimal = Field(description="Standard cost per unit (positive)")
+    value: Decimal = Field(description="units × unit_cost — signed, same sign as units")
+    source_document: str = Field(description="The order line / vendor bill / count behind it")
+    entry_id: str = Field(description="FK to JournalEntry")
+
+
+class InventoryPosition(BaseModel):
+    """Closing stock at ``(product_id, location_id, period)`` — a STOCK, never summed.
+
+    The counterpart of :class:`TrialBalance` for goods: ``units_on_hand`` is a level
+    carried forward, so summing it across periods is the error the temporal-behaviour
+    truth exists to catch. Valued at standard cost, so Σ ``value`` over a period equals
+    the GL balance of account 1400 exactly — the subledger-to-ledger tie.
+    """
+
+    product_id: str = Field(description="FK to Product")
+    location_id: str = Field(description="Stocking location")
+    period: str = Field(description="Period identifier, e.g. '2025-01'")
+    units_on_hand: int = Field(description="Closing quantity — a level, not a movement")
+    unit_cost: Decimal = Field(description="Standard cost per unit")
+    value: Decimal = Field(description="units_on_hand × unit_cost")
+
+
 class FinanceDataset(BaseModel):
     """Container for a complete finance dataset."""
 
@@ -363,3 +429,6 @@ class FinanceDataset(BaseModel):
     sales_order_lines: list[SalesOrderLine] = []
     ar_invoices: list[ARInvoice] = []
     receipts: list[Receipt] = []
+    # The inventory family — the stock subledger under GL 1400.
+    stock_movements: list[StockMovement] = []
+    inventory_positions: list[InventoryPosition] = []

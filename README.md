@@ -13,11 +13,14 @@ The generator uses an **event-driven cascade model** where business events produ
 
 - **Operating chain**: Customer → sales order → order line (units × price) → AR invoice → receipt
 - **Revenue cycle**: Order lines → revenue and COGS journal entries → cash receipts → bank transactions
+- **Stock subledger**: Order line issues stock → replenishment receives it on a vendor bill → the bill settles like any other payable
 - **Expenditure cycle**: Purchase invoices → AP journal entries → vendor payments → bank transactions
 - **Operating events**: Monthly payroll, rent, depreciation, insurance, misc expenses
 - **Trial balance**: Derived from actual cumulative GL entries (not approximated)
 
 This produces **closed-loop accounting** — GL entries, invoices, payments, bank transactions, and trial balance are all numerically consistent and traceable back to the originating business event. Because revenue and cost of sale both derive from the order line (`units × unit_price`, `units × standard_cost`), contribution margin per customer and per product group is exact, not estimated.
+
+The stock subledger closes the same loop on the asset side: `opening + receipts − issues ± adjustments = closing` holds per product, location and period, and Σ position value equals the GL inventory balance exactly. That is what makes **CCC = DIO + DSO − DPO** an answer key rather than a plausible number.
 
 ## Quick Start
 
@@ -50,9 +53,12 @@ The `normalization` setting in the scenario YAML controls table structure:
 
 | Level | Tables | Analogue |
 |-------|--------|----------|
-| `full` | 8 (default) | ERP schema export |
-| `partial` | 6 | Reporting views — merges parent-child pairs |
-| `flat` | 5 | Analyst spreadsheet — inlines lookup tables |
+| `full` | 17 (default) | ERP schema export |
+| `partial` | 14 | Reporting views — merges three parent-child pairs |
+| `flat` | 13 | Analyst spreadsheet — inlines lookup tables |
+| `single` | 1 | One mega-table |
+
+Counts follow the family registry (`default_tables()`), so they grow with the corpus.
 
 Set via `generator.normalization` in `config/scenarios/month_end_close.yaml`.
 
@@ -104,18 +110,28 @@ longer discoverable); a genuine self-FK (`chart_of_accounts.parent_id`) is kept.
 canonical names. Multi-source runs write one canonical top-level file, mirroring the
 top-level `entropy_map.yaml`.
 
-## Finance Vertical Tables
+## Tables
+
+Every corpus carries these; the probe tables (`addresses`, `orders`, `deliveries`,
+`ref_entities`, `ref_activity`, `measure_probes`, `formula_probes`) materialize only when
+a strategy injects into them. Row counts are for a 12-month `clean` run at seed 42.
 
 | Table | ~Rows | Description |
 |-------|-------|-------------|
-| chart_of_accounts | 60 | Account hierarchy (60 accounts, 5 types) |
-| journal_entries | 12K | General ledger entries (event-driven) |
-| journal_lines | 25K | Debit/credit lines (balanced per entry) |
-| invoices | 3K | Vendor/purchase invoices |
-| payments | 2.5K | Invoice payments (paid + partial) |
-| bank_transactions | 5.5K | Bank statement (derived from cash events) |
-| fx_rates | 470 | Weekly exchange rates (8 currency pairs) |
-| trial_balance | 324 | Monthly cumulative balances (27 accounts × 12 months) |
+| chart_of_accounts | 61 | Account hierarchy (5 types) |
+| journal_entries | 16.6K | General ledger entries (event-driven) |
+| journal_lines | 36.4K | Debit/credit lines (balanced per entry) |
+| invoices | 3.3K | Vendor bills — `category` splits `expense` from `goods` |
+| payments | 2.9K | Invoice payments (paid + partial) |
+| bank_transactions | 6.0K | Bank statement (derived from cash events) |
+| fx_rates | 472 | Weekly exchange rates (8 currency pairs) |
+| trial_balance | 336 | Per-period movement (a flow) |
+| balance_sheet | 112 | Carry-forward ending balance (a stock) |
+| customers / products | 16 / 9 | Master data — the Demand and Offer ladders |
+| sales_orders / sales_order_lines | 3.6K / 5.8K | The operating chain's event grain |
+| ar_invoices / receipts | 3.6K / 2.8K | The AR side — what DSO measures |
+| stock_movements | 6.1K | Stock subledger — signed receipts, issues, adjustments |
+| inventory_positions | 216 | Closing stock at (product, location, period) — a **stock** |
 
 ## Development
 
@@ -184,12 +200,28 @@ sources:
 ## Ground Truth
 
 Each scenario run computes `ground_truth.yaml` with known-correct financial metrics:
-- **Annual**: revenue, expenses, gross profit, AR/AP/cash balances, DSO, DPO, FCF
+- **Annual**: revenue, expenses, gross profit, COGS, purchases, AR/AP/cash/inventory balances, DSO, DPO, DIO, CCC, FCF
 - **Monthly**: same metrics per period plus revenue growth MoM
-- **Invariants**: journal balanced, TB balanced, invoice-payment matched, bank reconciliation rate
+- **Contribution margin**: true DB1 per customer and per product group, exact from the order lines
+- **Invariants**: journal balanced, TB balanced, invoice-payment matched, bank reconciliation rate, inventory roll-forward, inventory-to-GL tie
 - **Injection impact**: estimated metric deviations from known injection parameters
+
+**Two DPOs, both correct.** `dpo` divides the payable by *purchases* (vendor-bill credits
+to AP) — the textbook definition, computable only since goods bills became separable from
+expense bills. `dpo_on_expenses` carries the total-expense denominator, which is what a
+consumer without a separable purchases figure necessarily computes. They are named
+alternatives, not one right and one wrong answer; `cash_conversion_cycle` uses the first.
+CCC is composed from the *published, rounded* DIO/DSO/DPO, so recombining them reproduces
+it exactly.
+
+**Not yet graded.** `gross_profit` and `free_cash_flow` are computed but should be treated
+as ungraded: the operating expense base is a fixed 3,000 vendor invoices plus fixed monthly
+payroll and rent, sized independently of the firm, so their sign is an artifact of a knob.
+See `docs/operating-model.md` §7 and §9.
 
 ## Backlog
 
+The ordered plan is [`docs/operating-model.md`](docs/operating-model.md) §10 — next up are
+scale profiles, then the Supply, Capacity and Throughput families. Independent of that:
+
 - Format profiles (DATEV, SAP, Salesforce, HubSpot) via YAML config + OpenAPI specs
-- Additional verticals (supply chain, sales/CRM)

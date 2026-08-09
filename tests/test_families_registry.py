@@ -33,14 +33,9 @@ def test_exporter_follows_the_registry() -> None:
 
 
 def test_every_declared_table_declares_a_primary_key() -> None:
-    undeclared = {
-        table
-        for fam in FAMILIES
-        for table in fam.tables
-        if table not in fam.primary_keys
-    }
+    undeclared = {table for fam in FAMILIES for table in fam.tables if table not in fam.primary_keys}
     # Tables keyed by a compound of FKs rather than one column.
-    compound_grain = {"fx_rates", "trial_balance", "balance_sheet"}
+    compound_grain = {"fx_rates", "trial_balance", "balance_sheet", "inventory_positions"}
     assert undeclared == compound_grain
 
 

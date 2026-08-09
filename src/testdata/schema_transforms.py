@@ -181,16 +181,16 @@ def pivot_trial_balance_wide(df: pl.DataFrame) -> pl.DataFrame:
 
     Returns a DataFrame with one row per account and columns for each period's
     debit/credit balances: ``2025_01_debit``, ``2025_01_credit``, etc.
+
+    The spine is every account that appears in ANY period, not the accounts present
+    in the first one. Seeding off period 1 drops an account whose first movement comes
+    later — which is not hypothetical: inventory shrinkage first posts at the end of
+    quarter one, so that account vanished from the wide export entirely.
     """
     periods = sorted(df["period"].unique().to_list())
+    result = df.select("account_id").unique(maintain_order=True)
 
-    result = df.filter(pl.col("period") == periods[0]).select(
-        "account_id",
-        pl.col("debit_balance").alias(f"{periods[0].replace('-', '_')}_debit"),
-        pl.col("credit_balance").alias(f"{periods[0].replace('-', '_')}_credit"),
-    )
-
-    for period in periods[1:]:
+    for period in periods:
         period_df = df.filter(pl.col("period") == period).select(
             "account_id",
             pl.col("debit_balance").alias(f"{period.replace('-', '_')}_debit"),
@@ -462,6 +462,8 @@ def _build_single_table(
         "products",
         "ar_invoices",
         "receipts",
+        "stock_movements",
+        "inventory_positions",
     ):
         if name in dfs:
             dfs.pop(name)

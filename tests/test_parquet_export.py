@@ -6,6 +6,7 @@ from pathlib import Path
 import polars as pl
 import yaml
 
+from testdata.families import default_tables
 from testdata.scenarios.month_end_close import run_scenario
 
 
@@ -39,8 +40,7 @@ def test_both_format_export():
         # Manifest should list both formats
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
-        # 9 tables (8 canonical + balance_sheet) × 2 formats = 18 file entries
-        assert len(manifest["files"]) == 30  # 15 tables x 2 formats (DAT-884 added 6)
+        assert len(manifest["files"]) == len(default_tables()) * 2  # csv + parquet
 
 
 def test_parquet_manifest_structure():
@@ -69,7 +69,7 @@ def test_csv_default_unchanged():
 
         with open(output / "manifest.yaml") as f:
             manifest = yaml.safe_load(f)
-        assert len(manifest["files"]) == 15  # 8 canonical + balance_sheet + 6 operating-chain (DAT-884)
+        assert len(manifest["files"]) == len(default_tables())
         for entry in manifest["files"]:
             assert entry["file"].endswith(".csv")
 

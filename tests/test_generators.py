@@ -35,7 +35,10 @@ def test_row_counts():
     assert len(ds.chart_of_accounts) >= 50
     assert len(ds.journal_entries) >= 4000
     assert len(ds.journal_lines) >= 10000
-    assert len(ds.invoices) == 3000
+    # 3000 expense bills plus one per goods delivery — the stock subledger raises its
+    # own payables, so the vendor-bill population is no longer a fixed count.
+    assert sum(1 for i in ds.invoices if i.category == "expense") == 3000
+    assert sum(1 for i in ds.invoices if i.category == "goods") > 0
     assert len(ds.payments) >= 2000
     assert len(ds.bank_transactions) >= 4000  # Event-driven: derived from business events
     assert len(ds.fx_rates) >= 400
@@ -210,20 +213,24 @@ def test_trial_balance_balanced():
 
 
 def test_invoice_gl_linkage():
-    """Every non-cancelled invoice has a corresponding GL entry."""
-    ds = _dataset()
-    # GL entries for invoices have description containing the invoice_id
-    gl_invoice_ids = set()
-    for entry in ds.journal_entries:
-        if "Vendor invoice" in entry.description:
-            # Extract invoice ID from description: "Vendor invoice - Vendor - INV-000001"
-            parts = entry.description.split(" - ")
-            if len(parts) >= 3:
-                gl_invoice_ids.add(parts[-1])
+    """Every non-cancelled invoice carries an entry_id that resolves, and only those do.
 
-    non_cancelled = {inv.invoice_id for inv in ds.invoices if inv.status != "cancelled"}
-    # Every non-cancelled invoice should have a GL entry
-    assert gl_invoice_ids == non_cancelled, f"Missing GL for {len(non_cancelled - gl_invoice_ids)} invoices"
+    Checked on the FK rather than the entry description: two populations now raise
+    payables (expense bills and goods receipts) and they describe themselves
+    differently, so a description match would silently pass by only testing one.
+    """
+    ds = _dataset()
+    entry_ids = {e.entry_id for e in ds.journal_entries}
+
+    for inv in ds.invoices:
+        if inv.status == "cancelled":
+            assert inv.entry_id is None, f"{inv.invoice_id} was cancelled but posted"
+            continue
+        assert inv.entry_id in entry_ids, f"{inv.invoice_id} has no GL entry"
+
+    # A goods bill is never cancelled: the pallet arrived and the movement is booked.
+    assert all(i.status != "cancelled" for i in ds.invoices if i.category == "goods")
+    assert {i.category for i in ds.invoices} == {"expense", "goods"}
 
 
 def test_payment_creates_bank_transaction():
@@ -425,6 +432,7 @@ def test_stream_is_stable_under_a_count_change() -> None:
         return [rng.random() for _ in range(n)]
 
     assert sequential(12)[:10] == sequential(10)  # same prefix only because nothing
+
     # else consumed the stream; interleave a second event type and the prefix breaks:
     def interleaved(n_orders: int) -> list[float]:
         rng = random.Random(7)
@@ -542,9 +550,7 @@ def test_volume_lever_is_an_exact_counterfactual() -> None:
     from testdata.canonical.finance.generators import Lever
 
     base = generate_finance_dataset(seed=11, months=6)
-    lev = generate_finance_dataset(
-        seed=11, months=6, lever=Lever(period_k=3, factor=1.4, type="volume")
-    )
+    lev = generate_finance_dataset(seed=11, months=6, lever=Lever(period_k=3, factor=1.4, type="volume"))
 
     base_orders = {o.order_id: o for o in base.sales_orders}
     lev_orders = {o.order_id: o for o in lev.sales_orders}
@@ -561,18 +567,32 @@ def test_volume_lever_is_an_exact_counterfactual() -> None:
     # Pre-lever months are untouched; post-lever months gained volume.
     def units(dataset, before: bool) -> int:
         dates = {o.order_id: o.order_date for o in dataset.sales_orders}
-        return sum(
-            line.units for line in dataset.sales_order_lines
-            if (dates[line.order_id].month <= 3) is before
-        )
+        return sum(line.units for line in dataset.sales_order_lines if (dates[line.order_id].month <= 3) is before)
 
     assert units(base, True) == units(lev, True)
     assert units(lev, False) > units(base, False)
 
-    # The ledger cycles never draw from the chain's streams, so they are untouched.
-    assert len(base.invoices) == len(lev.invoices)
-    assert base.invoices[0].amount == lev.invoices[0].amount
-    assert [p.amount for p in base.payments] == [p.amount for p in lev.payments]
+    # The EXPENSE cycle never draws from the chain's streams, so it is untouched.
+    def expense_bills(dataset):
+        return [i for i in dataset.invoices if i.category == "expense"]
+
+    assert len(expense_bills(base)) == len(expense_bills(lev))
+    assert [i.amount for i in expense_bills(base)] == [i.amount for i in expense_bills(lev)]
+    expense_ids = {i.invoice_id for i in expense_bills(base)}
+    assert [p.amount for p in base.payments if p.invoice_id in expense_ids] == [
+        p.amount for p in lev.payments if p.invoice_id in expense_ids
+    ]
+
+    # The stock subledger, by contrast, MUST move: more orders issue more stock, which
+    # has to be bought and paid for. That propagation is what a volume lever means,
+    # and the goods payables are where it shows up on the cash side.
+    def goods_value(dataset) -> int:
+        return sum(i.amount for i in dataset.invoices if i.category == "goods")
+
+    assert goods_value(lev) > goods_value(base)
+    base_issues = sum(-m.units for m in base.stock_movements if m.movement_type == "issue")
+    lev_issues = sum(-m.units for m in lev.stock_movements if m.movement_type == "issue")
+    assert lev_issues > base_issues
 
 
 def test_price_lever_leaves_volume_and_cost_untouched() -> None:
@@ -580,14 +600,10 @@ def test_price_lever_leaves_volume_and_cost_untouched() -> None:
     from testdata.canonical.finance.generators import Lever
 
     base = generate_finance_dataset(seed=11, months=6)
-    lev = generate_finance_dataset(
-        seed=11, months=6, lever=Lever(period_k=3, factor=1.2, type="price_level")
-    )
+    lev = generate_finance_dataset(seed=11, months=6, lever=Lever(period_k=3, factor=1.2, type="price_level"))
 
     assert len(base.sales_orders) == len(lev.sales_orders)
-    assert sum(line.units for line in base.sales_order_lines) == sum(
-        line.units for line in lev.sales_order_lines
-    )
+    assert sum(line.units for line in base.sales_order_lines) == sum(line.units for line in lev.sales_order_lines)
     base_cogs = sum(line.debit for line in base.journal_lines if line.account_id == "5100")
     lev_cogs = sum(line.debit for line in lev.journal_lines if line.account_id == "5100")
     assert base_cogs == lev_cogs
@@ -624,9 +640,7 @@ def test_ar_invoice_status_is_derived_from_actual_receipts() -> None:
     d = _chain_dataset()
     collected: dict[str, Decimal] = {}
     for receipt in d.receipts:
-        collected[receipt.ar_invoice_id] = (
-            collected.get(receipt.ar_invoice_id, Decimal("0.00")) + receipt.amount
-        )
+        collected[receipt.ar_invoice_id] = collected.get(receipt.ar_invoice_id, Decimal("0.00")) + receipt.amount
     for inv in d.ar_invoices:
         got = collected.get(inv.ar_invoice_id, Decimal("0.00"))
         if inv.status.value == "paid":
@@ -644,7 +658,5 @@ def test_ar_due_dates_follow_the_customer_terms() -> None:
     lags = {(inv.due_date - inv.invoice_date).days for inv in d.ar_invoices}
     assert len(lags) > 1, "every invoice shares one due lag — terms are not being honoured"
     for inv in d.ar_invoices[:200]:
-        expected = {"net_30": 30, "net_60": 60, "net_90": 90, "due_on_receipt": 0}[
-            terms_of[inv.customer_id].value
-        ]
+        expected = {"net_30": 30, "net_60": 60, "net_90": 90, "due_on_receipt": 0}[terms_of[inv.customer_id].value]
         assert (inv.due_date - inv.invoice_date).days == expected

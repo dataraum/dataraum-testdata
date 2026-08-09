@@ -8,13 +8,14 @@ from pathlib import Path
 import polars as pl
 import yaml
 
+from testdata.families import default_tables
 from testdata.scenarios.multi_system_recon import run_scenario
 
 
 def test_multi_source_returns_all_tables():
-    """run_scenario returns all 9 tables in dataframes dict."""
+    """run_scenario returns every non-optional table in the dataframes dict."""
     result = run_scenario(strategy_name="clean", seed=42, months=3)
-    assert len(result["dataframes"]) == 15  # 8 canonical + balance_sheet + 6 operating-chain (DAT-884)
+    assert set(result["dataframes"]) == set(default_tables())
 
 
 def test_multi_source_has_sources_config():

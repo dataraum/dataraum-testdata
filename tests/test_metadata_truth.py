@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from testdata.families import foreign_keys
 from testdata.metadata_truth import (
     canonical_metadata_truth,
     export_metadata_truth,
@@ -51,16 +52,18 @@ def test_canonical_has_every_graded_section() -> None:
         "bus_matrix",
     ):
         assert section in truth, section
-    assert len(truth["relationships"]) == 9
+    assert len(truth["relationships"]) == len(foreign_keys())
     assert set(truth["metric_additivity"]) == {"metrics", "measures"}
     # reconciles_with (DAT-725 P2) is derived: the witness edges cover exactly the
     # structurally-reconciling measures, and the multi-grounding concepts are the
     # >= 2-relation fan-ins of business_concepts.required.
     reconciles = truth["reconciles_with"]
-    assert {e["measure"] for e in reconciles["aggregation_lineage"]} == set(
-        truth["reconciles_structurally"]
-    )
-    assert {e["event_table"] for e in reconciles["aggregation_lineage"]} == {"journal_lines"}
+    assert {e["measure"] for e in reconciles["aggregation_lineage"]} == set(truth["reconciles_structurally"])
+    # Two subledgers, each reconciling against its OWN finer fact.
+    assert {e["event_table"] for e in reconciles["aggregation_lineage"]} == {
+        "journal_lines",
+        "stock_movements",
+    }
     assert {m["concept"]: m["relations"] for m in reconciles["multi_grounding"]} == {
         "account_balance": ["balance_sheet", "trial_balance"],
         "transaction_amount": ["bank_transactions", "invoices", "payments"],
@@ -106,8 +109,8 @@ def test_merge_collapsed_fk_is_dropped_self_fk_kept() -> None:
     assert ("invoice_data.entry_id", "journal_data.entry_id") in rels
     # The genuine self-FK is kept (endpoints were the same table before the merge, too).
     assert ("chart_of_accounts.parent_id", "chart_of_accounts.account_id") in rels
-    # Two FKs dropped, seven kept.
-    assert len(out["relationships"]) == 7
+    # Two FKs collapse into their merged table and drop out; the rest survive.
+    assert len(out["relationships"]) == len(foreign_keys()) - 3
 
 
 def test_table_references_follow_the_mapping() -> None:
@@ -192,9 +195,7 @@ def test_flat_bus_matrix_splits_folded_and_key_only() -> None:
 
 def test_single_bus_matrix_is_mega_folded() -> None:
     out = remap_metadata_truth(canonical_metadata_truth(), level="single")
-    assert out["bus_matrix"] == {
-        "mega_table": {"account": {"provenance": "folded", "key": "account_id"}}
-    }
+    assert out["bus_matrix"] == {"mega_table": {"account": {"provenance": "folded", "key": "account_id"}}}
 
 
 def test_flat_drops_ghost_relationships() -> None:
@@ -314,19 +315,11 @@ def test_measured_in_binds_the_models() -> None:
     expected: dict[str, str | None] = {}
     for table, field in FinanceDataset.model_fields.items():
         (model,) = typing.get_args(field.annotation)
-        currency_cols = [
-            name for name, f in model.model_fields.items() if f.annotation is Currency
-        ]
+        currency_cols = [name for name, f in model.model_fields.items() if f.annotation is Currency]
         measures = [name for name, f in model.model_fields.items() if f.annotation is Decimal]
-        measures += [
-            name
-            for name, c in model.model_computed_fields.items()
-            if c.return_type is Decimal
-        ]
+        measures += [name for name, c in model.model_computed_fields.items() if c.return_type is Decimal]
         for measure in measures:
-            expected[f"{table}.{measure}"] = (
-                f"{table}.{currency_cols[0]}" if len(currency_cols) == 1 else None
-            )
+            expected[f"{table}.{measure}"] = f"{table}.{currency_cols[0]}" if len(currency_cols) == 1 else None
 
     truth = canonical_metadata_truth()
     authored = {e["measure"]: e["unit_column"] for e in truth["measured_in"]}
@@ -409,15 +402,17 @@ def _roleplay_frames() -> dict:
     from testdata.entropy.registry import InjectionRegistry
     import random as _random
 
-    ds = generate_finance_dataset(
-        seed=42, months=2, roleplay_addresses=10, roleplay_orders=40, roleplay_deliveries=60
-    )
+    ds = generate_finance_dataset(seed=42, months=2, roleplay_addresses=10, roleplay_orders=40, roleplay_deliveries=60)
     from testdata.export import dataset_to_dataframes
 
     dfs = dataset_to_dataframes(ds)
     dfs["orders"] = inject_role_playing_fks(
-        df=dfs["orders"], registry=InjectionRegistry(), table_name="orders",
-        rng=_random.Random(1), dataframes=dfs, seed=7,
+        df=dfs["orders"],
+        registry=InjectionRegistry(),
+        table_name="orders",
+        rng=_random.Random(1),
+        dataframes=dfs,
+        seed=7,
     )
     return dfs
 
@@ -432,7 +427,7 @@ def test_roleplay_truth_is_data_conditional(tmp_path: Path) -> None:
     clean = yaml.safe_load((tmp_path / "clean" / "metadata_truth.yaml").read_text())
     assert clean == canonical_metadata_truth()
     assert clean["fk_roles"] == {}
-    assert len(clean["relationships"]) == 9
+    assert len(clean["relationships"]) == len(foreign_keys())
 
     # with the shape: fk_roles + roled relationships + table/timestamp roles
     export(tmp_path / "role", dataframes=_roleplay_frames())
@@ -442,7 +437,7 @@ def test_roleplay_truth_is_data_conditional(tmp_path: Path) -> None:
         "orders.ship_to_addr": "ship_to",
         "deliveries.delivery_addr": "ship_to",
     }
-    assert len(truth["relationships"]) == 13
+    assert len(truth["relationships"]) == len(foreign_keys()) + 4
     roled = {r["from"]: r.get("fk_role") for r in truth["relationships"] if "fk_role" in r}
     assert roled == truth["fk_roles"]
     assert "orders" in truth["table_roles"]["facts"]
@@ -474,7 +469,7 @@ def test_run_scenario_roleplay_end_to_end(tmp_path: Path) -> None:
         assert (out / f"{table}.csv").exists(), table
     truth = yaml.safe_load((out / "metadata_truth.yaml").read_text())
     assert len(truth["fk_roles"]) == 3
-    assert len(truth["relationships"]) == 13
+    assert len(truth["relationships"]) == len(foreign_keys()) + 4
     emap = yaml.safe_load((out / "entropy_map.yaml").read_text())
     rolefk = [i for i in emap["injections"] if i["injection_type"] == "inject_role_playing_fks"]
     assert len(rolefk) == 3

@@ -5,6 +5,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
+from testdata.families import default_tables
 from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.entropy.registry import EntropyInjection, InjectionRegistry
 from testdata.export import dataset_to_dataframes
@@ -96,9 +97,10 @@ def test_partial_unchanged_tables(base_dataframes):
 
 
 def test_partial_table_count(base_dataframes):
-    """partial produces 7 tables (6 + the standalone balance_sheet period table)."""
+    """partial folds three header/item pairs and leaves everything else standing."""
     dfs, _ = apply_normalization(dict(base_dataframes), "partial")
-    assert len(dfs) == 12  # + customers, products, sales_data, ar_invoices, receipts
+    # journal, invoice and sales each merge two tables into one.
+    assert len(dfs) == len(default_tables()) - 3
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +140,9 @@ def test_flat_enriches_trial_balance(base_dataframes):
 
 
 def test_flat_table_count(base_dataframes):
-    """flat produces 6 tables (5 + the standalone balance_sheet period table)."""
+    """flat is partial plus the chart of accounts inlined away."""
     dfs, _ = apply_normalization(dict(base_dataframes), "flat")
-    assert len(dfs) == 11  # + customers, products, sales_data, ar_invoices, receipts
+    assert len(dfs) == len(default_tables()) - 4
 
 
 # ---------------------------------------------------------------------------
