@@ -31,6 +31,6 @@ defaults:
 
 generator:
   normalization: flat  # full | partial | flat | single
+  scale_profile: tiny
   fiscal_start: "2025-01-01"
-  invoices_count: 3000
   q4_seasonal_boost: 0.3

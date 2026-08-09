@@ -11,11 +11,11 @@ dimensions, the family framework, the oracle contract, and the order of work.
 
 The generator uses an **event-driven cascade model** where business events produce numerically consistent data across all tables:
 
-- **Operating chain**: Customer → sales order → order line (units × price) → AR invoice → receipt
+- **Operating chain**: Customer → sales order → order line (units × price) → AR invoice → receipt, gated by each entity's validity window
 - **Revenue cycle**: Order lines → revenue and COGS journal entries → cash receipts → bank transactions
 - **Stock subledger**: Order line issues stock → replenishment receives it on a vendor bill → the bill settles like any other payable
 - **Expenditure cycle**: Purchase invoices → AP journal entries → vendor payments → bank transactions
-- **Operating events**: Monthly payroll, rent, depreciation, insurance, misc expenses
+- **Operating events**: Monthly payroll, rent, depreciation, insurance, misc expenses — all sized off the scale anchor
 - **Trial balance**: Derived from actual cumulative GL entries (not approximated)
 
 This produces **closed-loop accounting** — GL entries, invoices, payments, bank transactions, and trial balance are all numerically consistent and traceable back to the originating business event. Because revenue and cost of sale both derive from the order line (`units × unit_price`, `units × standard_cost`), contribution margin per customer and per product group is exact, not estimated.
@@ -46,6 +46,33 @@ testdata describe --scenario month-end-close
 | `low`    | Subtle issues (2-5% rates) |
 | `medium` | Realistic problems (~11 injection types) |
 | `high`   | Severe quality issues across all layers |
+
+## Scale Profiles
+
+How big the firm is, and what shape its populations have. Declared per scenario as
+`generator.scale_profile` and stamped into the corpus identity.
+
+| Profile | Customers | Products / groups | Suppliers | Orders/yr |
+|---------|----------:|------------------:|----------:|----------:|
+| `tiny` | 16 | 9 / 4 | 20 | ~2.7K |
+| `mid` | 400 | 240 / 12 | 120 | ~14.8K |
+| `large` | 4,000 | 1,200 / 24 | 600 | ~148K |
+
+`month-end-close` uses `mid` — the reference company. The other scenarios are about
+schema shape rather than population size and stay on `tiny`, which is also the
+generator's own default so calling it directly in a test suite stays cheap.
+
+**Counts alone are not the point.** 400 uniform customers make concentration risk exactly
+as unmeasurable as 16 do, so each profile carries its distributions: revenue per customer
+**Pareto** (the top fifth holds 53% of revenue at `mid`), order value **log-normal**, a
+declared fraction of the catalogue priced **below the contribution threshold**, and
+**entity birth and death** — `customers.created_date` / `churned_date` and
+`products.launched_date` / `discontinued_date`, which gate the orders and not just the
+master row.
+
+The profile also sizes the **expense base**: operating expense is a declared share of the
+contribution the order lines actually produce, so gross profit is a property of the firm
+rather than of a row count. See `docs/operating-model.md` §9.
 
 ## Normalization Levels
 
@@ -141,24 +168,28 @@ top-level `entropy_map.yaml`.
 
 Every corpus carries these; the probe tables (`addresses`, `orders`, `deliveries`,
 `ref_entities`, `ref_activity`, `measure_probes`, `formula_probes`) materialize only when
-a strategy injects into them. Row counts are for a 12-month `clean` run at seed 42.
+a strategy injects into them. Row counts are for a 12-month `clean` run at seed 42 on the
+`mid` profile (`month-end-close`'s default).
 
 | Table | ~Rows | Description |
 |-------|-------|-------------|
 | chart_of_accounts | 61 | Account hierarchy (5 types) |
-| journal_entries | 16.6K | General ledger entries (event-driven) |
-| journal_lines | 36.4K | Debit/credit lines (balanced per entry) |
-| invoices | 3.3K | Vendor bills — `category` splits `expense` from `goods` |
-| payments | 2.9K | Invoice payments (paid + partial) |
-| bank_transactions | 6.0K | Bank statement (derived from cash events) |
+| journal_entries | 73K | General ledger entries (event-driven) |
+| journal_lines | 158K | Debit/credit lines (balanced per entry) |
+| invoices | 16.8K | Vendor bills — `category` splits `expense` from `goods` |
+| payments | 14.9K | Invoice payments (paid + partial) |
+| bank_transactions | 26.7K | Bank statement (derived from cash events) |
 | fx_rates | 472 | Weekly exchange rates (8 currency pairs) |
 | trial_balance | 336 | Per-period movement (a flow) |
 | balance_sheet | 112 | Carry-forward ending balance (a stock) |
-| customers / products | 16 / 9 | Master data — the Demand and Offer ladders |
-| sales_orders / sales_order_lines | 3.6K / 5.8K | The operating chain's event grain |
-| ar_invoices / receipts | 3.6K / 2.8K | The AR side — what DSO measures |
-| stock_movements | 6.1K | Stock subledger — signed receipts, issues, adjustments |
-| inventory_positions | 216 | Closing stock at (product, location, period) — a **stock** |
+| customers / products | 400 / 240 | Master data with validity windows — the Demand and Offer ladders |
+| sales_orders / sales_order_lines | 14.8K / 23.6K | The operating chain's event grain |
+| ar_invoices / receipts | 14.8K / 11.4K | The AR side — what DSO measures |
+| stock_movements | 31.8K | Stock subledger — signed receipts, issues, adjustments |
+| inventory_positions | 5.8K | Closing stock at (product, location, period) — a **stock** |
+
+On `tiny` the same corpus is roughly a quarter the size in orders and an order of
+magnitude smaller in master data.
 
 ## Development
 
@@ -247,10 +278,11 @@ alternatives, not one right and one wrong answer; `cash_conversion_cycle` uses t
 CCC is composed from the *published, rounded* DIO/DSO/DPO, so recombining them reproduces
 it exactly.
 
-**Not yet graded.** `gross_profit` and `free_cash_flow` are computed but should be treated
-as ungraded: the operating expense base is a fixed 3,000 vendor invoices plus fixed monthly
-payroll and rent, sized independently of the firm, so their sign is an artifact of a knob.
-See `docs/operating-model.md` §7 and §9.
+**Free cash flow is a cold start.** FCF is negative at every profile while operating profit
+is positive, and the arithmetic is right: the corpus begins with zero receivables and zero
+stock, so the first fiscal year absorbs a full AR balance and a full inventory position
+into working capital. A property of a corpus that starts from nothing, not a defect — but
+worth knowing before benchmarking it against a going concern.
 
 ## Backlog
 

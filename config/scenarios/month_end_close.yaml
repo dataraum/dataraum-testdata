@@ -25,8 +25,11 @@ defaults:
 
 generator:
   normalization: full  # full | partial | flat
+  # The reference company (docs/operating-model.md §9). tiny | mid | large.
+  scale_profile: mid
   fiscal_start: "2025-01-01"
-  invoices_count: 3000
+  # Omitted deliberately: the profile sizes the vendor-bill count, and the amounts
+  # are budgeted off the scale anchor, so a literal here would only set granularity.
   q4_seasonal_boost: 0.3
 
 stories:

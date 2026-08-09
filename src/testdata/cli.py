@@ -101,6 +101,7 @@ def describe(
     typer.echo(f"  months: {config.months}")
     typer.echo(f"  fiscal_start: {config.fiscal_start}")
     typer.echo(f"  normalization: {config.normalization}")
+    typer.echo(f"  scale_profile: {config.scale_profile}")
     typer.echo("\nAvailable strategies: clean, low, medium, high")
 
 

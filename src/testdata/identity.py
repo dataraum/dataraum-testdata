@@ -37,6 +37,7 @@ from importlib.metadata import version as _installed_version
 from typing import Any
 
 from testdata.families import default_families
+from testdata.scale import DEFAULT_PROFILE
 
 
 GENERATOR = "dataraum-testdata"
@@ -63,6 +64,7 @@ class CorpusIdentity:
     seed: int
     months: int
     fiscal_start: str = "2025-01-01"
+    profile: str = DEFAULT_PROFILE
     normalization: str = "full"
     lever: Mapping[str, Any] | None = None
     families: tuple[str, ...] = field(default_factory=default_families)
@@ -92,7 +94,7 @@ class CorpusIdentity:
         lever = f" lever={self.lever['type']}" if self.lever else ""
         return (
             f"{self.generator} {self.version} · {self.scenario}/{self.strategy} · "
-            f"seed {self.seed} · {self.months}mo · {self.normalization}{lever} · #{self.corpus_id}"
+            f"seed {self.seed} · {self.months}mo · {self.profile}/{self.normalization}{lever} · #{self.corpus_id}"
         )
 
     def _payload(self) -> dict[str, Any]:
@@ -105,6 +107,7 @@ class CorpusIdentity:
             "seed": self.seed,
             "months": self.months,
             "fiscal_start": self.fiscal_start,
+            "profile": self.profile,
             "normalization": self.normalization,
             "families": list(self.families),
             "lever": dict(self.lever) if self.lever is not None else None,

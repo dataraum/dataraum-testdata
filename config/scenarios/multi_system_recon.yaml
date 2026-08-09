@@ -25,9 +25,10 @@ defaults:
   strategy: medium
 
 generator:
+  # These scenarios are about schema shape, not population size.
+  scale_profile: tiny
   normalization: full
   fiscal_start: "2025-01-01"
-  invoices_count: 1500
 
 sources:
   erp_export:

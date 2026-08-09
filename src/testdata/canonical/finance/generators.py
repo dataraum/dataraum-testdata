@@ -15,6 +15,8 @@ from dataclasses import field as dataclass_field
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
+from testdata.scale import ScaleProfile, customer_names, get_profile, product_catalog, supplier_names
+
 from .models import (
     AccountType,
     Address,
@@ -55,46 +57,20 @@ from .models import (
 
 COST_CENTERS = ["CC100", "CC200", "CC300", "CC400", "CC500"]
 USERS = ["jsmith", "mwilson", "agarcia", "ljohnson", "klee", "rbrown"]
-VENDOR_NAMES = [
-    "Acme Corp",
-    "Global Supply Co",
-    "TechParts Inc",
-    "Office Depot",
-    "AWS",
-    "CloudFlare",
-    "Salesforce",
-    "ADP Payroll",
-    "Delta Airlines",
-    "Marriott Hotels",
-    "FedEx",
-    "UPS",
-    "Deloitte",
-    "KPMG",
-    "Ernst & Young",
-    "PwC",
-    "Google Workspace",
-    "Microsoft",
-    "Zoom",
-    "Slack",
-]
-CUSTOMER_NAMES = [
-    "Northwind Corp",
-    "Contoso Ltd",
-    "Adventure Works",
-    "Fabrikam Inc",
-    "Tailspin Toys",
-    "Woodgrove Bank",
-    "Litware Inc",
-    "Proseware",
-    "Alpine Ski House",
-    "Trey Research",
-    "Humongous Insurance",
-    "Datum Corp",
-    "A. Datum",
-    "Coho Vineyard",
-    "Lucerne Publishing",
-    "Margie's Travel",
-]
+
+# Where the operating-expense budget goes. Shares sum to 1.0 and are a *declared* cost
+# structure, not one fitted to anything — which is the point: the total is now a
+# function of what the firm contributes (§9's scale anchor), and this says how it is
+# spent. Before, each of these was drawn from a fixed band with no reference to the
+# size of the business, so the P&L sign was an artifact of a row count (§7).
+_OPEX_ALLOCATION: dict[str, float] = {
+    "vendor_bills": 0.42,
+    "payroll": 0.40,
+    "rent": 0.06,
+    "depreciation": 0.05,
+    "insurance": 0.03,
+    "misc": 0.04,
+}
 
 # --- Helpers ---
 
@@ -401,71 +377,162 @@ class _SaleRecord:
 _SEGMENTS = ["Enterprise", "Mid-Market", "SMB"]
 _REGIONS = ["DACH", "Nordics", "Benelux", "UK&I"]
 
-# (group, product name, base standard cost, gross-margin target) — the margin target
-# sets list_price = cost / (1 - margin), so a product's DB1 is a designed quantity
-# rather than an accident of two independent draws.
-_PRODUCT_CATALOG: list[tuple[str, str, float, float]] = [
-    ("Instruments", "Flow Meter", 420.0, 0.42),
-    ("Instruments", "Pressure Sensor", 180.0, 0.38),
-    ("Instruments", "Thermal Probe", 95.0, 0.45),
-    ("Controllers", "Edge Controller", 1250.0, 0.35),
-    ("Controllers", "PLC Module", 780.0, 0.31),
-    ("Consumables", "Filter Cartridge", 22.0, 0.55),
-    ("Consumables", "Calibration Kit", 65.0, 0.5),
-    ("Services", "Installation Day", 540.0, 0.28),
-    ("Services", "Support Contract", 300.0, 0.6),
-]
-
 # Revenue accounts the chain posts to, by product group. Services revenue is a
 # genuinely different account from product revenue — the split the Offer ladder
 # groups by, and it keeps the existing 41xx/42xx revenue structure meaningful.
-_GROUP_REVENUE_ACCOUNT = {
+# Groups a larger profile adds fall back to product revenue; ``Analytics`` is the
+# second genuinely service-like group, so it books there.
+_GROUP_REVENUE_ACCOUNT: dict[str, str] = {
     "Instruments": "4110",
     "Controllers": "4120",
     "Consumables": "4110",
     "Services": "4210",
+    "Analytics": "4210",
 }
+_DEFAULT_REVENUE_ACCOUNT = "4110"
 
 _INVENTORY_ACCOUNT = "1400"
 _COGS_ACCOUNT = "5100"
 
 
-def generate_customers() -> list[Customer]:
-    """Customer master — deterministic, no RNG (identity must be stable across runs)."""
+def _lifecycle(
+    seed: int, kind: str, entity_id: str, fiscal_start: date, months: int, churn_fraction: float
+) -> tuple[date, date | None]:
+    """When an entity became live, and when it stopped — the birth/death window.
+
+    Three populations, deliberately: most entities predate the fiscal year and survive
+    it; a churn slice is born inside it; another dies inside it. Both cases are the
+    ones prior-period and peer comparisons fail on — a customer whose "collapse" is
+    that they did not exist in the comparison period, and a product whose "recovery"
+    is that it was discontinued. A corpus without them lets a naive year-over-year
+    method look correct.
+
+    Keyed by entity identity, so churn is a property of the firm and not of the draw
+    order — and therefore untouched by a volume lever.
+    """
+    draw = _stream(seed, "lifecycle", kind, entity_id)
+    roll = draw.random()
+    first, _ = _month_start_end(fiscal_start, 0)
+
+    if roll < churn_fraction / 2 and months >= 4:
+        # Born inside the window: no history before this month.
+        born_at = draw.randint(1, max(1, months - 2))
+        return _month_start_end(fiscal_start, born_at)[0], None
+    if roll < churn_fraction and months >= 4:
+        # Dies inside the window, after a real history behind it.
+        died_at = draw.randint(2, max(2, months - 1))
+        return first - timedelta(days=draw.randint(400, 2600)), _month_start_end(fiscal_start, died_at)[1]
+    return first - timedelta(days=draw.randint(200, 3000)), None
+
+
+def _is_active(created: date, ended: date | None, m_start: date, m_end: date) -> bool:
+    """Whether an entity is live at any point in a month."""
+    return created <= m_end and (ended is None or ended >= m_start)
+
+
+def generate_customers(
+    seed: int, profile: ScaleProfile, fiscal_start: date, months: int
+) -> list[Customer]:
+    """Customer master — identity is deterministic; only the lifecycle window is drawn.
+
+    Names, segments and regions come from the index so that retuning any distribution
+    never moves a customer id. The validity window is keyed by that id for the same
+    reason.
+    """
     out: list[Customer] = []
-    for i, name in enumerate(CUSTOMER_NAMES):
+    for i, name in enumerate(customer_names(profile.customers)):
+        customer_id = f"C-{i + 1:04d}"
+        created, churned = _lifecycle(
+            seed, "customer", customer_id, fiscal_start, months, profile.churn_fraction
+        )
         out.append(
             Customer(
-                customer_id=f"C-{i + 1:04d}",
+                customer_id=customer_id,
                 name=name,
                 segment=_SEGMENTS[i % len(_SEGMENTS)],
                 region=_REGIONS[i % len(_REGIONS)],
                 payment_terms=list(PaymentTerms)[i % len(PaymentTerms)],
+                created_date=created,
+                churned_date=churned,
             )
         )
     return out
 
 
-def generate_products() -> list[Product]:
-    """Product master with standard cost — deterministic, no RNG.
+def generate_products(
+    seed: int, profile: ScaleProfile, fiscal_start: date, months: int
+) -> list[Product]:
+    """Product master with standard cost — costs and margins designed, not drawn.
 
-    ``list_price`` derives from the catalog's margin target rather than a separate
-    draw, so the true unit contribution is a designed number we can assert against.
+    ``list_price`` derives from the catalogue's margin target rather than a separate
+    draw, so the true unit contribution is a designed quantity we can assert against.
+    A declared fraction of the catalogue is priced *below the contribution threshold*:
+    thin enough that the ordinary discount range drives realised contribution to zero
+    or through it. A portfolio where every item earns cannot be pruned, and "which
+    products should we drop" is a canonical Offer question with no answer here before.
     """
     out: list[Product] = []
-    for i, (group, name, cost, margin) in enumerate(_PRODUCT_CATALOG):
-        standard_cost = _quantize(Decimal(str(cost)))
-        list_price = _quantize(standard_cost / Decimal(str(1.0 - margin)))
+    catalog = product_catalog(profile.products, profile.product_groups, profile.tail_product_fraction)
+    for i, item in enumerate(catalog):
+        product_id = f"P-{i + 1:04d}"
+        standard_cost = _quantize(Decimal(str(item.standard_cost)))
+        list_price = _quantize(standard_cost / Decimal(str(1.0 - item.margin_target)))
+        launched, discontinued = _lifecycle(
+            seed, "product", product_id, fiscal_start, months, profile.churn_fraction
+        )
         out.append(
             Product(
-                product_id=f"P-{i + 1:04d}",
-                name=name,
-                product_group=group,
+                product_id=product_id,
+                name=item.name,
+                product_group=item.group,
                 standard_cost=standard_cost,
                 list_price=list_price,
+                launched_date=launched,
+                discontinued_date=discontinued,
             )
         )
     return out
+
+
+def _scale_anchor(order_lines: list[SalesOrderLine]) -> Decimal:
+    """What the firm contributes — revenue less cost of sale, over the whole window.
+
+    The one number the expense base is sized against (§9). Contribution rather than
+    revenue, because a firm's affordable overhead follows what its sales actually
+    leave behind, and because contribution is already an exact quantity here: both
+    sides derive from the same order line.
+    """
+    return sum((line.line_amount - line.line_cost for line in order_lines), Decimal("0"))
+
+
+def _customer_weight(seed: int, customer_id: str, profile: ScaleProfile) -> float:
+    """This customer's share of order intensity — Pareto, mean-normalised, capped.
+
+    Revenue per customer has to be Pareto or concentration risk is unmeasurable: a
+    book of uniform customers has no top 5% worth naming. Normalising by the
+    distribution's mean keeps total volume on the profile's declared level, so the
+    shape does not smuggle in a size change. The cap is a modelling choice — an
+    uncapped Pareto occasionally draws a customer who *is* the firm — and it is
+    declared on the profile rather than buried here.
+    """
+    draw = _stream(seed, "customer_weight", customer_id)
+    alpha = profile.customer_pareto_alpha
+    cap = profile.customer_weight_cap
+    mean = alpha / (alpha - 1.0)
+    return min(draw.paretovariate(alpha) / mean, cap) / _pareto_normalizer(alpha, cap)
+
+
+def _pareto_normalizer(alpha: float, cap: float) -> float:
+    """``E[min(X/E[X], cap)]`` for ``X ~ Pareto(alpha)``.
+
+    Capping a heavy tail removes real mass, so dividing by the *uncapped* mean leaves
+    average intensity below 1 and the profile's declared order volume quietly wrong.
+    Normalising by the truncated mean keeps the shape a shape: concentration changes,
+    total volume does not.
+    """
+    mean_x = alpha / (alpha - 1.0)
+    threshold = mean_x * cap
+    return (alpha / (mean_x * (1.0 - alpha))) * (threshold ** (1.0 - alpha) - 1.0) + cap * threshold ** (-alpha)
 
 
 def _order_count(
@@ -493,7 +560,7 @@ def generate_sales_orders(
     fiscal_start: date,
     months: int,
     *,
-    orders_per_customer_month: float = 18.0,
+    profile: ScaleProfile,
     q4_seasonal_boost: float = 0.3,
     lever: Lever | None = None,
 ) -> tuple[list[SalesOrder], list[SalesOrderLine]]:
@@ -502,35 +569,61 @@ def generate_sales_orders(
     Draws ONLY from entity-keyed streams (never the sequential ``rng``), so the
     ledger cycles are independent of order volume and a volume lever stays an exact
     counterfactual.
+
+    Two shapes carry the population (§9). Order **intensity** is scaled by the
+    customer's Pareto weight, so revenue per customer is concentrated and "the top
+    5%" means something. Order **size** is log-normal in units, so mean and median
+    part company and a consumer reporting one for the other is visibly wrong. Both
+    are drawn per entity, so neither disturbs the counterfactual.
     """
     orders: list[SalesOrder] = []
     lines: list[SalesOrderLine] = []
+    log_median = math.log(profile.order_units_median)
+
+    # The sellable catalogue per month, computed once rather than per customer-month:
+    # at `large` that inner filter would be 4,000 x 12 x 1,200 comparisons for an
+    # answer that only depends on the month.
+    live_by_month = [
+        [p for p in products if _is_active(p.launched_date, p.discontinued_date, *_month_start_end(fiscal_start, m))]
+        for m in range(months)
+    ]
 
     for customer in customers:
+        weight = _customer_weight(seed, customer.customer_id, profile)
         for month_offset in range(months):
             m_start, m_end = _month_start_end(fiscal_start, month_offset)
+            # A customer places no orders before it exists or after it lapses. This is
+            # the birth/death case, and it must gate the ORDERS, not just the master
+            # row — a validity window nothing respects is decoration.
+            if not _is_active(customer.created_date, customer.churned_date, m_start, m_end):
+                continue
+            live = live_by_month[month_offset]
+            if not live:
+                continue
             seasonal = 1.0 + q4_seasonal_boost * (m_start.month >= 10)
             n_orders = _order_count(
                 seed, customer.customer_id, month_offset,
-                orders_per_customer_month, seasonal, lever,
+                profile.orders_per_customer_month * weight, seasonal, lever,
             )
             for i in range(n_orders):
                 o = _stream(seed, "order", customer.customer_id, month_offset, i)
                 order_id = f"SO-{customer.customer_id[2:]}-{month_offset:02d}-{i:03d}"
+                order_date = _random_date(o, max(m_start, customer.created_date), m_end)
                 orders.append(
                     SalesOrder(
                         order_id=order_id,
                         customer_id=customer.customer_id,
-                        order_date=_random_date(o, m_start, m_end),
+                        order_date=order_date,
                         status="open" if o.random() < 0.08 else "confirmed",
                     )
                 )
                 for j in range(o.choices([1, 2, 3], weights=[55, 30, 15])[0]):
                     line = _stream(seed, "order_line", order_id, j)
-                    product = products[line.randrange(len(products))]
-                    units = line.choices([2, 5, 10, 25, 60, 150], weights=[20, 25, 25, 18, 9, 3])[0]
+                    product = live[line.randrange(len(live))]
+                    units = max(1, round(line.lognormvariate(log_median, profile.order_units_sigma)))
                     # Discount off list — the price realisation that makes per-customer
-                    # DB1 differ from per-product DB1.
+                    # DB1 differ from per-product DB1, and the reason the catalogue's
+                    # thin tail actually goes negative rather than merely looking thin.
                     discount = Decimal(str(round(line.uniform(0.0, 0.18), 4)))
                     unit_price = _quantize(product.list_price * (Decimal("1") - discount))
                     lines.append(
@@ -641,7 +734,7 @@ def _generate_revenue_entries(
                 JournalLine(
                     line_id=counters.next_line(),
                     entry_id=entry_id,
-                    account_id=_GROUP_REVENUE_ACCOUNT[product_group[row.product_id]],
+                    account_id=_GROUP_REVENUE_ACCOUNT.get(product_group[row.product_id], _DEFAULT_REVENUE_ACCOUNT),
                     debit=Decimal("0.00"),
                     credit=priced(row),
                     cost_center=cost_center,
@@ -793,6 +886,7 @@ def _generate_inventory_cycle(
     fiscal_start: date,
     months: int,
     counters: _Counters,
+    suppliers: list[str],
 ) -> _InventoryCycle:
     """Stock movements, positions, and the supplier bills that actually get paid.
 
@@ -862,7 +956,7 @@ def _generate_inventory_cycle(
             if sum(monthly) == 0:
                 continue
             _replenish_one_stock(
-                seed, cycle, product, location, monthly, fiscal_start, months, counters
+                seed, cycle, product, location, monthly, fiscal_start, months, counters, suppliers
             )
 
     # ── Age and settle the goods payables ──
@@ -881,6 +975,7 @@ def _generate_inventory_cycle(
         lambda inv: _stream(seed, "goods_payment", inv.invoice_id),
         cycle.invoices,
         counters,
+        suppliers,
     )
     cycle.payments.extend(payments)
     cycle.entries.extend(pay_entries)
@@ -906,6 +1001,7 @@ def _replenish_one_stock(
     fiscal_start: date,
     months: int,
     counters: _Counters,
+    suppliers: list[str],
 ) -> None:
     """Plan, receive, count and value one (product, location) across the year.
 
@@ -918,8 +1014,9 @@ def _replenish_one_stock(
     coverage = policy.uniform(0.8, 1.4)
     target_close = int(round(coverage * average))
     batch = max(1, int(round(average * 0.25)))
-    vendor_name = _stream(seed, "product_vendor", product.product_id).choice(VENDOR_NAMES)
-    vendor_id = f"V-{VENDOR_NAMES.index(vendor_name) + 1:04d}"
+    pick = _stream(seed, "product_vendor", product.product_id).randrange(len(suppliers))
+    vendor_name = suppliers[pick]
+    vendor_id = f"V-{pick + 1:04d}"
 
     on_hand = 0
     for offset in range(months):
@@ -1267,9 +1364,24 @@ def _generate_purchase_invoices(
     months: int,
     counters: _Counters,
     *,
-    count: int = 3000,
+    count: int,
+    suppliers: list[str],
+    budget: Decimal,
 ) -> tuple[list[Invoice], list[JournalEntry], list[JournalLine]]:
-    """Generate vendor/purchase invoices with GL entries: DR Expense, CR AP."""
+    """Generate vendor/purchase invoices with GL entries: DR Expense, CR AP.
+
+    ``budget`` is this cycle's share of the operating expense base, and the amounts
+    are rescaled to hit it exactly. The count therefore sets *granularity* — how many
+    bills the spend arrives on — instead of setting the spend itself, which is what
+    made gross profit an artifact of a knob (§7): 3,000 invoices at a fixed 100–50,000
+    band described a firm of no particular size, and the same number would have been
+    absurd one profile up.
+
+    Rescaling by a constant is deliberate rather than convenient. Amounts are drawn
+    log-uniform, and multiplying a log-uniform variate by a constant shifts it in log
+    space without changing the mantissa distribution — so the leading-digit (Benford)
+    property the corpus relies on survives being budgeted.
+    """
     leaf = _get_leaf_accounts()
     # COGS and shrinkage are EXCLUDED: both are derived from real events — cost of
     # sale from the order line (units x standard_cost), shrinkage from a physical
@@ -1287,8 +1399,9 @@ def _generate_purchase_invoices(
     fiscal_end = _month_start_end(fiscal_start, months - 1)[1]
 
     # 80/20 vendor concentration
-    top_vendors = VENDOR_NAMES[:4]
-    other_vendors = VENDOR_NAMES[4:]
+    top_vendors = suppliers[:4]
+    other_vendors = suppliers[4:] or suppliers
+    vendor_index = {name: i for i, name in enumerate(suppliers)}
 
     terms_days = {
         PaymentTerms.NET_30: 30,
@@ -1296,6 +1409,13 @@ def _generate_purchase_invoices(
         PaymentTerms.NET_90: 90,
         PaymentTerms.DUE_ON_RECEIPT: 0,
     }
+
+    # Drawn first, as a set, because the scale factor is a property of the whole
+    # population and cannot be known one invoice at a time.
+    raw = [_benford_amount(rng, 100, 50000) for _ in range(count)]
+    drawn_total = sum(raw, Decimal("0"))
+    factor = (budget / drawn_total) if drawn_total > 0 else Decimal("1")
+    amounts = [max(_quantize(a * factor), Decimal("0.01")) for a in raw]
 
     for i in range(count):
         inv_date = _random_date(rng, fiscal_start, fiscal_end)
@@ -1307,8 +1427,8 @@ def _generate_purchase_invoices(
         else:
             vendor = rng.choice(other_vendors)
 
-        vendor_id = f"V-{VENDOR_NAMES.index(vendor) + 1:04d}"
-        amount = _benford_amount(rng, 100, 50000)
+        vendor_id = f"V-{vendor_index[vendor] + 1:04d}"
+        amount = amounts[i]
 
         # Status depends on age relative to fiscal end
         days_since = (fiscal_end - inv_date).days
@@ -1376,6 +1496,7 @@ def _generate_vendor_payments(
     draw_for: Callable[[Invoice], random.Random],
     invoices: list[Invoice],
     counters: _Counters,
+    suppliers: list[str],
 ) -> tuple[list[Payment], list[JournalEntry], list[JournalLine], list[BankTransaction]]:
     """Generate vendor payment events: DR AP, CR Cash + Bank Txn (debit).
 
@@ -1391,7 +1512,7 @@ def _generate_vendor_payments(
     bank_txns: list[BankTransaction] = []
 
     methods = list(PaymentMethod)
-    vendor_name_by_id = {f"V-{i + 1:04d}": name for i, name in enumerate(VENDOR_NAMES)}
+    vendor_name_by_id = {f"V-{i + 1:04d}": name for i, name in enumerate(suppliers)}
 
     for inv in invoices:
         if inv.status not in (InvoiceStatus.PAID, InvoiceStatus.PARTIAL):
@@ -1478,18 +1599,34 @@ def _generate_operating_events(
     fiscal_start: date,
     months: int,
     counters: _Counters,
+    *,
+    budget: Decimal,
+    suppliers: list[str],
 ) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
-    """Generate recurring operating events: payroll, depreciation, rent, etc."""
+    """Generate recurring operating events: payroll, depreciation, rent, etc.
+
+    Every line here is sized off ``budget`` — this cycle's share of what the firm
+    contributes — rather than off a fixed band. Payroll of 30–75k a month described a
+    company of one particular size and no other, which is precisely why the P&L sign
+    could not be graded (§7).
+
+    A month is not the annual average: each line carries a jitter, so period-over-period
+    variance is real rather than a flat line a naive trend detector would ace.
+    """
     entries: list[JournalEntry] = []
     lines_out: list[JournalLine] = []
     bank_txns: list[BankTransaction] = []
+
+    def monthly(share: str, low: float = 0.88, high: float = 1.12) -> Decimal:
+        target = budget * Decimal(str(_OPEX_ALLOCATION[share])) / Decimal(months)
+        return max(_quantize(target * Decimal(str(rng.uniform(low, high)))), Decimal("0.01"))
 
     for month_offset in range(months):
         m_start, m_end = _month_start_end(fiscal_start, month_offset)
         month_label = m_start.strftime("%B %Y")
 
         # --- Payroll (last day of month, cash outflow) ---
-        payroll_amount = _benford_amount(rng, 30000, 75000)
+        payroll_amount = monthly("payroll")
         entry_id = counters.next_entry()
         entries.append(
             JournalEntry(
@@ -1540,7 +1677,7 @@ def _generate_operating_events(
         )
 
         # --- Rent (1st of month, cash outflow) ---
-        rent_amount = _benford_amount(rng, 5000, 15000)
+        rent_amount = monthly("rent", 0.98, 1.02)
         entry_id = counters.next_entry()
         entries.append(
             JournalEntry(
@@ -1584,7 +1721,7 @@ def _generate_operating_events(
         )
 
         # --- Depreciation (end of month, non-cash) ---
-        depr_amount = _benford_amount(rng, 1000, 5000)
+        depr_amount = monthly("depreciation", 0.99, 1.01)
         entry_id = counters.next_entry()
         entries.append(
             JournalEntry(
@@ -1616,7 +1753,7 @@ def _generate_operating_events(
         )
 
         # --- Insurance (1st of month, cash outflow) ---
-        insurance = _benford_amount(rng, 1000, 5000)
+        insurance = monthly("insurance", 0.97, 1.03)
         entry_id = counters.next_entry()
         entries.append(
             JournalEntry(
@@ -1671,10 +1808,16 @@ def _generate_operating_events(
         ]
 
         n_misc = rng.randint(5, 15)
-        for _ in range(n_misc):
+        # Same budgeting as the vendor bills: draw the month's amounts log-uniformly,
+        # then scale the set onto its share. The count stays a granularity choice.
+        raw_misc = [_benford_amount(rng, 50, 5000) for _ in range(n_misc)]
+        misc_total = sum(raw_misc, Decimal("0"))
+        misc_target = budget * Decimal(str(_OPEX_ALLOCATION["misc"])) / Decimal(months)
+        misc_factor = (misc_target / misc_total) if misc_total > 0 else Decimal("1")
+        for k in range(n_misc):
             desc, account = rng.choice(misc_templates)
             misc_date = _random_date(rng, m_start, m_end)
-            misc_amount = _benford_amount(rng, 50, 5000)
+            misc_amount = max(_quantize(raw_misc[k] * misc_factor), Decimal("0.01"))
             cost_center = rng.choice(COST_CENTERS) if rng.random() < 0.85 else None
 
             entry_id = counters.next_entry()
@@ -1718,7 +1861,7 @@ def _generate_operating_events(
                         date=misc_date,
                         amount=-misc_amount,
                         reference=f"TXN-{rng.randint(100000, 999999)}",
-                        counterparty=rng.choice(VENDOR_NAMES),
+                        counterparty=rng.choice(suppliers),
                         reconciled=rng.random() < 0.85,
                     )
                 )
@@ -1735,6 +1878,7 @@ def _generate_misc_bank_transactions(
     months: int,
     counters: _Counters,
     *,
+    suppliers: list[str],
     count_per_month: int = 20,
 ) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction]]:
     """Generate miscellaneous bank transactions with GL entries.
@@ -2075,6 +2219,7 @@ def generate_finance_dataset(
     roleplay_orders: int = 0,
     roleplay_deliveries: int = 0,
     lever: Lever | None = None,
+    profile: str | ScaleProfile | None = None,
     **_kwargs: object,
 ) -> FinanceDataset:
     """Generate a complete finance dataset with closed-loop accounting.
@@ -2087,10 +2232,11 @@ def generate_finance_dataset(
         seed: Random seed for reproducibility.
         months: Number of months to generate (fiscal year).
         fiscal_start: First day of the fiscal year.
-        invoices_count: Number of vendor/purchase invoices.
+        invoices_count: Number of vendor/purchase invoices. Overrides the profile.
         q4_seasonal_boost: Fractional boost applied to Q4 revenue months.
         lever: Optional constructed intervention — a DGP parameter
             change at a known period with a known effect; see :class:`Lever`.
+        profile: Scale profile name or object (§9). Defaults to ``tiny``.
 
     Returns:
         FinanceDataset with all 8 tables populated and numerically consistent.
@@ -2099,8 +2245,10 @@ def generate_finance_dataset(
     if fiscal_start is None:
         fiscal_start = date(2025, 1, 1)
 
+    scale = get_profile(profile)
     q4_boost = q4_seasonal_boost if q4_seasonal_boost is not None else 0.3
-    inv_count = invoices_count if invoices_count is not None else 3000
+    inv_count = invoices_count if invoices_count is not None else scale.vendor_invoices
+    suppliers = supplier_names(scale.suppliers)
 
     counters = _Counters()
 
@@ -2112,17 +2260,33 @@ def generate_finance_dataset(
     # Drawn from entity-keyed streams only, NEVER the sequential `rng`, so the
     # ledger cycles below are independent of order volume and a volume lever stays
     # an exact counterfactual. Its GL entries are minted LAST (see below).
-    customers = generate_customers()
-    products = generate_products()
+    customers = generate_customers(seed, scale, fiscal_start, months)
+    products = generate_products(seed, scale, fiscal_start, months)
     sales_orders, sales_order_lines = generate_sales_orders(
         seed,
         customers,
         products,
         fiscal_start,
         months,
+        profile=scale,
         q4_seasonal_boost=q4_boost,
         lever=lever,
     )
+
+    # ── The scale anchor ──
+    # What the firm actually contributes, and therefore what it can afford to spend.
+    # Computed at lever=None DELIBERATELY: a price or volume intervention must not
+    # mechanically move payroll, or the counterfactual stops being attributable and
+    # `intervention.yaml`'s "unaffected: the expenditure cycle" becomes a false claim.
+    # The baseline chain is regenerated only when a lever is active, and it is pure
+    # draws — no ledger, no ids — so the common path costs nothing.
+    anchor_lines = sales_order_lines
+    if lever is not None:
+        _, anchor_lines = generate_sales_orders(
+            seed, customers, products, fiscal_start, months,
+            profile=scale, q4_seasonal_boost=q4_boost, lever=None,
+        )
+    opex_budget = _scale_anchor(anchor_lines) * Decimal(str(scale.opex_share_of_contribution))
 
     # ── Expenditure cycle ──
     # Purchase invoices → Invoice + GL (DR: Expense, CR: AP)
@@ -2132,6 +2296,8 @@ def generate_finance_dataset(
         months,
         counters,
         count=inv_count,
+        suppliers=suppliers,
+        budget=opex_budget * Decimal(str(_OPEX_ALLOCATION["vendor_bills"])),
     )
 
     # Vendor payments → Payment + GL + Bank (DR: AP, CR: Cash)
@@ -2139,6 +2305,7 @@ def generate_finance_dataset(
         lambda _inv: rng,
         invoices,
         counters,
+        suppliers,
     )
 
     # ── Operating events ──
@@ -2148,6 +2315,8 @@ def generate_finance_dataset(
         fiscal_start,
         months,
         counters,
+        budget=opex_budget,
+        suppliers=suppliers,
     )
 
     # ── Misc bank transactions ──
@@ -2157,6 +2326,7 @@ def generate_finance_dataset(
         fiscal_start,
         months,
         counters,
+        suppliers=suppliers,
         count_per_month=20,
     )
 
@@ -2185,7 +2355,7 @@ def generate_finance_dataset(
     # every id the expenditure cycle already handed out exactly where it was.
     stock = _generate_inventory_cycle(
         seed, sales_orders, sales_order_lines, products, cogs_entry_by_order,
-        fiscal_start, months, counters,
+        fiscal_start, months, counters, suppliers,
     )
 
     # ── Assembly ──

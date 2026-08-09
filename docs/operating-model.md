@@ -36,8 +36,8 @@ provenance of the *shape*; generating the values is the point.
 
 | Dimension | Canonical entities | Tables today | State |
 | :-- | :-- | :-- | :-- |
-| **Demand** — your customers | customer, segment, region, order, order line | `customers`, `sales_orders`, `sales_order_lines`, `ar_invoices`, `receipts` | **lit** — DB1 per customer is exact |
-| **Offer** — what you sell | product, product group, price list | `products` (standard_cost, list_price) | **lit** — DB1 per product group is exact; price realization derivable |
+| **Demand** — your customers | customer, segment, region, order, order line | `customers`, `sales_orders`, `sales_order_lines`, `ar_invoices`, `receipts` | **lit** — DB1 per customer is exact; revenue is Pareto-concentrated and accounts open and lapse, so concentration and prior-period metrics have answers |
+| **Offer** — what you sell | product, product group, price list | `products` (standard_cost, list_price, validity window) | **lit** — DB1 per product group is exact; price realization derivable; a declared slice of the catalogue sells below contribution, so the portfolio can be pruned |
 | **Capital** — where cash sits | receivable, payable, inventory position, WIP | AR + AP + `balance_sheet` + `stock_movements`, `inventory_positions` | **lit** — CCC = DIO + DSO − DPO is gradeable at both grains; no WIP until Throughput |
 | **Supply** — your suppliers | supplier, PO, PO line, goods receipt, claim | none — `invoices.vendor_id` is a bare string | **dark** |
 | **Capacity** — what you run on | asset, site, line, shift, downtime, maintenance order | none | **dark** |
@@ -380,20 +380,36 @@ vendor bill that ages and settles like any other. On `month-end-close / clean / 
 *Purchases* also became a computable quantity in the process — it needs goods bills to be
 separable from expense bills, which is why the pinned DPO could not use it before.
 
-**The expense base is sized independently of the firm.** Gross profit is −3,660,147.05
-while DB1 per product group is ~+20.5M: revenue 63.3M less COGS 42.8M leaves 20.5M of
-contribution, against 24.2M of operating expense drawn from a *fixed* 3,000 vendor
-invoices plus fixed monthly payroll and rent. Those counts do not move with the size of
-the business, so the P&L sign is an artifact of a knob rather than a property of the firm
-— and at the `mid` profile the same knob would make the firm implausibly profitable
-instead. This is **§9's** problem, not the payable's: the fix is to size the expense base
-off a scale anchor, which is exactly what a scale profile has to declare. Until then, take
-gross profit and free cash flow as ungraded.
+**~~The expense base is sized independently of the firm.~~ Fixed in S1a.** Gross profit
+read −3,660,147.05 against DB1 of ~+20.5M, because 24.2M of operating expense came from a
+*fixed* 3,000 vendor invoices plus fixed monthly payroll and rent — counts that did not
+move with the size of the business, so the P&L sign was an artifact of a knob rather than
+a property of the firm. Operating expense is now sized off the **scale anchor**: the
+contribution the order lines actually produce, times a declared
+`opex_share_of_contribution`. The invoice count sets granularity, not spend.
 
-**Master data is thin for the ladders it now carries.** 16 customers and 9 products across
-4 product groups will not support customer-concentration, portfolio-tail or peer-comparison
-metrics, all of which are canonical for Demand and Offer. Raise before those metrics are
-declared gradeable — §9 sizes it.
+| | `tiny` | `mid` |
+| :-- | --: | --: |
+| revenue | 28.3M | 178.1M |
+| gross margin | 26.6% | 31.0% |
+| gross profit | **+1.82M** | **+13.68M** |
+| operating margin | 6.4% | 7.7% |
+
+The anchor is computed at `lever=None` deliberately. A price or volume intervention must
+not mechanically move payroll, or `intervention.yaml`'s "unaffected: the expenditure
+cycle" becomes a false claim and the counterfactual stops being attributable.
+
+**~~Master data is thin for the ladders it now carries.~~ Fixed in S1a.** 16 customers and
+9 products could not support concentration, portfolio-tail or peer metrics. `mid` carries
+400 customers and 240 products across 12 groups, with the shapes that make those metrics
+answerable rather than merely computable — see §9.
+
+**Free cash flow is a cold start, not a loss.** FCF is negative at every profile while
+operating profit is positive, and the arithmetic is right: the corpus begins with zero
+receivables and zero stock, so the first fiscal year absorbs a full AR balance (DSO ~86
+days) and a full inventory position into working capital. That is a property of a corpus
+that starts from nothing, not a defect — but a consumer benchmarking FCF against a going
+concern should know which one it has.
 
 ## 8. The prune
 
@@ -432,17 +448,37 @@ the honesty of the distributions. So scale is a **named profile**, declared per 
 
 | Profile | Customers | Products / groups | Suppliers | Orders/yr | Use |
 | :-- | --: | --: | --: | --: | :-- |
-| `tiny` | 16 | 9 / 4 | 12 | ~3.6k | fast tests, the current shape |
-| `mid` *(default)* | 400 | 240 / 12 | 120 | ~14k | the reference company |
-| `large` | 4,000 | 1,200 / 24 | 600 | ~140k | stress, scan cost, tail behaviour |
+| `tiny` | 16 | 9 / 4 | 20 | ~2.7k | fast tests; the shape the generator grew up with |
+| `mid` | 400 | 240 / 12 | 120 | ~14.8k | the reference company — `month-end-close` asks for it |
+| `large` | 4,000 | 1,200 / 24 | 600 | ~148k | stress, scan cost, tail behaviour |
+
+`src/testdata/scale.py`; declared as `generator.scale_profile` in the scenario YAML and
+stamped into the corpus identity (§6). The generator's own default stays `tiny`, so
+calling it directly in a test suite is cheap.
 
 Counts alone are not the point. **A population without a shape is not more realistic than
 a handful** — 400 uniform customers make concentration risk unmeasurable exactly as 16 do.
-Each profile therefore carries its distributions: revenue per customer Pareto (so the top
-5% is a real number), order value log-normal, a portfolio tail of products below
-contribution threshold, and **entity birth and death** — customers and products that
-appear and disappear mid-year, which is what makes prior-period and peer targets face the
-case they actually fail on.
+Each profile therefore carries its distributions:
+
+- **Revenue per customer is Pareto** — the top fifth of the book holds 41% of revenue at
+  `tiny` and 53% at `mid`. Concentration risk has an answer instead of a shrug. The tail
+  is capped (an uncapped Pareto occasionally draws a customer who *is* the firm) and
+  renormalised by the **truncated** mean, so the shape changes concentration without
+  quietly changing total volume.
+- **Order value is log-normal** in units, so the mean and the median part company and a
+  consumer reporting one for the other is visibly wrong.
+- **A declared fraction of the catalogue sits below the contribution threshold** — priced
+  thinly enough that the ordinary discount range drives realised unit contribution to zero
+  or through it. A portfolio where every item earns cannot be pruned, and "what should we
+  drop?" is a canonical Offer question that had no answer here.
+- **Entities are born and die mid-year.** `customers.created_date` / `churned_date` and
+  `products.launched_date` / `discontinued_date` are real columns, and they gate the
+  *orders*, not just the master row — a validity window nothing respects is decoration.
+  This is the case prior-period and peer comparisons actually fail on: a customer whose
+  collapse is that they did not exist yet.
+
+All of it is drawn from entity-keyed streams, so none of it disturbs a lever's
+counterfactual.
 
 ## 10. Order of work
 
@@ -451,7 +487,7 @@ case they actually fail on.
 | **S0** | The prune (§8) and the family registry (§3) | a family is added without editing export, schema transforms, ground truth and the runner |
 | **S1** ✅ | Inventory + settle the replenishment payable | **met** — DPO 271 → 59.2 days; CCC gradeable monthly and annually; roll-forward and the GL tie hold per product, location and period |
 | **S1½** ✅ | Corpus identity (§6) | **met** — one stamp across all six output files, digest recomputable from the published fields, levered run separable from its baseline |
-| **S1a** | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | `tiny`/`mid`/`large` selectable; gross profit stops being an artifact of a fixed invoice count (§7). Adds `profile` to the identity tuple |
+| **S1a** ✅ | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | **met** — `tiny`/`mid`/`large` selectable and stamped; gross profit positive and plausible at every profile (§7); Pareto revenue, log-normal order value, a priced-thin catalogue tail and real validity windows |
 | **S1b** | Oracle contract v2 (§5) | every metric carries its definition and variants; a consumer's alternative grades as a named variant, not as an unexplained delta |
 | **S2** | Supply | OTIF, price variance, lead-time spread and effective cost per unit gradeable per supplier; three-way match exists with a declared exception rate |
 | **S3** | Capacity | cost per capacity hour and utilization gradeable per asset against a declared ceiling; depreciation becomes asset-derived |
@@ -473,5 +509,9 @@ Decided:
 
 - **Injection labels are consumer-agnostic** (§8) — the generator names the defect, the
   consumer maps it to its own machinery.
-- **Scale is a profile, `mid` by default** (§9), because generation cost is negligible and
-  the metrics that need populations are canonical, not optional.
+- **Scale is a profile** (§9), because generation cost is negligible and the metrics that
+  need populations are canonical, not optional. `month-end-close` — the reference company
+  — declares `mid`; the generator's own default stays `tiny` so a consumer's test suite
+  is not made to pay for the reference corpus.
+- **The scale anchor is computed at `lever=None`** (§7), so an intervention moves what it
+  claims to move and nothing else.

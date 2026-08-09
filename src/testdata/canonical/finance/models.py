@@ -284,6 +284,11 @@ class Customer(BaseModel):
     segment: str = Field(description="Commercial segment — the Demand ladder's rung")
     region: str = Field(description="Sales region")
     payment_terms: PaymentTerms = Field(description="Agreed settlement terms")
+    # The validity window. A master table with no lifecycle cannot express churn, and
+    # a corpus without churn never poses the case prior-period and peer comparisons
+    # actually fail on: a customer whose "decline" is that they did not exist yet.
+    created_date: datetime.date = Field(description="When the account was opened")
+    churned_date: datetime.date | None = Field(default=None, description="When the account lapsed, if it did")
 
 
 class Product(BaseModel):
@@ -301,6 +306,10 @@ class Product(BaseModel):
     product_group: str = Field(description="Product group — the Offer ladder's rung")
     standard_cost: Decimal = Field(description="Standard cost per unit (the DB1 cost side)")
     list_price: Decimal = Field(description="List price per unit before discount")
+    # Same reason as the customer window: a portfolio with no launches and no
+    # discontinuations makes every year-over-year product comparison trivially valid.
+    launched_date: datetime.date = Field(description="When the item became sellable")
+    discontinued_date: datetime.date | None = Field(default=None, description="When it left the catalogue, if it did")
 
 
 class SalesOrder(BaseModel):

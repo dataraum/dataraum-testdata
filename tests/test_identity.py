@@ -48,6 +48,7 @@ def test_every_parameter_moves_the_id() -> None:
         "months": _identity(months=6),
         "normalization": _identity(normalization="flat"),
         "fiscal_start": _identity(fiscal_start="2024-07-01"),
+        "profile": _identity(profile="mid"),
         "version": _identity(version="99.0.0"),
         "families": _identity(families=(*default_families(), "supply")),
         "lever": _identity(lever={"type": "price_level", "period_k": 6, "factor": 1.15}),
@@ -85,7 +86,7 @@ def test_the_id_is_stable_across_processes() -> None:
         families=("core_ledger", "operating_chain", "inventory"),
         version="0.2.0",
     )
-    assert identity.corpus_id == "524369963d65"
+    assert identity.corpus_id == "5fcccfb37476"
 
 
 def test_the_family_set_is_the_declared_one() -> None:

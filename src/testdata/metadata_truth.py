@@ -314,6 +314,13 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         # tables' period: a period label, not a date.
         "stock_movements.date",
         "inventory_positions.period",
+        # Master-data validity windows (§9). These are the birth/death evidence: a
+        # consumer that computes a prior-period comparison without them will read a
+        # customer's non-existence as a collapse.
+        "customers.created_date",
+        "customers.churned_date",
+        "products.launched_date",
+        "products.discontinued_date",
     ],
 }
 

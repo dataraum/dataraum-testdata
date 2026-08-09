@@ -33,6 +33,7 @@ from testdata.ground_truth import (
 )
 from testdata.identity import CorpusIdentity
 from testdata.metadata_truth import export_metadata_truth
+from testdata.scale import DEFAULT_PROFILE
 from testdata.schema_transforms import (
     ColumnStyle,
     KeyStrategy,
@@ -68,6 +69,7 @@ class ScenarioConfig:
     strategy: str
     # Generator parameters
     normalization: NormalizationLevel
+    scale_profile: str
     fiscal_start: date
     generator_kwargs: dict
     # Multi-source (None for single-source scenarios)
@@ -123,6 +125,7 @@ def load_scenario_config(scenario_name: str) -> ScenarioConfig:
         months=defaults["months"],
         strategy=defaults["strategy"],
         normalization=gen.get("normalization", "full"),
+        scale_profile=gen.get("scale_profile", DEFAULT_PROFILE),
         fiscal_start=date.fromisoformat(gen.get("fiscal_start", "2025-01-01")),
         generator_kwargs=gen_kwargs,
         sources=sources,
@@ -235,6 +238,7 @@ def run_scenario(
         seed=seed,
         months=months,
         fiscal_start=config.fiscal_start.isoformat(),
+        profile=config.scale_profile,
         normalization=config.normalization,
         lever=lever,
     )
@@ -252,6 +256,7 @@ def run_scenario(
         roleplay_orders=400 if needs_roleplay else 0,
         roleplay_deliveries=700 if needs_roleplay else 0,
         lever=lever_spec,
+        profile=config.scale_profile,
         **config.generator_kwargs,
     )
 

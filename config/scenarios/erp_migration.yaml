@@ -25,9 +25,10 @@ defaults:
   strategy: high
 
 generator:
+  # These scenarios are about schema shape, not population size.
+  scale_profile: tiny
   normalization: partial  # merged exports from two systems
   fiscal_start: "2025-04-01"
-  invoices_count: 1500
   q4_seasonal_boost: 0.0  # no seasonal effect during migration window
 
 stories:
