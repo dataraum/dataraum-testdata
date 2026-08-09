@@ -1,6 +1,6 @@
-"""Generative injection families — parameterized corruption generators (DAT-450).
+"""Generative injection families — parameterized corruption generators.
 
-A *family* is the ADR-0009 answer to "fixed fixtures are dead": a strategy declares
+A *family* is the answer to "fixed fixtures are dead": a strategy declares
 a family + a recorded seed, and the generator SAMPLES the concrete corruption
 (tokens, values, rates) from a parameter space. Two runs with different seeds
 produce a different surface but the same family semantics; a recorded seed
@@ -9,10 +9,10 @@ nothing — recall over a sampled family proves capability.
 
 The families also *double as the calibration rig*: because each sampled instance
 carries a ground-truth label, running a witness over many samples and scoring its
-agreement is how the shipped reliabilities are measured (DAT-450, the eval rig).
+agreement is how a consumer measures its own reliabilities.
 
 First-wave family implemented here: **null_tokens** (feeds the null_semantics
-adjudication, DAT-457). It samples two LABELLED classes into a numeric column:
+adjudication). It samples two LABELLED classes into a numeric column:
 
 * **markers** (``is-null``) — sentinel SHAPES a human types to mean "no value":
   status words, error codes, punctuation runs. A SMALL set, each injected into
@@ -29,7 +29,7 @@ witness's accuracy at telling a sentinel from a genuine-but-unparseable value, n
 its eagerness to fire on anything quarantined.
 
 Other first-wave families (garbage names, mixed units, stock/flow, heterogeneity)
-are framework-ready but deferred until their witnesses land (DAT-446/428/445/473).
+are framework-ready but deferred until their witnesses land.
 """
 
 from __future__ import annotations
@@ -121,11 +121,11 @@ def mint_decoy(rng: random.Random, style: str) -> str:
 
 
 # A corrupted column only infers a numeric type — and thus quarantines its tokens
-# for null_semantics to adjudicate — when parse_success ≥ min_confidence (0.85,
-# phases/typing.yaml). parse_success ≈ 1 − (marker + decoy ratio), so the COMBINED
-# upper bound is capped here, leaving ≥0.88 parse (a margin over 0.85). Enforced,
-# not just documented: at 16% corruption journal_lines.debit fell to VARCHAR and the
-# adjudication was silently skipped (DAT-450 live-run finding).
+# for null adjudication — while parse success stays above the typing confidence floor
+# a consumer applies (0.85 is representative). parse_success ≈ 1 − (marker + decoy
+# ratio), so the COMBINED upper bound is capped here, leaving ≥0.88 parse. Enforced,
+# not merely documented: measured at 16% corruption, a numeric column falls back to
+# VARCHAR and the adjudication is skipped — an injection nobody can see is not a test.
 _MAX_COMBINED_RATIO = 0.12
 
 
@@ -153,8 +153,8 @@ class NullTokenFamilyParams:
         if worst > _MAX_COMBINED_RATIO:
             raise ValueError(
                 f"null_tokens family: combined marker+decoy upper bound {worst:.3f} exceeds "
-                f"{_MAX_COMBINED_RATIO} — the corrupted column would parse below typing "
-                "min_confidence (0.85) and fall back to VARCHAR, so null_semantics never runs."
+                f"{_MAX_COMBINED_RATIO} — the corrupted column would parse below a typing "
+                "confidence floor of 0.85 and fall back to VARCHAR, so no adjudication runs."
             )
 
 
@@ -228,7 +228,7 @@ CURATED_VOCAB: tuple[str, ...] = _VOCAB_MARKERS
 
 # --- the mixed_units family ------------------------------------------------
 #
-# Feeds unit_consistency (DAT-428): a numeric column secretly mixing SCALES under one
+# Feeds unit_consistency: a numeric column secretly mixing SCALES under one
 # declared unit (some values in kEUR among EUR). A SCALE factor (a power of ten), NOT
 # a ×1.1 currency factor — a 10% shift is undetectable from values; a 1000× shift is a
 # clean second mode in log-magnitude that the bimodality witness reads.
@@ -268,10 +268,10 @@ def sample_mixed_units_family(seed: int, params: MixedUnitsFamilyParams | None =
     )
 
 
-# --- the stock/flow family (DAT-445) ---------------------------------------
+# --- the stock/flow family ---------------------------------------
 #
-# Feeds temporal_behavior (DAT-445): the two-witness stock/flow adjudication
-# (ontology prior vs LLM claim). Unlike the value-corruption families, the LABEL is
+# Feeds temporal_behavior: the two-witness stock/flow adjudication
+# (a declared prior vs a claim). Unlike the value-corruption families, the LABEL is
 # the column's semantics, not an injected token — each sample is a set of measure
 # columns, each (clear_name, is_stock). A STOCK is a carried-forward point-in-time
 # level (a balance/position that must NOT be summed across periods); a FLOW is a
@@ -330,9 +330,8 @@ _FLOW_TEMPLATES: tuple[str, ...] = (
 )
 
 
-# Engine cap on event-side convention columns (dataraum.analysis.lineage.processor
-# MAX_CONVENTION_COLUMNS): an events table's numeric columns beyond the first 8
-# (sorted) are never enumerated as conventions, so a backed stock past the cap could
+# Consumers that enumerate an events table's numeric columns as candidate conventions
+# cap the enumeration; 8 is a representative cap, and a backed stock past it could
 # never reconcile. The sampler caps the backed set here so every backed label is
 # actually measurable.
 _MAX_BACKED_COLUMNS = 8
@@ -341,7 +340,7 @@ _MAX_BACKED_COLUMNS = 8
 def stock_flow_events_column(name: str) -> str:
     """The probe_events column backing one stock measure column.
 
-    One numeric movements column per backed stock — the signed convention the engine's
+    One numeric movements column per backed stock — the signed convention an
     aggregation-lineage discovery should find (``Σ events ≈ Δ stock`` per series/period).
     Shared by the injector (which writes it) and recorded in the registry parameters
     (``events_column``) as the rig's ground truth.
@@ -359,16 +358,16 @@ class StockFlowFamilyParams:
     # one — the debit_balance archetype: one stock cue + one flow cue, so the name does
     # NOT reliably signal the behaviour. Default 0 = clear-only (the existing corpus); a
     # strategy opts in to measure the llm_claim witness's reliability in the HARD regime
-    # (DAT-450) — where it genuinely fails, the boundary with the DAT-491 reality witness.
+    # — where it genuinely fails, the boundary with the reality witness.
     ambiguity: tuple[float, float] = (0.0, 0.0)
-    # --- events backing (DAT-491) --------------------------------------------------
+    # --- events backing --------------------------------------------------
     # Fraction of STOCK columns backed by a probe_events movements table whose
     # per-(series, period) sums reconcile to the stock's period-over-period deltas
     # (opening + Σ events = closing) — the exact identity the temporal_behavior
     # ``structural_reconciliation`` witness reads. Default 0 = no events table (the
     # existing corpus); a calibration strategy opts in to measure that witness's
     # reliability (its 0.85 in reliabilities.yaml is an uncalibrated placeholder
-    # precisely because the DAT-450 corpus has no events). Orthogonal to the name
+    # precisely because the corpus has no events). Orthogonal to the name
     # axes: backing changes the EVENTS, never the measure column's values or name.
     backed_fraction: tuple[float, float] = (0.0, 0.0)
     # Fraction of BACKED columns whose reconciliation is BROKEN: a sampled fraction of
@@ -377,23 +376,23 @@ class StockFlowFamilyParams:
     # confidently confirm).
     broken_fraction: tuple[float, float] = (0.0, 0.0)
     # Per broken column: fraction of its series broken (≥1 series). Intact series still
-    # reconcile, so the engine's per-entity vote fraction (match_rate) degrades with it.
+    # reconcile, so a per-entity vote fraction (match_rate) degrades with it.
     break_ratio: tuple[float, float] = (0.5, 1.0)
     # Per broken column: relative size of the per-period perturbation, in units of the
-    # series' mean absolute movement — i.e. ≈ the per-entity stock residual R_stock the
-    # engine measures. The default range straddles the engine's FIRE_RESIDUAL_MAX = 0.5
-    # abstain gate (reconcile.py) from both sides, so the rig traces the full response:
+    # series' mean absolute movement — i.e. ≈ the per-entity stock residual R_stock.
+    # The default range straddles a 0.5 residual abstain gate from both sides, so a rig
+    # traces the full response:
     # sub-gate breaks (entity still votes, residual elevated) through clear abstentions.
     break_magnitude: tuple[float, float] = (0.3, 1.2)
     # Events per (series, period) cell. Lower bound 2 keeps the events side STRICTLY
-    # finer-grained than the probe table (one row per cell), which the engine's
-    # lineage direction gate requires (event rows > measure rows over paired cells).
+    # finer-grained than the probe table (one row per cell), which a lineage direction
+    # gate requires (event rows > measure rows over paired cells).
     events_per_cell: tuple[int, int] = (2, 6)
 
     def __post_init__(self) -> None:
         if self.events_per_cell[0] < 2:
             raise ValueError(
-                "stock_flow family: events_per_cell lower bound must be >= 2 — the engine's "
+                "stock_flow family: events_per_cell lower bound must be >= 2 — an "
                 "aggregation-lineage direction gate needs the events side strictly finer-grained "
                 "than the probe table (one probe row per (series, period) cell)."
             )
@@ -406,7 +405,7 @@ class ProbeColumn:
     name: str
     is_stock: bool  # True → stock (point_in_time), False → flow (additive)
     ambiguous: bool = False  # True → a conflicting-cue (hard) name, not a clear one
-    # --- events backing (DAT-491): the structural_reconciliation rig's ground truth ---
+    # --- events backing: the structural_reconciliation rig's ground truth ---
     backed: bool = False  # True → probe_events carries this column's movements
     broken: bool = False  # True → a sampled fraction of series does NOT reconcile
     break_ratio: float = 0.0  # fraction of series broken (0.0 when not broken)
@@ -489,7 +488,7 @@ def sample_stock_flow_family(seed: int, params: StockFlowFamilyParams | None = N
         seen.add(name)
         columns.append(ProbeColumn(name=name, is_stock=is_stock, ambiguous=is_ambig))
 
-    # Events backing (DAT-491) — assigned on the FINAL column set (after name dedup),
+    # Events backing — assigned on the FINAL column set (after name dedup),
     # AFTER all name/label draws, so a recorded seed's name surface is unchanged by
     # turning backing on. Only stocks can be backed (the witness's identity is
     # opening + Σ events = closing); flows stay as they are.
@@ -511,7 +510,7 @@ def sample_stock_flow_family(seed: int, params: StockFlowFamilyParams | None = N
     return StockFlowFamilySample(seed=seed, columns=tuple(columns))
 
 
-# --- the formula_divergence family (DAT-442, ADR-0009 derived-value) --------
+# --- the formula_divergence family -----------------------------------------
 #
 # Feeds derived_value: each sampled GROUP is three numeric columns — two sources and
 # a target whose NAME advertises a formula over them (`freight_total` next to
@@ -527,7 +526,7 @@ def sample_stock_flow_family(seed: int, params: StockFlowFamilyParams | None = N
 #   the graded match rate degrades by exactly that fraction (generalizes
 #   ``drift_formula``'s error_ratio into a labelled family).
 #
-# The formula language mirrors the engine's discovery/hypothesis space (binary
+# The formula language mirrors a discovery/hypothesis space (binary
 # ``a op b`` over two same-table numeric columns, op in + - * /; analysis/correlation/
 # within_table/derived_columns.py + the column_annotation prompt). One DELIBERATE
 # out-of-space stress kind exists — ``scaled`` (values = named formula × a constant
@@ -543,7 +542,7 @@ _COMMUTATIVE_OPS = frozenset({"sum", "product"})
 
 
 def apply_operation(op: str, a: float, b: float) -> float:
-    """Evaluate one binary formula op — the family's (and the engine's) formula language."""
+    """Evaluate one binary formula op — the family's formula language."""
     if op == "sum":
         return a + b
     if op == "difference":
@@ -558,9 +557,9 @@ def apply_operation(op: str, a: float, b: float) -> float:
 def formula_identity(op: str, source_a: str, source_b: str) -> str:
     """Canonical formula identity, e.g. ``sum(net,tax)``.
 
-    Mirrors the engine's claim identity (entropy/measurements/derived_value.py):
+    Mirrors a derived-value claim identity:
     lowercased operands, sorted for commutative operations — so the recorded label
-    and the engine's adjudication slot share one spelling.
+    and the adjudication slot share one spelling.
     """
     a, b = source_a.strip().lower(), source_b.strip().lower()
     if op in _COMMUTATIVE_OPS and b < a:
@@ -570,7 +569,7 @@ def formula_identity(op: str, source_a: str, source_b: str) -> str:
 
 # Name patterns per op: (target_suffix, (source_a part, lo, hi), (source_b part, lo, hi)).
 # The suffix vocabulary is op-specific so the target name advertises ITS op; the value
-# ranges keep targets away from zero (zero-target rows are excluded from the engine's
+# ranges keep targets away from zero (zero-target rows are excluded from a
 # grading), keep divisors well above 1, and keep difference minuends strictly above
 # subtrahends — which also makes every alternate-op value separate from the named
 # formula's value by orders of magnitude more than the 0.01 grading tolerance.
@@ -649,7 +648,7 @@ class FormulaDivergenceFamilyParams:
         if self.scaled_rate[0] < 0.02:
             raise ValueError(
                 "formula_divergence family: scaled_rate below 0.02 — a near-1 factor can hide "
-                "under the engine's 0.01 absolute grading tolerance on small targets."
+                "under a 0.01 absolute grading tolerance on small targets."
             )
 
 
@@ -688,7 +687,7 @@ class FormulaProbeGroup:
 
     @property
     def discoverable(self) -> bool:
-        """Whether the divergent values' formula is in the engine's binary-op language."""
+        """Whether the divergent values' formula is in the binary-op language."""
         return self.factor is None
 
 
@@ -728,7 +727,7 @@ def sample_formula_divergence_family(
 
     # The scaled (out-of-space) kind: a sampled subset of divergent groups. Ratio-named
     # targets are excluded — a near-1 factor on a small quotient could hide under the
-    # engine's 0.01 absolute grading tolerance, muddying the label.
+    # 0.01 absolute grading tolerance, muddying the label.
     divergent = [i for i in range(n) if modes[i] != "agree"]
     eligible = [i for i in divergent if ops[i] != "ratio"]
     n_scaled = min(len(eligible), round(len(divergent) * rng.uniform(*p.scaled_fraction)))
@@ -768,7 +767,7 @@ def sample_formula_divergence_family(
     return FormulaDivergenceFamilySample(seed=seed, groups=tuple(groups))
 
 
-# --- the relationship_pairs family (DAT-408 / DAT-450) ----------------------
+# --- the relationship_pairs family ----------------------
 #
 # Feeds relationship_discovery: the four-witness genuine/spurious adjudication
 # (value_overlap / llm_judgment / manual_curation / keeper_retention). Like
@@ -789,11 +788,11 @@ def sample_formula_divergence_family(
 # The name carries the semantic signal the LLM judges (genuine pairs share an
 # entity noun across both sides; spurious pairs use two different code nouns),
 # while the VALUES carry the statistic the data witness reads — so each witness
-# can be scored independently against the pair's label (the DAT-450 rig).
+# can be scored independently against the pair's label (the rig).
 #
 # Every designed pair keeps its expected value-overlap statistic ABOVE the
-# relationship phase's candidate threshold (min_confidence 0.5,
-# dataraum-config/phases/relationships.yaml) — a pair below it never becomes a
+# candidate threshold a relationship discovery applies (0.5 is representative) —
+# a pair below it never becomes a
 # candidate row, is never shown to the LLM selector, and so measures nothing.
 
 # The two probe tables the family fills. The child is the strategy's injection
@@ -801,7 +800,7 @@ def sample_formula_divergence_family(
 REL_PARENT_TABLE = "ref_entities"
 REL_CHILD_TABLE = "ref_activity"
 
-# Candidate floor: phases/relationships.yaml min_confidence (0.5) + margin.
+# Candidate floor: a representative relationship-candidate threshold (0.5) + margin.
 _MIN_DESIGNED_OVERLAP = 0.55
 
 # Entity nouns for GENUINE pairs — the same noun appears on both sides
@@ -895,7 +894,7 @@ class RelationshipFamilyParams:
         if worst_broken < _MIN_DESIGNED_OVERLAP:
             raise ValueError(
                 f"relationship_pairs family: worst-case broken-pair Jaccard {worst_broken:.3f} falls below "
-                f"{_MIN_DESIGNED_OVERLAP} — under the relationship phase's candidate threshold (min_confidence "
+                f"{_MIN_DESIGNED_OVERLAP} — under a representative relationship-candidate threshold ("
                 "0.5) the pair never becomes a candidate row and measures nothing."
             )
         if self.spurious_jaccard[0] < _MIN_DESIGNED_OVERLAP:
@@ -1001,14 +1000,14 @@ def sample_relationship_family(seed: int, params: RelationshipFamilyParams | Non
     return RelationshipFamilySample(seed=seed, pairs=tuple(pairs))
 
 
-# --- the slice_conditional_null family (DAT-473) ----------------------------
+# --- the slice_conditional_null family ----------------------------
 #
 # Feeds slice_conditional_null: nulls in a measure column CONCENTRATED in particular
 # slices of a categorical dimension. The dataset-level null_ratio is blind to this — a
 # column 5% null overall reads as mild while one cost center is 60% null, silently biasing
 # that slice's aggregates. The detector reads the concentration with bias-corrected
 # Cramér's V of (value IS NULL) × slice under the Cochran validity rule (kill gate passed
-# 2026-06-11; pinned in dataraum-eval test_slice_null_gate.py).
+# 2026-06-11).
 #
 # The family is NOT a value corruption like null_tokens — it samples the MISSINGNESS SHAPE:
 # how many slices are affected, the conditional null rate inside them, and the (low) base

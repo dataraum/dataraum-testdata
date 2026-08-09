@@ -1,28 +1,29 @@
-"""Agent-layer ground truth for the finance corpus — the generator's own answers.
+"""Structural ground truth for the corpus — the generator's own answers about shape.
 
-The engine persists agent-authored / derived metadata in ``current_*`` read views
-(relationships, table/semantic roles, column concepts, stock/flow, cycles, metric
-additivity). The eval grades that agent layer the way detectors are graded against
-``entropy_map.yaml`` — but the oracle needs a truth to grade against, and the
-generator already *knows* every one of those answers. This module is that truth,
-authored from the finance MODELS + generator design (``canonical/finance/models.py``,
-``generators.py``, ``ground_truth.py``), and exported alongside ``entropy_map.yaml``
-and ``ground_truth.yaml`` as ``metadata_truth.yaml`` (DAT-682).
+``ground_truth.yaml`` answers *what the numbers are*; this module answers *what the
+schema means*: the FK topology, which tables are facts and which dimensions, which
+columns are measures and which timestamps, whether a measure is a stock or a flow,
+which axes a metric may be rolled up along, the business cycles the corpus supports,
+and the conformed-dimension matrix. Anything recovering structure from the data —
+relationship detection, grain and role inference, stock/flow adjudication — is
+gradeable against it. Exported as ``metadata_truth.yaml`` beside ``entropy_map.yaml``
+and ``ground_truth.yaml``.
 
-It is the testdata-side home of what the eval hand-authored under DAT-684/685/686/718;
-the eval now consumes this export, so the two never drift (an eval Tier-1 consistency
-test binds them).
+The truth is authored from the models and the generator design
+(``canonical/finance/models.py``, ``generators.py``, ``ground_truth.py``), never
+measured from the output — measuring it would grade the data against itself.
 
-Determinism split (the anti-Goodhart grammar, mirrored by the eval oracle):
-  * ``function_symmetry`` verdicts (AVG / COUNT(DISTINCT) / ratio never reconcile;
-    the four HARD structural relationships/roles) are fixed by structure alone and
-    HARD-asserted — no upstream label can game them.
-  * ``label_dependent`` verdicts (SUM(flow) additive, SUM(stock) time-stripped,
-    COUNT(event) additive) also need a correct upstream detector label and are graded
-    as diagnostics (xfail, banded) — re-grading a detector deterministically through a
-    downstream oracle would be Goodhart at the harness level.
+Determinism split, because not every verdict is equally hard:
+  * ``function_symmetry`` — fixed by structure alone (AVG / COUNT(DISTINCT) / ratio
+    never reconcile across a partition; the hard structural relationships and roles).
+    No upstream labelling can change the right answer, so these are assertable
+    outright.
+  * ``label_dependent`` — correct only if an upstream classification is correct
+    (SUM over a flow is additive, SUM over a stock is not, COUNT of events is).
+    A consumer grading these is also grading its own stock/flow call, so they belong
+    in a diagnostic band rather than a hard assertion.
 
-Remap-safety (DAT-682 AC): the truth is authored at canonical (``full`` / snake_case)
+Remap-safety: the truth is authored at canonical (``full`` / snake_case)
 table + column names. ``remap_metadata_truth`` rewrites table names through the
 normalization ``table_mapping`` and column names through a ``column_style``, mirroring
 how ``InjectionRegistry.remap_tables`` keeps ``entropy_map.yaml`` valid. Cross-table
@@ -32,15 +33,14 @@ introduced by normalization *merges* (e.g. ``payments.amount -> invoice_data.pay
 are NOT reflected — the merged columns keep canonical names, the same table-only
 contract ``entropy_map.yaml`` follows.
 
-Folded-dimension identity truth (``folded_dimensions`` / ``degenerate_ids``, DAT-757)
-IS carried — level-specific — for the denormalized (``flat`` / ``single``) shapes, so the
-wide-variant grading is NO LONGER truth-free. A folded dimension is a referenced dimension
-whose FK-target table a normalization level INLINED into a fact; the generator knows the
-fold because it performed the join (``schema_transforms._inline_chart_of_accounts``), and
-the folded columns' identity is the concept of the source dimension table (two facts that
-fold the SAME source share ONE dimension). Degenerate operational IDs (a fact's own PK)
-ground to no concept and must abstain — the surface the DAT-757 eval /ground gate proved
-the engine's g3 wrongly asserts as hierarchies on wide data.
+Folded-dimension identity truth (``folded_dimensions`` / ``degenerate_ids``) IS carried,
+level-specific, for the denormalized (``flat`` / ``single``) shapes, so a wide variant is
+not truth-free. A folded dimension is a referenced dimension whose FK-target table a
+normalization level INLINED into a fact; the generator knows the fold because it performed
+the join (``schema_transforms._inline_chart_of_accounts``), and the folded columns'
+identity is that of the source dimension table — two facts that fold the SAME source share
+ONE dimension. Degenerate operational IDs (a fact's own primary key) identify nothing and
+must abstain; asserting a hierarchy over them is the characteristic wide-data error.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ VERTICAL = "finance"
 # a standard_field's extract). `categorical_additive` / `time_additive` say whether a
 # breakdown by that axis class reconciles to the unsliced total; the reason names why
 # it does not (engine vocab: stock / average / distinct_count / ratio), null when it
-# reconciles. Keys are ontology metric/measure names, NOT table.column — this section
+# reconciles. Keys are metric/measure names, NOT table.column — this section
 # is schema-shape invariant (nothing to remap).
 _RATIO: dict[str, Any] = {
     "determinism": "function_symmetry",
@@ -174,7 +174,7 @@ def _metric_additivity() -> dict[str, Any]:
     return {"metrics": metrics, "measures": measures}
 
 
-# --- stock/flow per measure column (DAT-685) --------------------------------
+# --- stock/flow per measure column --------------------------------
 # The generator-known temporal_behavior: `additive` = per-period flow (sums across
 # time); `point_in_time` = stock/level (does not sum across time). Design oracle:
 # TrialBalance is per-period movement (FLOW); BalanceSheet.ending_balance is a
@@ -192,7 +192,7 @@ _STOCK_FLOW: dict[str, str] = {
     "fx_rates.rate": "point_in_time",
 }
 
-# Measures that reconcile against a finer event fact via the DAT-491 structural
+# Measures that reconcile against a finer event fact via the structural
 # stock/flow witness: the per-period movement tables reconcile `per_period` (FLOW),
 # the carry-forward level reconciles `cumulative` (STOCK) vs journal_lines.
 _RECONCILES_STRUCTURALLY: list[str] = [
@@ -201,12 +201,12 @@ _RECONCILES_STRUCTURALLY: list[str] = [
     "balance_sheet.ending_balance",
 ]
 
-# --- FK topology (DAT-684) --------------------------------------------------
+# --- FK topology --------------------------------------------------
 # The generator's TRUE FK topology from the models' FK docstrings (not from what the
 # LLM accepted — that would be circular). Enumerates every FK-bearing column across
 # the 9 source tables. Deliberately EXCLUDES two near-misses: `currency` (Currency is
 # an enum, no dimension table exists) and trial_balance.period ↔ balance_sheet.period
-# (a shared conformed period dimension / fan trap, not an FK — the DAT-723 false
+# (a shared conformed period dimension / fan trap, not an FK — the false
 # positive the precision test catches).
 _RELATIONSHIPS: list[dict[str, str]] = [
     {"from": "journal_lines.entry_id", "to": "journal_entries.entry_id"},
@@ -220,7 +220,7 @@ _RELATIONSHIPS: list[dict[str, str]] = [
     {"from": "chart_of_accounts.parent_id", "to": "chart_of_accounts.account_id"},
 ]
 
-# --- table + column roles (DAT-685) -----------------------------------------
+# --- table + column roles -----------------------------------------
 # is_fact_table HARD where structure decides: measure-bearing = fact, pure reference =
 # dimension. journal_entries (event header, no measure) and fx_rates (rate lookup that
 # also carries a measure) are genuinely modelable either way → reported, not asserted.
@@ -228,7 +228,7 @@ _TABLE_ROLES: dict[str, list[str]] = {
     "facts": [
         "journal_lines", "invoices", "payments", "bank_transactions",
         "trial_balance", "balance_sheet",
-        # DAT-884 operating chain: each carries its own measures at its own grain.
+        # operating chain: each carries its own measures at its own grain.
         "sales_order_lines", "ar_invoices", "receipts",
     ],
     "dimensions": ["chart_of_accounts", "customers"],
@@ -255,7 +255,7 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         "trial_balance.credit_balance",
         "balance_sheet.ending_balance",
         "fx_rates.rate",
-        # DAT-884 operating chain. `units` is a count and `unit_price` a rate — both
+        # operating chain. `units` is a count and `unit_price` a rate — both
         # are measures in the graded sense (numeric, driver/slicing input); whether
         # they SUM is the additivity verdict's question, not this role's.
         "sales_order_lines.units",
@@ -278,7 +278,7 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
         "fx_rates.date",
         "trial_balance.period",
         "balance_sheet.period",
-        # DAT-884 operating chain.
+        # operating chain.
         "sales_orders.order_date",
         "ar_invoices.invoice_date",
         "ar_invoices.due_date",
@@ -286,11 +286,11 @@ _SEMANTIC_ROLES: dict[str, list[str]] = {
     ],
 }
 
-# --- measured_in / units (DAT-731, CAP-measured-in-truth) --------------------
+# --- measured_in / units --------------------
 # The unit column each measure is DENOMINATED in, authored from the MODELS: every
 # monetary measure sits beside the Currency-typed column of its own table
 # (JournalLine/Invoice/Payment/BankTransaction .currency). None = no same-table unit
-# source → the engine must project NO measured_in edge:
+# source → NO measured_in edge may be projected:
 #   * fx_rates.rate is DIMENSIONLESS — a ratio BETWEEN two Currency columns
 #     (from_ccy/to_ccy), flagged so the oracle can assert no-edge for that reason;
 #   * trial_balance / balance_sheet balances are denominated by the ACCOUNT dimension
@@ -312,7 +312,7 @@ _MEASURED_IN: dict[str, str | None] = {
     "trial_balance.debit_balance": None,
     "trial_balance.credit_balance": None,
     "balance_sheet.ending_balance": None,
-    # The operating chain (DAT-884). No in-table currency column on either table —
+    # The operating chain. No in-table currency column on either table —
     # the corpus is single-currency there — so the unit source is undeclared, exactly
     # like the derived balance tables above. Authored as None deliberately: inventing
     # a currency column just to give these a unit source would be writing the schema
@@ -348,7 +348,7 @@ _MEASURED_IN_FOLD: dict[str, dict[str, str]] = {
 }
 
 
-# The measure→ontology-concept bindings metric grounding depends on (a missing one
+# The measure→concept bindings a metric's grounding depends on (a missing one
 # means the metric cannot ground). Graded HARD for recall. Dimension-concept bindings
 # are LLM-selective discriminators → reported, not required.
 _BUSINESS_CONCEPTS: dict[str, dict[str, str]] = {
@@ -364,8 +364,8 @@ _BUSINESS_CONCEPTS: dict[str, dict[str, str]] = {
     }
 }
 
-# --- reconciles_with (DAT-725 P2) -------------------------------------------
-# The event fact the DAT-491 structural witness reconciles measures against:
+# --- reconciles_with -------------------------------------------
+# The event fact the structural witness reconciles measures against:
 # trial_balance and balance_sheet are DERIVED by aggregating journal lines
 # (``generators._derive_trial_balance`` / ``_derive_balance_sheet``), so the
 # generator knows the event side of every structural reconciliation.
@@ -379,10 +379,10 @@ def _build_reconciles_with(
 ) -> dict[str, Any]:
     """The expected post-P2 ``reconciles_with`` edge set — derived, never authored.
 
-    Two deterministic producers (the DAT-727 ruling, moved into P2), both keyed at
+    Two deterministic producers (the ruling, moved into P2), both keyed at
     Grounding grain — a Grounding is per (concept, relation):
 
-    * ``aggregation_lineage`` — the DAT-491 witness reified as a Grounding→Grounding
+    * ``aggregation_lineage`` — the witness reified as a Grounding→Grounding
       reconciliation: each structurally-reconciling measure ties out against its
       event fact's aggregation (trial_balance balance ↔ GL sum). Derived from
       ``reconciles_structurally`` × the generator's event fact. An entry whose
@@ -413,17 +413,17 @@ def _build_reconciles_with(
     return {"aggregation_lineage": lineage, "multi_grounding": multi}
 
 
-# --- business cycles (DAT-686) ----------------------------------------------
+# --- business cycles ----------------------------------------------
 # The cycles this finance-9 corpus REALISTICALLY supports, derived from the finance
 # cycle vocabulary × the corpus's actual tables + completion columns. Three have a
 # strong structural backbone → required (a miss is a real recall gap); period_close is
 # real but weakly signalled → soft.
 _CYCLES: list[dict[str, Any]] = [
     {"canonical_type": "journal_entry_cycle", "key_tables": ["journal_entries", "journal_lines"], "required": True},
-    # DAT-856 three-state grading: accounts_payable is the corpus's DIRECTED backbone
+    # three-state grading: accounts_payable is the corpus's DIRECTED backbone
     # cycle — family + direction are DECLARED ground truth from the finance vertical's
     # family declaration (vendor→invoice→payment settles OUTGOING), never a truth
-    # patch (DAT-685; the be67049 revert is the precedent). Undirected cycles carry
+    # patch. Undirected cycles carry
     # no family/direction and grade exactly as before.
     {
         "canonical_type": "accounts_payable",
@@ -437,7 +437,7 @@ _CYCLES: list[dict[str, Any]] = [
 ]
 
 
-# --- folded dimensions (DAT-757) --------------------------------------------
+# --- folded dimensions --------------------------------------------
 # A folded dimension = a referenced dimension whose FK-target table a normalization
 # level INLINED into a fact (the denormalized / wide / OBT shape). Authored to mirror
 # ``schema_transforms._inline_chart_of_accounts`` (runs at ``flat`` + ``single``):
@@ -472,18 +472,18 @@ _FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
     "single": [{**_ACCOUNT_FOLD, "folded_into": ["mega_table"]}],
 }
 
-# --- bus matrix (DAT-756/757 unifying oracle) --------------------------------
+# --- bus matrix --------------------------------
 # The Kimball bus matrix: fact table x dimension concept -> HOW the fact exposes the
 # dimension. Fully DERIVED per level from _RELATIONSHIPS + _FOLDED_DIMENSIONS +
 # _REMOVED_TABLES — no per-level authoring. Provenance vocabulary:
-#   referenced — a surviving FK to a dimension table (the DAT-756 identity)
-#   folded     — the dimension's attributes inlined into the fact (DAT-757)
+#   referenced — a surviving FK to a dimension table (the identity)
+#   folded     — the dimension's attributes inlined into the fact
 #   key_only   — the FK column survives but the dimension table was removed by the
 #                transform (e.g. bank_transactions.account_id at `flat` after CoA is
 #                inlined elsewhere) — identity reachable only through the concept.
 # `key` is the fact-side column carrying the exposure (FK column / fold key).
 # The temporal/period conformed dimension is deliberately absent: temporal identity is
-# the workspace calendar (DAT-730), not a categorical concept.
+# the workspace calendar, not a categorical concept.
 _DIM_TABLE_CONCEPTS: dict[str, str] = {"chart_of_accounts": "account"}
 
 # Tables a level REMOVES without a single-valued table_mapping entry (their content
@@ -506,7 +506,7 @@ _LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
         "journal_entries": "journal_data",
         "invoices": "invoice_data",
         "payments": "invoice_data",
-        # the operating chain's header/item fold (DAT-884), mirroring journal_data
+        # the operating chain's header/item fold, mirroring journal_data
         "sales_order_lines": "sales_data",
         "sales_orders": "sales_data",
     },
@@ -566,12 +566,12 @@ def _build_bus_matrix(
     return {t: dict(sorted(c.items())) for t, c in sorted(bus.items())}
 
 
-# Degenerate dimensions (DAT-757 scope #3): a fact's OWN operational primary key —
-# grounds to no dimension concept, carries NO cross-table identity → the engine must
-# ABSTAIN, not assert it as a folded hierarchy. ``general_ledger.line_id`` is the
+# Degenerate dimensions: a fact's OWN operational primary key —
+# grounds to no dimension concept and carries NO cross-table identity, so the right
+# answer is to ABSTAIN, not to assert it as a folded hierarchy. ``general_ledger.line_id`` is the
 # journal-line PK that survives the fold as the fact's own key. This is the exact
-# surface the eval /ground gate proved g3's distinct-count ratio wrongly asserts on
-# wide data (near-key guard misses a heavy-tailed id).
+# surface on which a distinct-count ratio wrongly asserts a hierarchy over wide data
+# (a near-key guard misses a heavy-tailed id).
 _DEGENERATE_IDS: dict[str, list[str]] = {
     "flat": ["general_ledger.line_id"],
     "single": ["mega_table.line_id"],
@@ -625,7 +625,7 @@ def canonical_metadata_truth() -> dict[str, Any]:
 
     A fresh deep-copyable dict every call — callers (remap, export) may mutate it.
     ``folded_dimensions`` / ``degenerate_ids`` are empty at canonical (``full``) — they
-    are populated per normalization level by ``remap_metadata_truth`` (DAT-757).
+    are populated per normalization level by ``remap_metadata_truth``.
     """
     return {
         "vertical": VERTICAL,
@@ -643,7 +643,7 @@ def canonical_metadata_truth() -> dict[str, Any]:
         ),
         "cycles": deepcopy(_CYCLES),
         "measured_in": _build_measured_in(),
-        # FK-role truth (DAT-788): empty unless the run carries the role-play probe
+        # FK-role truth: empty unless the run carries the role-play probe
         # shape — filled data-conditionally at export (_apply_roleplay_truth).
         "fk_roles": {},
         "folded_dimensions": [],
@@ -727,10 +727,10 @@ def remap_metadata_truth(
     ``table_mapping`` is the ``old -> new`` table rename returned by
     ``apply_normalization``; ``column_style`` is the exported column naming style.
     Both default to the identity (``full`` / snake_case). ``metric_additivity`` is
-    keyed by ontology names (schema-shape invariant) and passes through untouched.
+    keyed by metric names (schema-shape invariant) and passes through untouched.
     ``level`` is the normalization level — it drives the folded-dimension truth
     (``folded_dimensions`` / ``degenerate_ids``), which is empty unless the level folds
-    (``flat`` / ``single``); None/``full``/``partial`` leave them empty (DAT-757). When
+    (``flat`` / ``single``); None/``full``/``partial`` leave them empty. When
     ``level`` is given without a live ``table_mapping``, the level's known mapping
     (``_LEVEL_TABLE_MAPPINGS``) is used, so every section stays at post-transform names.
     """
@@ -778,7 +778,7 @@ def remap_metadata_truth(
     # into a single table (no longer a discoverable relationship); keep genuine self-FKs.
     # Also drop FKs touching a table the level REMOVED outright (`_REMOVED_TABLES`) —
     # a relationship to a nonexistent table is not discoverable; the surviving key
-    # column's exposure is recorded in `bus_matrix` as key_only instead (DAT-756/757).
+    # column's exposure is recorded in `bus_matrix` as key_only instead.
     # str | bool: `direction_reliable` is a bool alongside the qualified-name strings.
     rels: list[dict[str, str | bool]] = []
     for rel in truth["relationships"]:
@@ -795,7 +795,7 @@ def remap_metadata_truth(
                 # Direction is graded only while the parent (to) side kept its
                 # grain. A merge that folds the parent into a line-grain fact
                 # destroys the key (journal_entries.entry_id repeats per GL
-                # line), and the engine's uniqueness-canonical orientation
+                # line), and a uniqueness-canonical orientation
                 # (#495 many→one) legitimately flips — grade those undirected
                 # (Philipp's ruling, 2026-07-16).
                 "direction_reliable": tt not in tm,
@@ -821,7 +821,7 @@ def remap_metadata_truth(
     out["measured_in"] = _build_measured_in(level, tm, column_style, renames)
 
     # folded_dimensions / degenerate_ids: authored at post-transform names, selected by
-    # level (DAT-757). Empty unless the level actually folds a dimension into a fact.
+    # level. Empty unless the level actually folds a dimension into a fact.
     out["folded_dimensions"] = _build_folded_dimensions(level, column_style)
     out["degenerate_ids"] = _build_degenerate_ids(level, tm, column_style)
     # bus_matrix: fully derived per level (referenced FKs + folds + key_only residue).
@@ -840,7 +840,7 @@ def _dedupe(items: list[str]) -> list[str]:
     return out
 
 
-# --- role-playing FKs (DAT-788/DAT-419, CAP-roleplay-fk-fixture) -------------
+# --- role-playing FKs -------------
 # Truth for the conditional role-play probe shape, authored from the probe DESIGN
 # (models.Address/Order/Delivery + inject_role_playing_fks): one dimension, one fact
 # with TWO FK roles to it, a second fact sharing the ship_to role under a different
@@ -848,7 +848,7 @@ def _dedupe(items: list[str]) -> list[str]:
 # never renamed by normalization, so canonical names ARE export names). The
 # bus_matrix is deliberately NOT extended: its {fact: {concept: {key}}} schema
 # cannot express two roled exposures of one concept — that inexpressibility is
-# DAT-788's point; role truth lives in fk_roles + the relationships' fk_role field.
+# 's point; role truth lives in fk_roles + the relationships' fk_role field.
 _ROLEPLAY_TABLES: tuple[str, ...] = ("addresses", "orders", "deliveries")
 _ROLEPLAY_RELATIONSHIPS: list[dict[str, str]] = [
     {"from": "orders.bill_to_addr", "to": "addresses.address_id", "fk_role": "bill_to"},
@@ -870,7 +870,7 @@ def _apply_relationship_assertability(
     asserting one states something false about the corpus.
 
     ``direction_reliable`` (2026-07-16) already covers the softer half of this — a merged
-    parent can make the engine's uniqueness-canonical orientation flip, so grade the edge
+    parent can make a uniqueness-canonical orientation flip, so grade the edge
     undirected. It does NOT cover the case measured on clean-flat 2026-07-29, where the
     target's uniqueness collapses to 0.455 and the edge is unrecoverable in EITHER
     orientation (the reverse containment is ~0.18). Undirected grading cannot rescue an
@@ -882,9 +882,9 @@ def _apply_relationship_assertability(
     asserted, and no hand-maintained exception list can drift.
 
     The test is the DEFINITION of a key (no duplicate values), deliberately not the
-    engine's ``REF_UNIQUENESS_MIN`` tolerance. Filtering our truth through the detector's
-    own gate would make the oracle unable to ever fail on that gate — the instrument
-    tuned to the thing it measures.
+    uniqueness tolerance of whatever is being graded. Filtering our truth through the
+    gate under test would make the oracle unable to ever fail on that gate — the
+    instrument tuned to the thing it measures.
 
     Dropped edges are recorded under ``relationships_not_assertable`` rather than
     deleted silently: a truth that quietly shrinks reads as a corpus that got easier.
@@ -964,7 +964,7 @@ def export_metadata_truth(
     ``table_mapping`` comes from ``apply_normalization``; ``column_style`` is the
     exported naming style (snake_case for single-source; the multi-source top-level
     file stays canonical, mirroring the top-level ``entropy_map.yaml``). ``level`` is the
-    normalization level driving the folded-dimension truth (DAT-757); ``full`` folds none.
+    normalization level driving the folded-dimension truth; ``full`` folds none.
 
     ``dataframes`` (the runner's post-injection, post-normalization frames) drives the
     DATA-DERIVED ``measured_in.cross_unit`` flags: a measure's declared unit column
@@ -986,7 +986,7 @@ def export_metadata_truth(
             if df is not None and unit_col in df.columns:
                 entry["cross_unit"] = df[unit_col].drop_nulls().n_unique() > 1
         _apply_relationship_assertability(truth, dataframes)
-        # role-play shape truth (DAT-788): emitted only when the frames carry it
+        # role-play shape truth: emitted only when the frames carry it
         _apply_roleplay_truth(truth, dataframes)
     with open(output_dir / "metadata_truth.yaml", "w") as f:
         f.write(_HEADER)

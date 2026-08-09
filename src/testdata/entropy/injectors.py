@@ -72,9 +72,8 @@ def corrupt_types(
             target_column=col,
             target_rows=sorted(indices),
             layer="value",
-            dimension="type_fidelity",
-            sub_dimension="type_corruption",
-            detector_id="type_fidelity",
+            defect="type_fidelity",
+            defect_detail="type_corruption",
             injection_type="corrupt_type",
             parameters={"ratio": ratio, "garbage_values": garbage},
             severity=severity,
@@ -96,8 +95,8 @@ def inject_null_tokens(
     """Replace numeric values with null-marker sentinel TOKENS from a parameterized pool.
 
     Unlike ``corrupt_types``' fixed garbage list, the token pool is supplied by the
-    strategy — so the eval asserts recall on a *family* of variations (different
-    tokens / rates / seeds), never a memorized fixture (ADR-0009). The tokens fail
+    strategy — so a consumer asserts recall on a *family* of variations (different
+    tokens / rates / seeds), never a memorized fixture. The tokens fail
     the column's numeric cast → quarantine → the ``null_semantics`` adjudication
     pools quarantine / type / vocabulary witnesses per rejected token (is-null vs
     is-value). Use tokens NOT in the base null vocabulary so the vocabulary witness
@@ -120,9 +119,8 @@ def inject_null_tokens(
             target_column=col,
             target_rows=sorted(indices),
             layer="value",
-            dimension="null_semantics",
-            sub_dimension="null_marker",
-            detector_id="null_semantics",
+            defect="null_encoding",
+            defect_detail="null_marker",
             injection_type="inject_null_tokens",
             parameters={"ratio": ratio, "tokens": list(tokens)},
             severity=severity,
@@ -145,7 +143,7 @@ def inject_null_token_family(
     decoy_style: str | None = None,
     severity: str = "medium",
 ) -> pl.DataFrame:
-    """Inject a SAMPLED null_tokens family (DAT-450) — two labelled classes.
+    """Inject a SAMPLED null_tokens family — two labelled classes.
 
     The generative successor to ``inject_null_tokens``: instead of a fixed token
     list, a recorded ``seed`` samples a family instance (markers + decoys + rates;
@@ -163,7 +161,7 @@ def inject_null_token_family(
     Both fail the numeric cast → quarantine → the ``null_semantics`` adjudication
     pools its witnesses per token. The recorded ``parameters`` carry the marker
     set, the minted decoys, and their row sets — the labels the calibration rig
-    scores each witness against (DAT-450).
+    scores each witness against.
     """
     overrides: dict[str, object] = {}
     if n_markers is not None:
@@ -203,9 +201,8 @@ def inject_null_token_family(
             target_column=col,
             target_rows=sorted(marker_rows + decoy_rows),
             layer="value",
-            dimension="null_semantics",
-            sub_dimension="null_marker",
-            detector_id="null_semantics",
+            defect="null_encoding",
+            defect_detail="null_marker",
             injection_type="inject_null_token_family",
             parameters={
                 "family": "null_tokens",
@@ -235,7 +232,7 @@ def inject_scale_mix(
     rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
     severity: str = "medium",
 ) -> pl.DataFrame:
-    """Push a SAMPLED fraction of a numeric column to a different SCALE (DAT-450/428).
+    """Push a SAMPLED fraction of a numeric column to a different SCALE.
 
     The generative mixed-units family: a recorded ``seed`` samples a scale factor (a
     power of ten — kEUR among EUR) and a mix ratio, then multiplies that fraction of
@@ -262,9 +259,8 @@ def inject_scale_mix(
             target_column=col,
             target_rows=sorted(rows),
             layer="semantic",
-            dimension="units",
-            sub_dimension="unit_consistency",
-            detector_id="unit_consistency",
+            defect="unit_consistency",
+            defect_detail="unit_consistency",
             injection_type="inject_scale_mix",
             parameters={
                 "seed": seed,
@@ -302,9 +298,8 @@ def introduce_nulls(
             target_column=col,
             target_rows=sorted(indices),
             layer="value",
-            dimension="completeness",
-            sub_dimension="null_injection",
-            detector_id="null_ratio",
+            defect="completeness",
+            defect_detail="null_injection",
             injection_type="introduce_nulls",
             parameters={"ratio": ratio},
             severity=severity,
@@ -327,7 +322,7 @@ def inject_slice_conditional_null(
     min_affected_mass: float | None = None,
     severity: str = "medium",
 ) -> pl.DataFrame:
-    """Inject a SAMPLED slice_conditional_null family (DAT-473) — concentrated missingness.
+    """Inject a SAMPLED slice_conditional_null family — concentrated missingness.
 
     Nulls in ``col`` CONCENTRATED in 1-2 slices of the categorical ``slice_col`` (a measure
     a cost center failed to import), with a low base rate everywhere else — so the overall
@@ -394,9 +389,8 @@ def inject_slice_conditional_null(
             target_column=col,
             target_rows=sorted(nulled),
             layer="value",
-            dimension="nulls",
-            sub_dimension="slice_conditional_null",
-            detector_id="slice_conditional_null",
+            defect="completeness",
+            defect_detail="slice_conditional_null",
             injection_type="inject_slice_conditional_null",
             parameters={
                 "family": "slice_conditional_null",
@@ -450,9 +444,8 @@ def inject_outliers(
             target_column=col,
             target_rows=sorted(actual_affected),
             layer="value",
-            dimension="distribution",
-            sub_dimension="outlier_injection",
-            detector_id="outlier_rate",
+            defect="distribution",
+            defect_detail="outlier_injection",
             injection_type="inject_outliers",
             parameters={"ratio": ratio, "factor": factor},
             severity=severity,
@@ -506,9 +499,8 @@ def break_benford(
             target_column=col,
             target_rows=sorted(affected),
             layer="value",
-            dimension="distribution",
-            sub_dimension="benford_violation",
-            detector_id="benford",
+            defect="distribution",
+            defect_detail="benford_violation",
             injection_type="break_benford",
             parameters={"method": method},
             severity=severity,
@@ -535,9 +527,8 @@ def obscure_column_names(
                 target_column=obscured,
                 target_rows=[],  # All rows affected (schema change)
                 layer="semantic",
-                dimension="business_meaning",
-                sub_dimension="column_name_obscured",
-                detector_id="business_meaning",
+                defect="business_meaning",
+                defect_detail="column_name_obscured",
                 injection_type="obscure_column_names",
                 parameters={"original": original, "obscured": obscured},
                 severity=severity,
@@ -560,7 +551,7 @@ def mix_units(
 ) -> pl.DataFrame:
     """Mix currencies — convert some values at FX rate, declared or undeclared.
 
-    Two variants of one family (CAP-measured-in-truth):
+    Two variants of one family:
 
     * **undeclared** (default, ``unit_col=None``): values converted, the unit column
       untouched — the mixing is invisible to any reader of the DECLARED unit surface
@@ -597,9 +588,8 @@ def mix_units(
             target_column=col,
             target_rows=sorted(indices),
             layer="semantic",
-            dimension="unit_consistency",
-            sub_dimension="declared_mixed_currency" if unit_col else "mixed_currency",
-            detector_id="unit_entropy",
+            defect="unit_consistency",
+            defect_detail="declared_mixed_currency" if unit_col else "mixed_currency",
             injection_type="mix_units",
             parameters={
                 "alt_currency": alt_currency,
@@ -623,11 +613,11 @@ def inject_role_playing_fks(
     same_addr_ratio: float = 0.3,
     severity: str = "low",
 ) -> pl.DataFrame:
-    """Fill the role-playing-FK columns on the role-play probe shape (DAT-788/DAT-419).
+    """Fill the role-playing-FK columns on the role-play probe shape.
 
     A LABELLED-CLEAN structural family, not a defect: one dimension (addresses),
     one fact carrying TWO FK roles to it (orders.bill_to_addr / ship_to_addr —
-    also the DAT-419 two-FKs-one-table-pair shape), and a second fact sharing the
+    also the two-FKs-one-table-pair shape), and a second fact sharing the
     ship_to role under a DIFFERENT column name (deliveries.delivery_addr — the
     judge's conform path). Role consistency is BY CONSTRUCTION: every delivery's
     delivery_addr equals its parent order's ship_to_addr, so the lineage witness
@@ -636,7 +626,7 @@ def inject_role_playing_fks(
     ``same_addr_ratio`` of orders bill and ship to the SAME address (realistic
     overlap that a naive value-overlap pairing would seize on — the trap leg).
     Records one ``stratum="genuine_clean"`` registry entry per role column
-    (precision material, never a recall target — the eval's calibration-negative
+    (precision material, never a recall target — the calibration-negative
     convention). Truth: the export's conditional ``fk_roles`` + relationships
     sections (metadata_truth), emitted only when the shape is present.
     """
@@ -674,9 +664,8 @@ def inject_role_playing_fks(
                 target_column=col,
                 target_rows=[],  # labelled-clean: nothing corrupted
                 layer="structural",
-                dimension="relations",
-                sub_dimension="role_playing_fks",
-                detector_id="relationship_discovery",
+                defect="relationships",
+                defect_detail="role_playing_fks",
                 injection_type="inject_role_playing_fks",
                 parameters={
                     "family": "role_playing_fks",
@@ -748,9 +737,8 @@ def corrupt_dates(
             target_column=col,
             target_rows=sorted(affected),
             layer="structural",
-            dimension="format_consistency",
-            sub_dimension="ambiguous_dates",
-            detector_id="temporal_entropy",
+            defect="format_consistency",
+            defect_detail="ambiguous_dates",
             injection_type="corrupt_dates",
             parameters={"formats": formats},
             severity=severity,
@@ -786,9 +774,8 @@ def break_referential_integrity(
             target_column=fk_col,
             target_rows=sorted(indices),
             layer="structural",
-            dimension="referential_integrity",
-            sub_dimension="orphaned_foreign_keys",
-            detector_id="relationship_entropy",
+            defect="referential_integrity",
+            defect_detail="orphaned_foreign_keys",
             injection_type="break_referential_integrity",
             parameters={"ratio": ratio},
             severity=severity,
@@ -827,9 +814,8 @@ def add_duplicate_fk_paths(
             target_column=new_col_name,
             target_rows=sorted(noise_indices),
             layer="structural",
-            dimension="join_paths",
-            sub_dimension="duplicate_fk_path",
-            detector_id="join_path_determinism",
+            defect="join_paths",
+            defect_detail="duplicate_fk_path",
             injection_type="add_duplicate_fk_paths",
             parameters={"source_col": existing_fk_col, "noise_ratio": noise_ratio},
             severity=severity,
@@ -870,9 +856,8 @@ def drift_formula(
             target_column=derived_col,
             target_rows=sorted(indices),
             layer="computational",
-            dimension="derived_consistency",
-            sub_dimension="formula_drift",
-            detector_id="derived_value",
+            defect="derived_consistency",
+            defect_detail="formula_drift",
             injection_type="drift_formula",
             parameters={"source_cols": source_cols, "error_ratio": error_ratio},
             severity=severity,
@@ -919,9 +904,8 @@ def inject_temporal_drift(
             target_column=value_col,
             target_rows=sorted(affected),
             layer="value",
-            dimension="temporal_stability",
-            sub_dimension="distribution_shift",
-            detector_id="temporal_drift",
+            defect="temporal_stability",
+            defect_detail="distribution_shift",
             injection_type="inject_temporal_drift",
             parameters={"shift_date": shift_date, "shift_factor": shift_factor},
             severity=severity,
@@ -979,9 +963,8 @@ def break_gl_invoice_match(
             target_column=col,
             target_rows=sorted(actual_affected),
             layer="structural",
-            dimension="cross_table_consistency",
-            sub_dimension="gl_invoice_mismatch",
-            detector_id="cross_table_consistency",
+            defect="cross_table_consistency",
+            defect_detail="gl_invoice_mismatch",
             injection_type="break_gl_invoice_match",
             parameters={"ratio": ratio, "factor_range": list(factor_range)},
             severity=severity,
@@ -1032,9 +1015,8 @@ def break_payment_bank_match(
             target_column=col,
             target_rows=sorted(actual_affected),
             layer="structural",
-            dimension="cross_table_consistency",
-            sub_dimension="payment_bank_mismatch",
-            detector_id="cross_table_consistency",
+            defect="cross_table_consistency",
+            defect_detail="payment_bank_mismatch",
             injection_type="break_payment_bank_match",
             parameters={"ratio": ratio, "factor_range": list(factor_range)},
             severity=severity,
@@ -1085,9 +1067,8 @@ def break_trial_balance(
             target_column=col,
             target_rows=sorted(actual_affected),
             layer="computational",
-            dimension="cross_table_consistency",
-            sub_dimension="trial_balance_gl_mismatch",
-            detector_id="derived_value_consistency",
+            defect="cross_table_consistency",
+            defect_detail="trial_balance_gl_mismatch",
             injection_type="break_trial_balance",
             parameters={"ratio": ratio, "error_range": list(error_range)},
             severity=severity,
@@ -1148,9 +1129,8 @@ def create_mutual_exclusivity(
             target_column=f"{col_a}/{col_b}",
             target_rows=sorted(affected),
             layer="structural",
-            dimension="dimensional_structure",
-            sub_dimension="mutual_exclusivity",
-            detector_id="dimensional_entropy",
+            defect="dimensional_structure",
+            defect_detail="mutual_exclusivity",
             injection_type="create_mutual_exclusivity",
             parameters={"col_a": col_a, "col_b": col_b},
             severity=severity,
@@ -1168,7 +1148,7 @@ def _stock_values(series: list[str], rng: random.Random) -> tuple[list[float], l
 
     Returns ``(levels, movements)`` aligned per row: ``movements[i]`` is the level's
     net change from the previous period (from the drawn opening for a series' first
-    row) — the per-cell target an events backing must sum to (DAT-491).
+    row) — the per-cell target an events backing must sum to.
     """
     running: dict[str, float] = {}
     levels: list[float] = []
@@ -1190,7 +1170,7 @@ def _flow_values(n: int, rng: random.Random) -> list[float]:
 
 
 # The events/movements table emitted alongside the probe table when a strategy backs
-# stock columns (DAT-491). One numeric column per backed stock; per-(series, period)
+# stock columns. One numeric column per backed stock; per-(series, period)
 # sums reconcile to the stock's deltas — the structural_reconciliation witness's input.
 PROBE_EVENTS_TABLE = "probe_events"
 
@@ -1318,17 +1298,17 @@ def inject_stock_flow_probes(
     severity: str = "medium",
     dataframes: dict[str, pl.DataFrame] | None = None,
 ) -> pl.DataFrame:
-    """Add SAMPLED clearly-named stock/flow measure columns to the probe table (DAT-445).
+    """Add SAMPLED clearly-named stock/flow measure columns to the probe table.
 
     Each sampled ``ProbeColumn`` becomes one measure column: a STOCK is a carried-forward
     level (a per-series running cumulative across periods), a FLOW is a per-period
     movement (independent per-row amounts). The clear name carries the stock/flow signal
     — the LLM's job is to read the behaviour from it — and each column is recorded with
     its ``is_stock`` label, the ground truth the temporal_behavior ``llm_claim`` witness
-    is scored against (DAT-450 rig). Surface varies by ``seed``; the recorded seed
+    is scored against. Surface varies by ``seed``; the recorded seed
     reproduces exactly and is independent of injection order (its own RNG).
 
-    EVENTS BACKING (DAT-491): when the family samples ``backed`` stock columns
+    EVENTS BACKING: when the family samples ``backed`` stock columns
     (``backed_fraction`` > 0), a ``probe_events`` movements table is emitted alongside
     the probe table into ``dataframes`` — per (series, period) cell, each backed
     column's events sum to the stock's delta (opening + Σ events = closing), except the
@@ -1379,9 +1359,8 @@ def inject_stock_flow_probes(
                 target_column=col.name,
                 target_rows=list(range(n)),
                 layer="semantic",
-                dimension="temporal",
-                sub_dimension="temporal_behavior",
-                detector_id="temporal_behavior",
+                defect="measure_behavior",
+                defect_detail="temporal_behavior",
                 injection_type="inject_stock_flow_probes",
                 parameters={
                     "family": "stock_flow",
@@ -1390,7 +1369,7 @@ def inject_stock_flow_probes(
                     "is_stock": col.is_stock,
                     "true_behavior": "stock" if col.is_stock else "flow",
                     "ambiguous": col.ambiguous,  # hard (conflicting-cue) vs clear regime
-                    # Events backing (DAT-491) — the structural_reconciliation rig's
+                    # Events backing — the structural_reconciliation rig's
                     # ground truth: confirm on backed+reconciling, degrade/abstain on
                     # broken, abstain on unbacked.
                     "backed": col.backed,
@@ -1443,7 +1422,7 @@ def inject_formula_divergence(
     scaled_rate: list[float] | None = None,
     severity: str = "medium",
 ) -> pl.DataFrame:
-    """Add SAMPLED formula groups whose target NAME advertises one formula (DAT-442).
+    """Add SAMPLED formula groups whose target NAME advertises one formula.
 
     The generative successor to ``drift_formula``: each sampled
     :class:`~testdata.entropy.families.FormulaProbeGroup` becomes three numeric columns
@@ -1517,9 +1496,8 @@ def inject_formula_divergence(
                 target_column=group.target,
                 target_rows=divergent,
                 layer="computational",
-                dimension="derived_consistency",
-                sub_dimension="formula_divergence",
-                detector_id="derived_value",
+                defect="derived_consistency",
+                defect_detail="formula_divergence",
                 injection_type="inject_formula_divergence",
                 parameters={
                     "family": "formula_divergence",
@@ -1643,7 +1621,7 @@ def inject_relationship_pairs(
     spurious_pool_size: list[int] | None = None,
     severity: str = "medium",
 ) -> pl.DataFrame:
-    """Fill the relationship probe tables with SAMPLED labelled pairs (DAT-408/450).
+    """Fill the relationship probe tables with SAMPLED labelled pairs.
 
     The generative successor to the fixed ``break_referential_integrity``: a
     recorded ``seed`` samples directed column pairs across three strata
@@ -1705,9 +1683,8 @@ def inject_relationship_pairs(
                 target_column=spec.child_column,
                 target_rows=orphan_rows,  # the corrupted units; empty for clean/spurious
                 layer="structural",
-                dimension="relations",
-                sub_dimension="relationship_discovery",
-                detector_id="relationship_discovery",
+                defect="relationships",
+                defect_detail="relationship_discovery",
                 injection_type="inject_relationship_pairs",
                 parameters={
                     "family": "relationship_pairs",
@@ -1746,7 +1723,7 @@ def inject_driver_effect(
     rng: random.Random,  # accepted for dispatch uniformity; the family uses its OWN seed
     severity: str = "medium",
 ) -> pl.DataFrame:
-    """Make ``slice_col`` a KNOWN driver of ``col`` — a factor LADDER across values (DAT-688).
+    """Make ``slice_col`` a KNOWN driver of ``col`` — a factor LADDER across values.
 
     The driver-discovery gate (``dataraum.analysis.drivers``) ranks a categorical
     dimension by the permutation-gated between-group variance reduction of a measure, and
@@ -1761,17 +1738,16 @@ def inject_driver_effect(
     ``f`` multiplies that group's MEAN of ``col`` by exactly ``f`` (the zeros are
     scale-invariant), so the group mean SHIFTS and the variance-reduction statistic reads
     it. A BALANCED measure (net_amount, ≈0 mean per cost_center) is invisible to a
-    mean-based statistic — the /ground wall this family was gated against (DAT-688; the
-    slice_variance precedent). Because ``col`` is one-sided, the same scale also shifts the
+    mean-based statistic — the /ground wall this family was gated against. Because ``col`` is one-sided, the same scale also shifts the
     group's mean of a derived net measure (net = debit − credit; the debit lines go from
     ``+x`` to ``+f·x`` while credit lines are untouched), so the signal survives whichever
     additive measure the engine ranks. Row-grain and ICC-safe: ``slice_col`` (cost_center)
-    is not an entity key (η²≈0 on clean), so the row permutation null is valid (DAT-544).
+    is not an entity key (η²≈0 on clean), so the row permutation null is valid.
 
     Records ONE registry entry per (value, factor): ``dimension`` (slice_col), ``value``,
     ``measure`` (col), and ``factor`` — the ground truth the driver oracle reads to assert
     ``slice_col`` ∈ ranked_dimensions under injection and the interesting-slice effects
-    ordered by factor (never a point-value threshold; ADR-0009 eval grammar).
+    ordered by factor (never a point-value threshold; eval grammar).
     """
     if col not in df.columns or slice_col not in df.columns:
         raise ValueError(
@@ -1822,14 +1798,13 @@ def inject_driver_effect(
                 target_column=col,
                 target_rows=sorted(rows),
                 layer="value",
-                dimension="driver_effect",
-                sub_dimension="slice_scale",
-                detector_id="driver_rankings",
+                defect="driver_effect",
+                defect_detail="slice_scale",
                 injection_type="inject_driver_effect",
                 parameters={
                     "family": "driver_effect",
                     "seed": seed,
-                    "dimension": slice_col,
+                    "slice_column": slice_col,
                     "value": str(value),
                     "measure": col,
                     "factor": factor,

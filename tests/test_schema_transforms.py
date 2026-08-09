@@ -158,9 +158,8 @@ def test_registry_remap():
             target_column="debit",
             target_rows=[0, 1],
             layer="value",
-            dimension="accuracy",
-            sub_dimension="type_corruption",
-            detector_id="type_detector",
+            defect="accuracy",
+            defect_detail="type_corruption",
             injection_type="corrupt_types",
         )
     )
@@ -171,9 +170,8 @@ def test_registry_remap():
             target_column="amount",
             target_rows=[5],
             layer="value",
-            dimension="distribution",
-            sub_dimension="benford",
-            detector_id="benford_detector",
+            defect="distribution",
+            defect_detail="benford",
             injection_type="break_benford",
         )
     )
@@ -196,9 +194,8 @@ def test_registry_remap_flat():
             target_column="debit",
             target_rows=[0],
             layer="value",
-            dimension="accuracy",
-            sub_dimension="type_corruption",
-            detector_id="type_detector",
+            defect="accuracy",
+            defect_detail="type_corruption",
             injection_type="corrupt_types",
         )
     )

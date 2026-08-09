@@ -143,8 +143,8 @@ def _apply_injection(
     all_kwargs["table_name"] = spec.table
     all_kwargs["rng"] = rng
     # The run's full table mapping — passed only to injectors that declare it, so a
-    # family can emit or fill companion tables (stock/flow probe_events DAT-491;
-    # relationship_pairs parent+child DAT-408); the signature filter below keeps
+    # family can emit or fill companion tables (stock/flow probe events; the
+    # relationship_pairs parent and child); the signature filter below keeps
     # single-table injectors untouched.
     all_kwargs["dataframes"] = dataframes
 
@@ -155,13 +155,13 @@ def _apply_injection(
     recorded_before = len(registry)
     dataframes[spec.table] = fn(df=df, **kwargs)
 
-    # Override detector_id if specified in the strategy YAML — on EVERY record this
-    # injection produced. The old [-1] patch silently mislabelled multi-record
-    # injectors (one record per probe column/pair) and could clobber an unrelated
-    # injection's record when an injector recorded nothing (lane F2 finding).
-    if spec.detector_id is not None:
-        for injection in registry._injections[recorded_before:]:
-            injection.detector_id = spec.detector_id
+    # Stamp the strategy's consumer hint onto EVERY record this injection produced.
+    # Labelling only the last record silently mislabels multi-record injectors (one
+    # record per probe column or relationship pair) and can clobber an unrelated
+    # injection's record when an injector recorded nothing.
+    if spec.consumer_hint is not None:
+        for injection in registry.injections_since(recorded_before):
+            injection.consumer_hint = spec.consumer_hint
 
 
 def run_scenario(
@@ -180,7 +180,7 @@ def run_scenario(
     CLI overrides (strategy_name, seed, months) replace scenario YAML defaults
     when provided. When ``None``, the YAML default is used.
 
-    ``lever`` (DAT-744) applies a constructed intervention to the generating
+    ``lever`` applies a constructed intervention to the generating
     process itself — e.g. ``{"type": "price_level", "period_k": 36,
     "factor": 1.15}``. Recorded in ``intervention.yaml`` next to the data;
     a same-seed run without the lever is the exact counterfactual baseline.
@@ -213,13 +213,13 @@ def run_scenario(
     rng = random.Random(seed + 1000)  # Offset so injections differ from generation
 
     # Generate probe-table grains only when a strategy injects into them, so other
-    # strategies (the baseline) are untouched (DAT-445 stock/flow; DAT-442 formula).
+    # strategies (the baseline) are untouched.
     probe_series = 15 if any(s.table == "measure_probes" for s in strategy.injections) else 0
     formula_probe_rows = 300 if any(s.table == "formula_probes" for s in strategy.injections) else 0
-    # Same gate for the relationship probe grains (DAT-408/450): parent ids + child
+    # Same gate for the relationship probe grains: parent ids + child
     # rows exist only when a strategy targets the child probe table.
     needs_relationship_probes = any(s.table == REL_CHILD_TABLE for s in strategy.injections)
-    # Same gate for the role-playing-FK shape (DAT-788/DAT-419): dimension + both
+    # Same gate for the role-playing-FK shape: dimension + both
     # fact grains exist only when a strategy targets the role-play fact.
     needs_roleplay = any(s.table == "orders" for s in strategy.injections)
 
@@ -296,9 +296,9 @@ def run_scenario(
                 fmt=fmt,
             )
         export_ground_truth(ground_truth, output_dir)
-        # Agent-layer ground truth (DAT-682) — top-level like entropy_map/ground_truth,
+        # Agent-layer ground truth — top-level like entropy_map/ground_truth,
         # table names remapped to this run's normalization, canonical (snake) columns.
-        # ``level`` drives the folded-dimension truth for denormalized shapes (DAT-757).
+        # ``level`` drives the folded-dimension truth for denormalized shapes.
         export_metadata_truth(
             output_dir,
             table_mapping=table_mapping,
@@ -319,7 +319,7 @@ def run_scenario(
 
 
 def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date | None, months: int) -> None:
-    """Write intervention.yaml — the lever's ground-truth record (DAT-744).
+    """Write intervention.yaml — the lever's ground-truth record.
 
     Analogous to entropy_map.yaml for injections: the spec of what was done to
     the DGP plus the analytic effect statement. The numeric per-period true
@@ -330,7 +330,7 @@ def _export_intervention(lever: Lever, output_dir: Path, *, fiscal_start: date |
     activation = date(start.year + (start.month - 1 + lever.period_k) // 12, (start.month - 1 + lever.period_k) % 12 + 1, 1)
     # The effect statement is TYPE-SPECIFIC. Emitting the price-lever wording for a
     # volume lever would put a wrong ground truth on disk — the exact failure this
-    # file exists to prevent (DAT-884).
+    # file exists to prevent.
     if lever.type == "volume":
         affected = {
             "direct": "order COUNT per customer per month for months >= period_k; the added orders carry their own lines, revenue, cost of sale and AR invoice",

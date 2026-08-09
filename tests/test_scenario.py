@@ -82,7 +82,7 @@ description: events-backed stock/flow probes (DAT-491)
 injections:
   - injector: inject_stock_flow_probes
     table: measure_probes
-    detector_id: temporal_behavior
+    consumer_hint: temporal_behavior
     params:
       seed: 7
       n_columns: [10, 10]
@@ -150,7 +150,7 @@ def test_relationship_probe_strategy_dispatch(tmp_path: Path):
     dfs = result["dataframes"]
     assert len(dfs["ref_entities"]) == 300 and len(dfs["ref_activity"]) == 1200
     records = [inj for inj in result["registry"].injections]
-    assert records and all(inj.detector_id == "relationship_discovery" for inj in records)
+    assert records and all(inj.defect == "relationships" for inj in records)
     # Every sampled pair landed as columns on BOTH probe tables.
     for inj in records:
         assert inj.parameters["parent_column"] in dfs["ref_entities"].columns
@@ -180,24 +180,24 @@ def test_baseline_strategies_skip_relationship_probes():
 _OVERRIDE_STRATEGY = """\
 name: override-multi-record-test
 level: high
-description: detector_id override must label EVERY record of a multi-record injection
+description: consumer_hint must label EVERY record of a multi-record injection
 injections:
   - injector: introduce_nulls
     table: journal_lines
-    detector_id: null_ratio
+    consumer_hint: null_ratio
     params:
       col: cost_center
       ratio: 0.2
   - injector: inject_stock_flow_probes
     table: measure_probes
-    detector_id: custom_temporal_check
+    consumer_hint: custom_temporal_check
     params:
       seed: 7
       n_columns: [8, 8]
 """
 
 
-def test_detector_id_override_labels_every_record_of_the_injection():
+def test_consumer_hint_labels_every_record_of_the_injection():
     """The strategy-YAML override applies to ALL records the injection produced —
     the old [-1] patch labelled only the last probe column (lane F2 finding)."""
     from testdata.scenarios.runner import run_scenario as run_any
@@ -209,7 +209,7 @@ def test_detector_id_override_labels_every_record_of_the_injection():
 
     by_type: dict[str, set[str]] = {}
     for inj in result["registry"].injections:
-        by_type.setdefault(inj.injection_type, set()).add(inj.detector_id)
+        by_type.setdefault(inj.injection_type, set()).add(inj.consumer_hint)
     assert by_type["inject_stock_flow_probes"] == {"custom_temporal_check"}
     assert len([i for i in result["registry"].injections if i.injection_type == "inject_stock_flow_probes"]) == 8
     # The earlier single-record injection keeps its own label untouched.

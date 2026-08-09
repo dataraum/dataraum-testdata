@@ -1,17 +1,23 @@
 # dataraum-testdata
 
-Synthetic test data generator with **known entropy injections** for calibrating [dataraum-context](https://github.com/...) entropy detectors.
+Synthetic operating-model data with an **answer key** — a corpus whose metrics, structure
+and injected defects are all known, so anything computed over it can be graded rather than
+believed.
+
+[`docs/operating-model.md`](docs/operating-model.md) is the plan: the six performance
+dimensions, the family framework, the oracle contract, and the order of work.
 
 ## Architecture
 
 The generator uses an **event-driven cascade model** where business events produce numerically consistent data across all tables:
 
-- **Revenue cycle**: Sales → AR journal entries → cash receipts → bank transactions
+- **Operating chain**: Customer → sales order → order line (units × price) → AR invoice → receipt
+- **Revenue cycle**: Order lines → revenue and COGS journal entries → cash receipts → bank transactions
 - **Expenditure cycle**: Purchase invoices → AP journal entries → vendor payments → bank transactions
 - **Operating events**: Monthly payroll, rent, depreciation, insurance, misc expenses
 - **Trial balance**: Derived from actual cumulative GL entries (not approximated)
 
-This produces **closed-loop accounting** — GL entries, invoices, payments, bank transactions, and trial balance are all numerically consistent and traceable back to the originating business event.
+This produces **closed-loop accounting** — GL entries, invoices, payments, bank transactions, and trial balance are all numerically consistent and traceable back to the originating business event. Because revenue and cost of sale both derive from the order line (`units × unit_price`, `units × standard_cost`), contribution margin per customer and per product group is exact, not estimated.
 
 ## Quick Start
 
@@ -55,27 +61,37 @@ Set via `generator.normalization` in `config/scenarios/month_end_close.yaml`.
 Each generation produces:
 - **CSV files** — one per table (varies by normalization level)
 - **manifest.yaml** — file list, row counts, generation parameters
-- **entropy_map.yaml** — ground truth: every injection with target rows, detector ID, layer, severity
+- **entropy_map.yaml** — defect ground truth: every injection with its target rows, layer, defect class and severity
 - **ground_truth.yaml** — known-correct financial metrics (see [Ground Truth](#ground-truth))
-- **metadata_truth.yaml** — agent-layer ground truth (see [Metadata Truth](#metadata-truth))
+- **metadata_truth.yaml** — structural ground truth (see [Metadata Truth](#metadata-truth))
+
+### Defect labels are consumer-agnostic
+
+An injection records **what was broken**, never which detector should catch it:
+`layer` (structural / semantic / value / computational), `defect` (the class, e.g.
+`referential_integrity`), `defect_detail` (the form it took) and `injection_type` (the
+injector that produced it). Mapping a defect onto the machinery meant to catch it is the
+consumer's job. A strategy may set `consumer_hint:` on an injection to carry its own
+label through; the generator never reads it.
 
 ## Metadata Truth
 
-`metadata_truth.yaml` is the **agent-layer** ground truth: what the engine's LLM/derived
-metadata (relationships, roles, concepts, cycles, additivity) *should* resolve to. The
-generator knows every one of these answers from the models + generator design, so it
-exports them for the eval to grade the agent layer the way `entropy_map.yaml` grades
-detectors. Authored in `src/testdata/metadata_truth.py`; **generated — do not hand-edit**.
+`metadata_truth.yaml` is the **structural** ground truth: the FK topology, table and
+column roles, stock vs flow, metric additivity, cycles and the conformed-dimension
+matrix. The generator knows every one of these answers from the models and the generator
+design, so anything that recovers structure from the data can be graded against it, the
+way `entropy_map.yaml` grades defect detection. Authored in
+`src/testdata/metadata_truth.py`; **generated — do not hand-edit**.
 
 | Section | Keyed by | Content |
 |---|---|---|
-| `metric_additivity` | ontology metric/measure name | drill additivity verdict (`categorical_additive` / `time_additive` + `reason`) with a `determinism` tag (`function_symmetry` = HARD, `label_dependent` = diagnostic) |
+| `metric_additivity` | metric/measure name | drill additivity verdict (`categorical_additive` / `time_additive` + `reason`) with a `determinism` tag (`function_symmetry` = assertable, `label_dependent` = diagnostic) |
 | `stock_flow` | `table.column` | `additive` (per-period flow) vs `point_in_time` (stock/level) |
-| `reconciles_structurally` | `table.column` | measures that reconcile against a finer event fact (DAT-491 witness) |
+| `reconciles_structurally` | `table.column` | measures that reconcile against a finer event fact |
 | `relationships` | — | the true FK topology (`{from, to}` qualified names) |
 | `table_roles` | — | `facts` / `dimensions` / `ambiguous` table lists |
 | `semantic_roles` | role | `measure` / `timestamp` column lists |
-| `business_concepts` | `table.column` | required measure→ontology-concept bindings |
+| `business_concepts` | `table.column` | required measure→concept bindings |
 | `cycles` | — | business cycles the corpus supports (`canonical_type`, `key_tables`, `required`) |
 
 **Remap-safety.** The truth is authored at canonical (`full` / snake_case) names and

@@ -69,7 +69,7 @@ class AnnualMetrics(BaseModel):
 
 
 class ContributionMargin(BaseModel):
-    """True DB1 for one entity — revenue minus cost of sale (DAT-884).
+    """True DB1 for one entity — revenue minus cost of sale.
 
     The first **per-entity unit metric with truth** this corpus can carry, and the
     reason the operating chain exists. Both sides are derived from the order lines
@@ -118,7 +118,7 @@ class GroundTruth(BaseModel):
     monthly: list[PeriodMetrics]
     invariants: Invariants
     injection_impact: list[InjectionImpact] = []
-    # DAT-884 — the operating-model answer key. Empty on corpora generated before
+    # — the operating-model answer key. Empty on corpora generated before
     # the chain existed; a grader must treat absence as "not gradeable", never as 0.
     db1_by_customer: list[ContributionMargin] = []
     db1_by_product_group: list[ContributionMargin] = []
@@ -312,7 +312,7 @@ def calculate_ground_truth(
 def _contribution_margin(
     dataset: FinanceDataset, *, by: str
 ) -> list[ContributionMargin]:
-    """True DB1 per customer or per product group, from the order lines (DAT-884).
+    """True DB1 per customer or per product group, from the order lines.
 
     Computed off the operating chain rather than the GL: the line carries both sides
     (``line_amount``, ``line_cost``) by construction, so this is an exact answer key.

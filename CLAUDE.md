@@ -2,7 +2,9 @@
 
 ## Project overview
 
-Synthetic test data generator with known entropy injections for calibrating dataraum-context entropy detectors. Produces closed-loop accounting data (GL entries, invoices, payments, bank transactions, trial balance) where all tables are numerically consistent and traceable to originating business events.
+Synthetic operating-model data with an answer key — a corpus whose metrics, structure and injected defects are all known, so anything computed over it can be graded rather than believed. Produces a closed-loop operating model (customers, products, sales orders and order lines cascading into GL entries, invoices, payments, bank transactions and trial balance) where every table is numerically consistent and traceable to the originating business event.
+
+The plan for growing it across the six performance dimensions — the family framework, the oracle contract, the order of work — is `docs/operating-model.md`. Consumers bind to this generator; it references none of them.
 
 ## Setup
 

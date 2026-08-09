@@ -142,13 +142,13 @@ def _month_start_end(fiscal_start: date, month_offset: int) -> tuple[date, date]
     return start, end
 
 
-# --- Entity-keyed RNG streams (DAT-884) ---
+# --- Entity-keyed RNG streams ---
 
 
 def _stream(seed: int, *key: object) -> random.Random:
     """A random stream keyed by stable entity IDENTITY, not by draw order.
 
-    The operating chain (DAT-884) draws only from these, never from the sequential
+    The operating chain draws only from these, never from the sequential
     ``rng`` the ledger cycles share. That is what makes a **volume** lever an exact
     same-seed counterfactual.
 
@@ -327,7 +327,7 @@ def generate_chart_of_accounts() -> list[ChartOfAccounts]:
 
 @dataclass(frozen=True)
 class Lever:
-    """A constructed intervention: a DGP parameter change at a known period (DAT-744).
+    """A constructed intervention: a DGP parameter change at a known period.
 
     Unlike entropy injectors (post-hoc corruption of generated frames), a lever
     changes the generating process itself, so the effect propagates naturally
@@ -342,8 +342,7 @@ class Lever:
     expenditure cycle are untouched (a price change does not move volumes or costs).
 
     ``volume``: the number of orders a customer places in ``month_offset >=
-    period_k`` is scaled by ``factor``. Exact for a different and stronger reason
-    (DAT-884): order *i* of a (customer, month) draws from its own identity-keyed
+    period_k`` is scaled by ``factor``. Exact for a different and stronger reason: order *i* of a (customer, month) draws from its own identity-keyed
     stream, so the baseline's orders are a strict SUBSET of the levered run's —
     byte-identical, plus the added ones. The ledger cycles never draw from those
     streams, so purchases, payroll and depreciation are untouched, and the added
@@ -376,7 +375,7 @@ class _SaleRecord:
     collected: bool = False
 
 
-# --- The operating chain: customer → product → order → order line (DAT-884) ---
+# --- The operating chain: customer → product → order → order line ---
 
 _SEGMENTS = ["Enterprise", "Mid-Market", "SMB"]
 _REGIONS = ["DACH", "Nordics", "Benelux", "UK&I"]
@@ -538,7 +537,7 @@ def _generate_revenue_entries(
     *,
     lever: Lever | None = None,
 ) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord], dict[str, Decimal]]:
-    """Revenue and cost of sale, DERIVED from the order lines (DAT-884).
+    """Revenue and cost of sale, DERIVED from the order lines.
 
     Two GL entries per order, both derived rather than drawn:
 
@@ -690,7 +689,7 @@ def _generate_ar_invoices(
     """One customer invoice per order — the AR document the corpus never had.
 
     ``invoices`` is vendor-side only, so days-sales-outstanding had no receivable to
-    measure and the AR half of Capital was invisible (DAT-884). Amount ties to the
+    measure and the AR half of Capital was invisible. Amount ties to the
     order's revenue posting by construction, and the due date follows the customer's
     own agreed terms, so DSO is a property of the data rather than a constant.
 
@@ -722,7 +721,7 @@ def _settle_ar_invoices(
     """Set each AR invoice's status from what was actually collected against it.
 
     Derived, never drawn: an invoice reading ``paid`` with no receipt behind it — or
-    ``open`` with one — is precisely the cross-table inconsistency the engine's
+    ``open`` with one — is precisely the cross-table inconsistency a consumer's
     validation induction is supposed to catch, and it would be ours, not theirs.
     """
     collected: dict[str, Decimal] = {}
@@ -749,8 +748,8 @@ def _generate_inventory_replenishment(
     Without this the cost-of-sale leg would drive Inventory permanently negative and
     the corpus would carry a defect we invented ourselves. Sizing it off the month's
     COGS means stock scales naturally under a volume lever — the propagation a DGP
-    lever is supposed to have — and it gives the engine's ``dio`` /
-    ``cash_conversion_cycle`` metrics real data to bind to for the first time.
+    lever is supposed to have — and it gives ``dio`` and ``cash_conversion_cycle``
+    real data to bind to for the first time.
     """
     entries: list[JournalEntry] = []
     lines: list[JournalLine] = []
@@ -795,7 +794,7 @@ def _generate_cash_receipts(
 ) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction], list[Receipt]]:
     """Cash receipts for collected sales: DR Cash, CR AR + Bank Txn + the AR document.
 
-    Keyed per SALE (DAT-884), not drawn from the sequential stream: whether order X
+    Keyed per SALE, not drawn from the sequential stream: whether order X
     is collected, when, and how much must not depend on how many other orders exist,
     or a volume lever would silently re-roll the collection outcome of every
     pre-existing sale and destroy the subset property the counterfactual rests on.
@@ -909,7 +908,7 @@ def _generate_purchase_invoices(
 ) -> tuple[list[Invoice], list[JournalEntry], list[JournalLine]]:
     """Generate vendor/purchase invoices with GL entries: DR Expense, CR AP."""
     leaf = _get_leaf_accounts()
-    # COGS is EXCLUDED (DAT-884): cost of goods sold is now derived from order lines
+    # COGS is EXCLUDED: cost of goods sold is now derived from order lines
     # (units x standard_cost) and posted by the revenue cycle. Letting vendor invoices
     # land here too would make account 5100 a mix of real cost-of-sale and random
     # purchases — ambiguous, and the reason gross profit was ungradeable before.
@@ -1614,7 +1613,7 @@ def _derive_balance_sheet(
 
 
 def _generate_measure_probes(months: int, fiscal_start: date, n_series: int) -> list[MeasureProbe]:
-    """Skeleton ``(series_id, period)`` grain for the stock/flow probe table (DAT-445).
+    """Skeleton ``(series_id, period)`` grain for the stock/flow probe table.
 
     ``n_series`` synthetic series × ``months`` periods — the grain that
     ``inject_stock_flow_probes`` fills with stock/flow measure columns. Rows are in
@@ -1628,7 +1627,7 @@ def _generate_measure_probes(months: int, fiscal_start: date, n_series: int) -> 
 
 
 def _generate_formula_probes(n_rows: int) -> list[FormulaProbe]:
-    """Skeleton ``probe_id`` grain for the formula-divergence probe table (DAT-442).
+    """Skeleton ``probe_id`` grain for the formula-divergence probe table.
 
     ``n_rows`` synthetic records — the grain that ``inject_formula_divergence`` fills
     with labelled (source_a, source_b, target) formula groups for the derived_value
@@ -1638,7 +1637,7 @@ def _generate_formula_probes(n_rows: int) -> list[FormulaProbe]:
 
 
 def _generate_relationship_probes(n_parents: int, n_children: int) -> tuple[list[RefEntity], list[RefActivity]]:
-    """Skeleton grains for the relationship-pairs probe tables (DAT-408/450).
+    """Skeleton grains for the relationship-pairs probe tables.
 
     ``n_parents`` parent rows + ``n_children`` child rows — the grains that
     ``inject_relationship_pairs`` fills with labelled FK/code column pairs
@@ -1662,7 +1661,7 @@ _ROLEPLAY_CITIES = [
 def _generate_roleplay_probes(
     n_addresses: int, n_orders: int, n_deliveries: int, fiscal_start: date, months: int
 ) -> tuple[list[Address], list[Order], list[Delivery]]:
-    """Skeleton grains for the role-playing-FK probe shape (DAT-788/DAT-419).
+    """Skeleton grains for the role-playing-FK probe shape.
 
     A complete address dimension plus id×date grains for the two facts;
     ``inject_role_playing_fks`` fills the ROLE columns (orders.bill_to_addr /
@@ -1731,7 +1730,7 @@ def generate_finance_dataset(
         fiscal_start: First day of the fiscal year.
         invoices_count: Number of vendor/purchase invoices.
         q4_seasonal_boost: Fractional boost applied to Q4 revenue months.
-        lever: Optional constructed intervention (DAT-744) — a DGP parameter
+        lever: Optional constructed intervention — a DGP parameter
             change at a known period with a known effect; see :class:`Lever`.
 
     Returns:
@@ -1750,7 +1749,7 @@ def generate_finance_dataset(
     chart = generate_chart_of_accounts()
     fx_rates = _generate_fx_rates(rng, fiscal_start, months)
 
-    # ── The operating chain (DAT-884) ──
+    # ── The operating chain ──
     # Drawn from entity-keyed streams only, NEVER the sequential `rng`, so the
     # ledger cycles below are independent of order volume and a volume lever stays
     # an exact counterfactual. Its GL entries are minted LAST (see below).
@@ -1802,7 +1801,7 @@ def generate_finance_dataset(
         count_per_month=20,
     )
 
-    # ── The operating chain's GL, minted LAST (DAT-884) ──
+    # ── The operating chain's GL, minted LAST ──
     # Ordering is load-bearing, not cosmetic: a volume lever changes how many sales
     # entries exist, so minting them mid-cascade would shift every later cycle's
     # entry_id/line_id and the expenditure cycle would stop being byte-identical
@@ -1845,11 +1844,11 @@ def generate_finance_dataset(
     balance_sheet = _derive_balance_sheet(all_entries, all_lines, chart)
     # Skeleton grain for the stock/flow probe table — empty unless a strategy needs it.
     measure_probes = _generate_measure_probes(months, fiscal_start, probe_series)
-    # Skeleton grain for the formula-divergence probe table — same gating (DAT-442).
+    # Skeleton grain for the formula-divergence probe table — same gating.
     formula_probes = _generate_formula_probes(formula_probe_rows)
     # Skeleton grains for the relationship probe tables — empty unless a strategy needs them.
     ref_entities, ref_activity = _generate_relationship_probes(relation_parents, relation_children)
-    # Skeleton grains + dimension for the role-playing-FK shape — same gating (DAT-788).
+    # Skeleton grains + dimension for the role-playing-FK shape — same gating.
     addresses, orders, deliveries = _generate_roleplay_probes(
         roleplay_addresses, roleplay_orders, roleplay_deliveries, fiscal_start, months
     )

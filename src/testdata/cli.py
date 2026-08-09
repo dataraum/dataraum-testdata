@@ -65,7 +65,7 @@ def generate(
     if len(registry) > 0:
         summary = registry.summary()
         typer.echo(f"  By layer: {summary.get('by_layer', {})}")
-        typer.echo(f"  By detector: {summary.get('by_detector', {})}")
+        typer.echo(f"  By defect: {summary.get('by_defect', {})}")
 
     typer.echo(f"\nFiles written to: {output}")
 

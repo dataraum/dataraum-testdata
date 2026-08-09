@@ -339,11 +339,11 @@ def _merge_sales_data(
     dfs: dict[str, pl.DataFrame],
     mapping: dict[str, str],
 ) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
-    """sales_data = sales_order_lines LEFT JOIN sales_orders ON order_id (DAT-884).
+    """sales_data = sales_order_lines LEFT JOIN sales_orders ON order_id.
 
     The operating chain's parent→child pair, folded exactly like journal_data — the
     header/item split is the shape a real ERP presents, and collapsing it is what the
-    ``partial`` level exists to test the engine against. Customers and products stay
+    ``partial`` level exists to test a consumer against. Customers and products stay
     as lookups at this level; they are dimension masters, not the order's parent.
 
     A corpus generated before the chain existed simply has neither table — skip

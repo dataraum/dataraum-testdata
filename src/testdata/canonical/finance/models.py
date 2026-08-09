@@ -160,7 +160,7 @@ class BalanceSheet(BaseModel):
 
 
 class MeasureProbe(BaseModel):
-    """Skeleton grain for the stock/flow probe table (DAT-445).
+    """Skeleton grain for the stock/flow probe table.
 
     A synthetic measures-over-time table: ``series_id`` × ``period`` rows that
     ``inject_stock_flow_probes`` fills with clearly-named stock/flow measure columns
@@ -173,7 +173,7 @@ class MeasureProbe(BaseModel):
 
 
 class FormulaProbe(BaseModel):
-    """Skeleton grain for the formula-divergence probe table (DAT-442, ADR-0009).
+    """Skeleton grain for the formula-divergence probe table.
 
     A synthetic per-record table: ``probe_id`` rows that ``inject_formula_divergence``
     fills with labelled (source_a, source_b, target) formula groups — the calibration
@@ -185,7 +185,7 @@ class FormulaProbe(BaseModel):
 
 
 class RefEntity(BaseModel):
-    """Skeleton row for the relationship-pairs PARENT probe table (DAT-408/450).
+    """Skeleton row for the relationship-pairs PARENT probe table.
 
     A reference/master grain: one row per entity that ``inject_relationship_pairs``
     fills with labelled key/code columns (the genuine-FK pools and the spurious
@@ -197,7 +197,7 @@ class RefEntity(BaseModel):
 
 
 class RefActivity(BaseModel):
-    """Skeleton row for the relationship-pairs CHILD probe table (DAT-408/450).
+    """Skeleton row for the relationship-pairs CHILD probe table.
 
     An activity grain referencing :class:`RefEntity` pools: one row per event that
     ``inject_relationship_pairs`` fills with labelled FK/code columns across the
@@ -209,11 +209,10 @@ class RefActivity(BaseModel):
 
 
 class Address(BaseModel):
-    """Dimension for the role-playing-FK probe shape (DAT-788/DAT-419).
+    """Dimension for the role-playing-FK probe shape.
 
     One address master that TWO differently-roled FK columns on the same fact
-    reference (``orders.bill_to_addr`` + ``orders.ship_to_addr`` — the DAT-419
-    two-FKs-one-table-pair shape), plus a second fact sharing the ship_to role
+    reference (``orders.bill_to_addr`` + ``orders.ship_to_addr`` — the two-FKs-one-table-pair shape), plus a second fact sharing the ship_to role
     under a DIFFERENT column name (``deliveries.delivery_addr`` — the judge's
     conform path). Role columns are filled by ``inject_role_playing_fks``.
     Generated only when a strategy injects into the role-play facts; empty otherwise.
@@ -226,7 +225,7 @@ class Address(BaseModel):
 
 
 class Order(BaseModel):
-    """Skeleton grain for the role-play fact with two FK roles (DAT-788/DAT-419).
+    """Skeleton grain for the role-play fact with two FK roles.
 
     ``order_id`` × ``order_date`` rows; ``inject_role_playing_fks`` adds the
     ``bill_to_addr`` / ``ship_to_addr`` FK-role columns (both → addresses).
@@ -238,7 +237,7 @@ class Order(BaseModel):
 
 
 class Delivery(BaseModel):
-    """Skeleton grain for the second role-play fact sharing the dimension (DAT-788).
+    """Skeleton grain for the second role-play fact sharing the dimension.
 
     ``inject_role_playing_fks`` adds ``delivery_addr`` (→ addresses, ship_to ROLE
     under a different name — role-consistent with the parent order's ship_to by
@@ -251,7 +250,7 @@ class Delivery(BaseModel):
 
 
 class Customer(BaseModel):
-    """A selling-side counterparty — the Demand dimension's canonical entity (DAT-884).
+    """A selling-side counterparty — the Demand dimension's canonical entity.
 
     Distinct from the role-play probe dimension (:class:`Address`): this is real
     operating master data every sales order references, present on every corpus.
@@ -282,7 +281,7 @@ class Product(BaseModel):
 
 
 class SalesOrder(BaseModel):
-    """A customer order header (the documented ERP sales-order shape, DAT-884)."""
+    """A customer order header (the documented ERP sales-order shape)."""
 
     order_id: str = Field(description="Unique sales order identifier")
     customer_id: str = Field(description="FK to Customer")
@@ -308,7 +307,7 @@ class SalesOrderLine(BaseModel):
 
 
 class ARInvoice(BaseModel):
-    """A CUSTOMER-side invoice — the AR half the corpus never had (DAT-884).
+    """A CUSTOMER-side invoice — the AR half the corpus never had.
 
     ``invoices`` is vendor-side only, so days-sales-outstanding had no receivable
     document to measure against and the AR half of Capital was invisible. One AR
@@ -356,7 +355,7 @@ class FinanceDataset(BaseModel):
     addresses: list[Address] = []
     orders: list[Order] = []
     deliveries: list[Delivery] = []
-    # The operating chain (DAT-884) — present on EVERY corpus, unlike the probe
+    # The operating chain — present on EVERY corpus, unlike the probe
     # shapes above, which stay conditional and empty by default.
     customers: list[Customer] = []
     products: list[Product] = []

@@ -43,7 +43,7 @@ def test_corrupt_types():
     non_numeric = [v for v in str_values if v not in [str(x) for x in [100.0, 200.0, 300.0, 400.0, 500.0]]]
     assert len(non_numeric) > 0
     assert len(reg) == 1
-    assert reg.injections[0].detector_id == "type_fidelity"
+    assert reg.injections[0].defect == "type_fidelity"
 
 
 def test_introduce_nulls():
@@ -53,7 +53,7 @@ def test_introduce_nulls():
     null_count = result["cost_center"].null_count()
     assert null_count >= 10  # ~15 expected
     assert null_count <= 25
-    assert reg.injections[0].detector_id == "null_ratio"
+    assert reg.injections[0].defect == "completeness"
 
 
 def test_inject_outliers():
@@ -63,7 +63,7 @@ def test_inject_outliers():
     values = result["credit"].to_list()
     outliers = [v for v in values if abs(v) > 500]
     assert len(outliers) >= 3
-    assert reg.injections[0].detector_id == "outlier_rate"
+    assert reg.injections[0].defect == "distribution"
 
 
 def test_break_benford():
@@ -75,7 +75,7 @@ def test_break_benford():
     values = result["amount"].to_list()
     round_vals = [v for v in values if v % 100 == 0]
     assert len(round_vals) > 100  # Many round numbers injected
-    assert reg.injections[0].detector_id == "benford"
+    assert reg.injections[0].defect == "distribution"
 
 
 def test_obscure_column_names():
@@ -96,7 +96,7 @@ def test_mix_units():
     # ~10 values should be 1100.0 (1000 * 1.1)
     converted = [v for v in values if abs(v - 1100.0) < 0.01]
     assert len(converted) >= 5
-    assert reg.injections[0].detector_id == "unit_entropy"
+    assert reg.injections[0].defect == "unit_consistency"
 
 
 def test_corrupt_dates():
@@ -107,7 +107,7 @@ def test_corrupt_dates():
     # Should contain reformatted dates
     non_iso = [v for v in values if "-" not in v or "/" in v]
     assert len(non_iso) > 0
-    assert reg.injections[0].detector_id == "temporal_entropy"
+    assert reg.injections[0].defect == "format_consistency"
 
 
 def test_break_referential_integrity():
@@ -117,7 +117,7 @@ def test_break_referential_integrity():
     values = result["invoice_id"].to_list()
     orphans = [v for v in values if v.startswith("ORPHAN")]
     assert len(orphans) >= 3
-    assert reg.injections[0].detector_id == "relationship_entropy"
+    assert reg.injections[0].defect == "referential_integrity"
 
 
 def test_add_duplicate_fk_paths():
@@ -153,7 +153,7 @@ def test_drift_formula():
     values = result["debit_balance"].to_list()
     drifted = [v for v in values if abs(v - 1000.0) > 0.001]
     assert len(drifted) >= 3
-    assert reg.injections[0].detector_id == "derived_value"
+    assert reg.injections[0].defect == "derived_consistency"
 
 
 def test_inject_temporal_drift():
@@ -211,8 +211,8 @@ def test_break_gl_invoice_match():
     changed = [v for v in values if abs(v - 1000.0) > 0.01]
     assert len(changed) >= 5  # ~10% of 100
     assert len(reg) == 1
-    assert reg.injections[0].detector_id == "cross_table_consistency"
-    assert reg.injections[0].sub_dimension == "gl_invoice_mismatch"
+    assert reg.injections[0].defect == "cross_table_consistency"
+    assert reg.injections[0].defect_detail == "gl_invoice_mismatch"
 
 
 def test_break_payment_bank_match():
@@ -230,8 +230,8 @@ def test_break_payment_bank_match():
     changed = [v for v in values if abs(v - 500.0) > 0.01]
     assert len(changed) >= 4  # ~8% of 100
     assert len(reg) == 1
-    assert reg.injections[0].detector_id == "cross_table_consistency"
-    assert reg.injections[0].sub_dimension == "payment_bank_mismatch"
+    assert reg.injections[0].defect == "cross_table_consistency"
+    assert reg.injections[0].defect_detail == "payment_bank_mismatch"
 
 
 def test_break_trial_balance():
@@ -249,8 +249,8 @@ def test_break_trial_balance():
     changed = [v for v in values if abs(v - 10000.0) > 0.01]
     assert len(changed) >= 5
     assert len(reg) == 1
-    assert reg.injections[0].detector_id == "derived_value_consistency"
-    assert reg.injections[0].sub_dimension == "trial_balance_gl_mismatch"
+    assert reg.injections[0].defect == "cross_table_consistency"
+    assert reg.injections[0].defect_detail == "trial_balance_gl_mismatch"
 
 
 def _one_sided_journal_lines() -> pl.DataFrame:
@@ -286,7 +286,7 @@ def test_inject_driver_effect():
     # One record per (value, factor): exactly the ladder, one factor per distinct value.
     recs = reg.injections
     assert len(recs) == len(factors)
-    assert {r.detector_id for r in recs} == {"driver_rankings"}
+    assert {r.defect for r in recs} == {"driver_effect"}
     assert sorted(r.parameters["factor"] for r in recs) == factors
     assigned = {r.parameters["value"]: r.parameters["factor"] for r in recs}
     assert len(assigned) == len(factors)  # distinct values
@@ -309,7 +309,7 @@ def test_inject_driver_effect():
         expected = sorted(i for i, c in enumerate(ccs) if c == value and original[i] != 0.0)
         assert r.target_rows == expected
         assert r.parameters["n_scaled"] == len(expected) > 0
-        assert r.parameters["dimension"] == "cost_center"
+        assert r.parameters["slice_column"] == "cost_center"
         assert r.parameters["measure"] == "debit"
         assert r.parameters["family"] == "driver_effect"
 
@@ -349,7 +349,7 @@ def test_registry_summary():
     assert len(reg) == 2
     summary = reg.summary()
     assert "by_layer" in summary
-    assert "by_detector" in summary
+    assert "by_defect" in summary
 
 
 def test_mix_units_declared_flips_unit_column():
@@ -368,7 +368,7 @@ def test_mix_units_declared_flips_unit_column():
     assert len(eur_rows) >= 5
     # declaration and conversion move together: every EUR row carries a converted value
     assert all(abs(values[i] - 1100.0) < 0.01 for i in eur_rows)
-    assert reg.injections[0].sub_dimension == "declared_mixed_currency"
+    assert reg.injections[0].defect_detail == "declared_mixed_currency"
     assert reg.injections[0].parameters["unit_col"] == "currency"
 
 
@@ -382,7 +382,7 @@ def test_mix_units_undeclared_leaves_unit_column_untouched():
         rng=_make_rng(), fx_rate=1.1,
     )
     assert set(result["currency"].to_list()) == {"USD"}
-    assert reg.injections[0].sub_dimension == "mixed_currency"
+    assert reg.injections[0].defect_detail == "mixed_currency"
     assert reg.injections[0].parameters["unit_col"] is None
 
 

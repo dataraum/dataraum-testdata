@@ -70,10 +70,10 @@ def test_sample_is_well_formed() -> None:
 
 
 def test_combined_ratio_guard_rejects_over_the_typing_threshold() -> None:
-    # A strategy override that would push the corrupted column below typing
-    # min_confidence (0.85) — and thus to VARCHAR, never quarantined — is rejected
-    # at construction, not silently shipped (the DAT-450 live-run failure mode).
-    with pytest.raises(ValueError, match="min_confidence"):
+    # A strategy override that would push the corrupted column below a typing
+    # confidence floor — and thus to VARCHAR, never quarantined — is rejected at
+    # construction, not silently shipped.
+    with pytest.raises(ValueError, match="confidence floor"):
         NullTokenFamilyParams(marker_ratio=(0.05, 0.12), decoy_ratio=(0.02, 0.05))  # upper 0.17
     NullTokenFamilyParams()  # defaults (0.075 + 0.025 = 0.10) are safe → no raise
 
@@ -129,7 +129,7 @@ def test_injector_labels_markers_and_decoys() -> None:
     )
     # Marker and decoy rows are disjoint, and both are recorded as ground truth.
     assert not (set(p["marker_rows"]) & set(p["decoy_rows"]))
-    assert inj.detector_id == "null_semantics"
+    assert inj.defect == "null_encoding"
     assert p["seed"] == 20260609
 
 
@@ -149,7 +149,7 @@ def test_inject_scale_mix_records_and_scales() -> None:
     reg = InjectionRegistry()
     out = inject_scale_mix(df, col="amount", seed=42, registry=reg, table_name="invoices", rng=random.Random(0))
     (inj,) = reg.injections
-    assert inj.detector_id == "unit_consistency"
+    assert inj.defect == "unit_consistency"
     assert inj.injection_type == "inject_scale_mix"
     scale = inj.parameters["scale_factor"]
     col = out["amount"].to_list()
@@ -255,7 +255,7 @@ def test_inject_stock_flow_probes_adds_labelled_columns() -> None:
     out = inject_stock_flow_probes(df, seed=20260610, registry=reg, table_name="measure_probes", rng=random.Random(0))
     assert reg.injections
     for inj in reg.injections:
-        assert inj.detector_id == "temporal_behavior"
+        assert inj.defect == "measure_behavior"
         assert inj.injection_type == "inject_stock_flow_probes"
         assert inj.parameters["true_behavior"] in ("stock", "flow")
         assert inj.target_column in out.columns  # the measure column was added
@@ -648,7 +648,7 @@ def test_inject_formula_divergence_values_follow_the_labels() -> None:
     for inj in reg.injections:
         p = inj.parameters
         modes.add(p["divergence_mode"])
-        assert inj.detector_id == "derived_value"
+        assert inj.defect == "derived_consistency"
         assert inj.injection_type == "inject_formula_divergence"
         src_a, src_b = p["source_columns"]
         a, b = out[src_a].to_list(), out[src_b].to_list()
@@ -793,7 +793,7 @@ def test_inject_relationship_pairs_fills_both_tables_and_registry() -> None:
     assert reg.injections  # one record per pair
     assert "entity_seq" in parent.columns and "activity_seq" in child.columns  # grain preserved
     for inj in reg.injections:
-        assert inj.detector_id == "relationship_discovery"
+        assert inj.defect == "relationships"
         assert inj.injection_type == "inject_relationship_pairs"
         params = inj.parameters
         assert params["label"] in ("genuine", "spurious")
@@ -917,7 +917,7 @@ def test_inject_slice_conditional_null_concentrates_and_records() -> None:
         rng=random.Random(0),
     )
     (inj,) = reg.injections
-    assert inj.detector_id == "slice_conditional_null"
+    assert inj.defect == "completeness"
     assert inj.injection_type == "inject_slice_conditional_null"
     assert inj.target_column == "debit"
     assert inj.parameters["slice_column"] == "cost_center"
