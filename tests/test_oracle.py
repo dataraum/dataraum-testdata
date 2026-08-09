@@ -12,15 +12,23 @@ from decimal import Decimal
 import pytest
 
 from testdata.canonical.finance.generators import generate_finance_dataset
-from testdata.ground_truth import _IMPACT_RULES, calculate_ground_truth, metric_contract
+from testdata.families import FAMILIES
+from testdata.ground_truth import (
+    _IMPACT_RULES,
+    calculate_ground_truth,
+    invariant_contract,
+    metric_contract,
+)
 from testdata.metadata_truth import canonical_metadata_truth
 from testdata.oracle import (
     INTEGRITY_SURFACES,
+    INVARIANTS,
     METRIC_IDS,
     METRICS,
     METRICS_BY_ID,
     VARIANT_IDS,
     build_contract,
+    build_invariants,
 )
 
 
@@ -243,3 +251,54 @@ def test_the_additivity_verdict_agrees_with_the_metric_kind() -> None:
         categorical, temporal = by_kind[METRICS_BY_ID[metric_id].kind]
         assert additivity[metric_id]["categorical_additive"] is categorical, metric_id
         assert additivity[metric_id]["time_additive"] is temporal, metric_id
+
+
+# --- family ownership -------------------------------------------------------
+
+
+def test_every_metric_and_invariant_names_a_declared_family() -> None:
+    declared = {fam.name for fam in FAMILIES}
+    for metric in METRICS:
+        assert metric.families, metric.id
+        assert set(metric.families) <= declared, metric.id
+    for invariant in INVARIANTS:
+        assert invariant.family in declared, invariant.id
+
+
+def test_a_family_without_a_graded_metric_or_invariant_is_not_lit() -> None:
+    """§5's rule, made checkable. `inventory` owns no metric of its own — the balance
+    and DIO are computed off the GL — but it guarantees the two subledger invariants,
+    which is what lights it. A family contributing neither is dark and should say so."""
+    owned: dict[str, set[str]] = {fam.name: set() for fam in FAMILIES if not fam.optional}
+    for metric in METRICS:
+        for family in metric.families:
+            owned.setdefault(family, set()).add(metric.id)
+    for invariant in INVARIANTS:
+        owned.setdefault(invariant.family, set()).add(invariant.id)
+
+    dark = {name for name, ids in owned.items() if not ids}
+    assert dark == set(), f"families with no published truth: {sorted(dark)}"
+    assert "db1" in owned["operating_chain"]
+    assert "inventory_ties_to_gl" in owned["inventory"]
+
+
+def test_invariants_publish_a_statement_a_consumer_can_recheck() -> None:
+    """A bare `journal_balanced: true` says nothing about what was checked."""
+    published = {entry["id"]: entry for entry in invariant_contract(_truth())}
+    assert set(published) == {inv.id for inv in INVARIANTS}
+    for entry in published.values():
+        assert entry["statement"].strip() and entry["family"]
+        assert ("holds" in entry) != ("value" in entry), entry["id"]
+
+    assert published["journal_balanced"]["holds"] is True
+    # The rate is a measured figure, not a verdict — §5 is explicit that it is an
+    # authored expectation and never 1.0, so no band is asserted for the consumer.
+    rate = published["bank_reconciliation_rate"]
+    assert rate["kind"] == "rate" and 0.0 < rate["value"] < 1.0
+
+
+def test_an_invariant_cannot_ship_unchecked_or_unclaimed() -> None:
+    with pytest.raises(ValueError, match="declared but never checked"):
+        build_invariants({})
+    with pytest.raises(ValueError, match="undeclared invariants"):
+        build_invariants({inv.id: True for inv in INVARIANTS} | {"vibes_intact": True})

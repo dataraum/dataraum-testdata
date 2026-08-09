@@ -159,7 +159,9 @@ def test_export_creates_yaml():
         revenue = next(m for m in data["metrics"] if m["id"] == "revenue")
         assert revenue["values"]["year"]["2025"] > 0
         assert len(revenue["values"]["month"]) == 12
-        assert data["invariants"]["journal_balanced"] is True
+        checks = {entry["id"]: entry for entry in data["invariants"]}
+        assert checks["journal_balanced"]["holds"] is True
+        assert checks["journal_balanced"]["family"] == "core_ledger"
 
 
 def test_scenario_includes_ground_truth():

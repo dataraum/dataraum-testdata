@@ -78,6 +78,11 @@ class Metric:
 
     ``breakdown`` names the axis when a metric's value is a mapping rather than a
     scalar (invoice counts by status, payment counts by method).
+
+    ``families`` names the families whose tables the metric is computed from — usually
+    one, sometimes two: ``revenue`` reads the GL at period grain and the order lines at
+    entity grain, and saying so is what makes "a dimension without a graded metric is not
+    lit" checkable rather than a slogan.
     """
 
     id: str
@@ -87,6 +92,7 @@ class Metric:
     grains: tuple[str, ...]
     definition: str
     scope: str
+    families: tuple[str, ...]
     variants: tuple[Variant, ...] = ()
     basis: str = "derived"
     breakdown: str | None = None
@@ -118,6 +124,7 @@ _ENTITY_DERIVATION = (
 METRICS: tuple[Metric, ...] = (
     Metric(
         id="revenue",
+        families=("core_ledger", "operating_chain"),
         title="Revenue",
         unit="currency",
         kind="flow",
@@ -144,6 +151,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="cogs",
+        families=("core_ledger", "operating_chain"),
         title="Cost of goods sold",
         unit="currency",
         kind="flow",
@@ -158,6 +166,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="expenses",
+        families=("core_ledger",),
         title="Total expenses",
         unit="currency",
         kind="flow",
@@ -179,6 +188,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="gross_profit",
+        families=("core_ledger",),
         title="Gross profit",
         unit="currency",
         kind="flow",
@@ -204,6 +214,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="operating_income",
+        families=("core_ledger",),
         title="Operating income",
         unit="currency",
         kind="flow",
@@ -213,6 +224,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="gross_margin",
+        families=("core_ledger",),
         title="Gross margin",
         unit="percent",
         kind="ratio",
@@ -222,6 +234,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="operating_margin",
+        families=("core_ledger",),
         title="Operating margin",
         unit="percent",
         kind="ratio",
@@ -231,6 +244,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="purchases",
+        families=("core_ledger",),
         title="Purchases",
         unit="currency",
         kind="flow",
@@ -245,6 +259,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="ar_balance",
+        families=("core_ledger",),
         title="Accounts receivable",
         unit="currency",
         kind="stock",
@@ -254,6 +269,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="ap_balance",
+        families=("core_ledger",),
         title="Accounts payable",
         unit="currency",
         kind="stock",
@@ -263,6 +279,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="cash_balance",
+        families=("core_ledger",),
         title="Cash",
         unit="currency",
         kind="stock",
@@ -272,6 +289,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="inventory_balance",
+        families=("core_ledger", "inventory"),
         title="Inventory",
         unit="currency",
         kind="stock",
@@ -284,6 +302,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="dso",
+        families=("core_ledger",),
         title="Days sales outstanding",
         unit="days",
         kind="ratio",
@@ -293,6 +312,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="dpo",
+        families=("core_ledger",),
         title="Days payable outstanding",
         unit="days",
         kind="ratio",
@@ -315,6 +335,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="dio",
+        families=("core_ledger", "inventory"),
         title="Days inventory outstanding",
         unit="days",
         kind="ratio",
@@ -324,6 +345,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="cash_conversion_cycle",
+        families=("core_ledger", "inventory"),
         title="Cash conversion cycle",
         unit="days",
         kind="ratio",
@@ -349,6 +371,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="revenue_growth_pct",
+        families=("core_ledger",),
         title="Revenue growth, month over month",
         unit="percent",
         kind="ratio",
@@ -361,6 +384,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="free_cash_flow",
+        families=("core_ledger",),
         title="Free cash flow",
         unit="currency",
         kind="flow",
@@ -375,6 +399,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="db1",
+        families=("operating_chain",),
         title="Contribution margin (DB1)",
         unit="currency",
         kind="flow",
@@ -388,6 +413,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="db1_pct",
+        families=("operating_chain",),
         title="Contribution margin ratio",
         unit="percent",
         kind="ratio",
@@ -400,6 +426,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="units_sold",
+        families=("operating_chain",),
         title="Units sold",
         unit="count",
         kind="count",
@@ -409,6 +436,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="order_count",
+        families=("operating_chain",),
         title="Orders",
         unit="count",
         kind="count",
@@ -421,6 +449,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="invoice_count",
+        families=("core_ledger",),
         title="Invoices by status",
         unit="count",
         kind="count",
@@ -431,6 +460,7 @@ METRICS: tuple[Metric, ...] = (
     ),
     Metric(
         id="payment_count",
+        families=("core_ledger",),
         title="Payments by method",
         unit="count",
         kind="count",
@@ -441,6 +471,72 @@ METRICS: tuple[Metric, ...] = (
     ),
 )
 
+@dataclass(frozen=True)
+class Invariant:
+    """A structural property of the corpus, declared by the family that guarantees it.
+
+    Not a metric: an invariant has no unit and no grain, it either holds or it does not
+    — except for the reconciliation rate, which is a *measured* rate published as a
+    figure. §5 is explicit that the rate is an authored expectation and never assumed to
+    be 1.0: a consumer reporting a perfect rate has overcleaned, and that is a failure,
+    so no band is asserted here and the judgement stays the consumer's.
+
+    ``statement`` is what must hold, in reproducible terms — a consumer has to be able
+    to re-check it, not agree with a summary of it.
+    """
+
+    id: str
+    family: str
+    statement: str
+    kind: str = "holds"  # holds | rate
+
+
+INVARIANTS: tuple[Invariant, ...] = (
+    Invariant(
+        id="journal_balanced",
+        family="core_ledger",
+        statement="For every journal entry, sum(debit) == sum(credit).",
+    ),
+    Invariant(
+        id="trial_balance_balanced",
+        family="core_ledger",
+        statement="For every period, sum(debit_balance) == sum(credit_balance) across the trial balance.",
+    ),
+    Invariant(
+        id="invoice_payment_matched",
+        family="core_ledger",
+        statement="Every invoice with status=paid has a payment whose amount equals the invoice amount.",
+    ),
+    Invariant(
+        id="bank_reconciliation_rate",
+        family="core_ledger",
+        kind="rate",
+        statement=(
+            "Share of bank_transactions with reconciled=true. An AUTHORED expectation, "
+            "never 1.0 — a consumer reporting a perfect rate has overcleaned."
+        ),
+    ),
+    Invariant(
+        id="inventory_rollforward_holds",
+        family="inventory",
+        statement=(
+            "For every (product, location, period): closing[p-1] + sum(movement units in p) == closing[p]. "
+            "Per key, not merely in aggregate — this is what separates a stock table from a table of "
+            "numbers that look like stock."
+        ),
+    ),
+    Invariant(
+        id="inventory_ties_to_gl",
+        family="inventory",
+        statement=(
+            "For every period, sum(inventory_positions.value) equals the cumulative balance of GL 1400. "
+            "Both sides are valued at standard cost, so the tie is exact; a tolerance here would be "
+            "hiding something."
+        ),
+    ),
+)
+
+INVARIANTS_BY_ID: dict[str, Invariant] = {i.id: i for i in INVARIANTS}
 METRICS_BY_ID: dict[str, Metric] = {m.id: m for m in METRICS}
 METRIC_IDS: frozenset[str] = frozenset(METRICS_BY_ID)
 VARIANT_IDS: frozenset[str] = frozenset(v.id for m in METRICS for v in m.variants)
@@ -532,5 +628,34 @@ def build_contract(values: ValueMap, variant_values: ValueMap) -> list[dict[str,
             )
         if variants:
             entry["variants"] = variants
+        out.append(entry)
+    return out
+
+
+def build_invariants(results: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Join the invariant declarations to their computed results, refusing anything unpaired.
+
+    Same contract as :func:`build_contract`: a declaration with no result would publish a
+    property nothing checked, and a result with no declaration would publish a verdict
+    with no statement of what it means.
+    """
+    unknown = set(results) - set(INVARIANTS_BY_ID)
+    if unknown:
+        raise ValueError(f"results for undeclared invariants: {sorted(unknown)}")
+
+    out: list[dict[str, Any]] = []
+    for invariant in INVARIANTS:
+        if invariant.id not in results:
+            raise ValueError(f"invariant {invariant.id!r} is declared but never checked")
+        entry: dict[str, Any] = {
+            "id": invariant.id,
+            "family": invariant.family,
+            "kind": invariant.kind,
+            "statement": invariant.statement,
+        }
+        if invariant.kind == "rate":
+            entry["value"] = results[invariant.id]
+        else:
+            entry["holds"] = bool(results[invariant.id])
         out.append(entry)
     return out

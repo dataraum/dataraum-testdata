@@ -107,6 +107,15 @@ fact, a dimension or explicitly ambiguous — §1's "a table that lands without 
 fragment is not done", finally with teeth. The published truth is unchanged apart from
 list order, which is now family order.
 
+Then **ownership of the truth**. Every metric in the oracle registry now names the
+families whose tables it is computed from (`revenue` names two — the GL at period grain,
+the order lines at entity grain), and invariants moved from six anonymous booleans to
+declarations that each name their family and state, reproducibly, what must hold. §5's
+"a dimension without at least one graded metric is not lit" became a test: a family
+contributing neither a metric nor an invariant fails it. `inventory` is the interesting
+case — it owns no metric of its own, because the balance and DIO are computed off the GL,
+and what lights it is the two subledger invariants.
+
 Then the **container**. `FinanceDataset` was one flat model of eight-plus lists that grew
 with every release and belonged to nobody — nothing connected `stock_movements` to the
 family that declares it. It is now `Corpus`, *composed* from one fragment per family
@@ -125,25 +134,26 @@ Still to come, and the reason this is only most of S0:
 | `metadata_truth._RELATIONSHIPS` | the FK topology re-listed away from the tables | **registry** |
 | `export._write_manifest` | a literal version string, and run parameters repeated under `parameters` | **identity** (§6) |
 | `schema_transforms` | the merge/inline functions name finance tables | **registry** |
-| `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
+| `ground_truth` | metrics and invariants with no declared owner | **oracle** (§5) — every metric and invariant names its family |
+| `ground_truth.GroundTruth` | the finance-shaped value computation itself | open — needs `Family.truth`, and that is the same design problem as `Family.generate` |
 | `metadata_truth` | one canonical authored blob of roles, units, cycles | **registry** |
 | `metadata_truth` | `VERTICAL = "finance"` | open — the last genuinely *vertical*-level constant |
-| `scenarios/runner` | imports `generate_finance_dataset` directly | open |
+| `scenarios/runner` | imports `generate_finance_dataset` directly | open — needs `Family.generate`; see below |
 | `Corpus` | one fixed container of eight-plus lists | **registry** |
 
-**Proposal — a family registry.** A *family* is a cohesive set of tables with its own
-generator, GL postings, truth fragment and schema metadata:
+**What is left is one thing, not four.** Every remaining row above reduces to the same
+missing piece: a family cannot yet *produce* anything, only describe itself. `Family`
+declares tables, keys, joins, shape and meaning; it does not declare `generate` or
+`truth`, so the runner still calls one finance function and `ground_truth` still computes
+one finance-shaped blob of values.
 
 ```python
 @dataclass(frozen=True)
 class Family:
-    name: str                                   # "core_ledger", "operating_chain", "inventory", …
-    tables: tuple[str, ...]
-    requires: tuple[str, ...]                   # families it generates against
+    ...                                              # declared today
+    requires: tuple[str, ...]                        # families it generates against
     generate: Callable[[GenContext], FamilyOutput]   # rows + GL postings + lever hooks
-    truth: Callable[[Corpus], TruthFragment]         # metrics, per-entity values, invariants
-    key_columns: Mapping[str, str]              # column -> owning table
-    legacy_names: Mapping[str, str]
+    truth: Callable[[Corpus], TruthFragment]         # values per metric id, per grain
 ```
 
 - `GenContext` carries seed, fiscal calendar, ID counters, the master data already
@@ -152,14 +162,21 @@ class Family:
 - Families emit GL postings rather than writing the ledger themselves; the runner
   assembles one ledger, so the closed-loop invariant survives every new family by
   construction.
-- `FinanceDataset` becomes `Corpus`: `tables: dict[str, list[BaseModel]]` plus the family
-  manifest that produced them.
+- `TruthFragment` is `{metric id: {grain: {key: value}}}` plus invariant results — the
+  shape `oracle.build_contract` already consumes, so composing fragments is a merge and
+  the contract's "no metric without values" guard does the checking.
 - The scenario YAML gains `families: [core_ledger, operating_chain, inventory]`. The
   existing `tables:` key is display-only today and is superseded by it.
-- `ground_truth` composes per-family fragments against one metric registry (§5); a
-  dimension appears in the scorecard only when its family is active.
+- A dimension appears in the scorecard only when its family is active.
 
-This is the only structural work that is not a family. It should land before Supply.
+**Deliberately not built yet, and the reason matters.** Carving the cascade generator into
+per-family `generate` functions is the one piece that should be designed *against* a
+second family rather than ahead of one. The cascade is real — a sales order produces a GL
+entry, an AR invoice, a stock issue and a COGS posting — so the seam between "a family
+emits postings" and "the runner assembles the ledger" is a genuine design question, and
+answering it with one implementation in hand would be guessing. It lands with **S2/Supply**,
+which is where the second implementation appears to check it. Everything a family can
+declare *without* producing rows is done.
 
 ## 4. The family specs
 
@@ -569,7 +586,7 @@ counterfactual.
 
 | | Work | Exit criterion |
 | :-- | :-- | :-- |
-| **S0** | The prune (§8) and the family registry (§3) | a family is added without editing export, schema transforms, ground truth and the runner |
+| **S0** ◐ | The prune (§8) and the family registry (§3) | **met for everything a family can declare** — tables, keys, joins, shape, meaning, and which metrics and invariants it owns. `Family.generate` / `Family.truth` remain, and land with S2 where a second implementation can check the seam |
 | **S1** ✅ | Inventory + settle the replenishment payable | **met** — DPO 271 → 59.2 days; CCC gradeable monthly and annually; roll-forward and the GL tie hold per product, location and period |
 | **S1½** ✅ | Corpus identity (§6) | **met** — one stamp across all six output files, digest recomputable from the published fields, levered run separable from its baseline |
 | **S1a** ✅ | Scale profiles (§9) with shaped distributions, entity birth/death, and the expense base sized off the scale anchor | **met** — `tiny`/`mid`/`large` selectable and stamped; gross profit positive and plausible at every profile (§7); Pareto revenue, log-normal order value, a priced-thin catalogue tail and real validity windows |
@@ -578,6 +595,9 @@ counterfactual.
 | **S3** | Capacity | cost per capacity hour and utilization gradeable per asset against a declared ceiling; depreciation becomes asset-derived |
 | **S4** | Throughput | yield, cycle-time efficiency and cost per step gradeable at team/line grain; the person-grain probe exists and no person column ships by default |
 | **S5** | The typed lever set, on the CLI | one same-seed exact counterfactual per lever type, recorded in `intervention.yaml` |
+
+S0's remainder is folded into S2 rather than preceding it: a family's `generate`/`truth`
+seam is the one piece that needs two implementations to be designed honestly (§3).
 
 Allocation (§4) becomes urgent at S3 and is a hard predecessor of any what-if.
 

@@ -290,11 +290,13 @@ everywhere today — a future figure synthesized without a real basis is marked,
 footnoted. The registry is `src/testdata/oracle.py`; publishing a metric without values,
 or values without a definition, raises.
 
-Also in the file: **invariants** (journal balanced, TB balanced, invoice-payment matched,
-bank reconciliation rate, inventory roll-forward, inventory-to-GL tie) and **injection
-impact** (estimated deviations, reported only against a defined metric or a declared
-integrity surface). *Which* corpus the numbers are true of is the `corpus:` stamp's job,
-so seed, strategy, months and fiscal start appear there once.
+Also in the file: **invariants** — journal balanced, TB balanced, invoice-payment matched,
+bank reconciliation rate, inventory roll-forward, inventory-to-GL tie — each naming the
+family that guarantees it and stating reproducibly what must hold, so a consumer can
+re-check rather than take a bare `true` on faith. And **injection impact** (estimated
+deviations, reported only against a defined metric or a declared integrity surface).
+*Which* corpus the numbers are true of is the `corpus:` stamp's job, so seed, strategy,
+months and fiscal start appear there once.
 
 **Per-entity unit metrics are first-class.** `db1`, `db1_pct`, `units_sold`, `order_count`,
 `revenue` and `cogs` all publish at `customer` and `product_group` grain, derived from the

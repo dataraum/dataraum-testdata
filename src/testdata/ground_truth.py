@@ -22,7 +22,7 @@ from testdata.canonical.finance.models import (
     JournalStatus,
 )
 from testdata.identity import CorpusIdentity
-from testdata.oracle import INTEGRITY_SURFACES, METRIC_IDS, build_contract
+from testdata.oracle import INTEGRITY_SURFACES, METRIC_IDS, build_contract, build_invariants
 
 # Account range prefixes for metric classification
 _REVENUE_PREFIX = "4"
@@ -695,6 +695,21 @@ def _sum_counts(rows: list[dict[str, int]]) -> dict[str, int]:
     return dict(sorted(total.items()))
 
 
+def invariant_contract(truth: GroundTruth) -> list[dict[str, Any]]:
+    """The declared invariants with their computed verdicts, each naming its family."""
+    checks = truth.invariants
+    return build_invariants(
+        {
+            "journal_balanced": checks.journal_balanced,
+            "trial_balance_balanced": checks.trial_balance_balanced,
+            "invoice_payment_matched": checks.invoice_payment_matched,
+            "bank_reconciliation_rate": checks.bank_reconciliation_rate,
+            "inventory_rollforward_holds": checks.inventory_rollforward_holds,
+            "inventory_ties_to_gl": checks.inventory_ties_to_gl,
+        }
+    )
+
+
 def metric_contract(truth: GroundTruth) -> list[dict[str, Any]]:
     """The §5 contract: every metric with its pinned definition, variants and values.
 
@@ -750,6 +765,10 @@ def export_ground_truth(truth: GroundTruth, output_dir: Path, identity: CorpusId
     figure without its definition, which is how ``gross_profit`` spent a release meaning
     operating income.
 
+    Invariants ship the same way: each one names the family that guarantees it and
+    states, reproducibly, what must hold — a bare ``journal_balanced: true`` said nothing
+    a consumer could re-check.
+
     ``identity`` stamps the corpus these numbers were computed from. Without it a
     consumer holding a stale directory grades against the wrong answer key and has no
     way to notice — which is exactly what happened when the inventory family landed
@@ -760,7 +779,7 @@ def export_ground_truth(truth: GroundTruth, output_dir: Path, identity: CorpusId
     if identity is not None:
         data["corpus"] = identity.as_dict()
     data["metrics"] = metric_contract(truth)
-    data["invariants"] = truth.invariants.model_dump()
+    data["invariants"] = invariant_contract(truth)
     data["injection_impact"] = [impact.model_dump() for impact in truth.injection_impact]
     with open(output_dir / "ground_truth.yaml", "w") as f:
         yaml.dump(_to_yaml_dict(data), f, default_flow_style=False, sort_keys=False)
