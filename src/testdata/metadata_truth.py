@@ -37,7 +37,7 @@ Folded-dimension identity truth (``folded_dimensions`` / ``degenerate_ids``) IS 
 level-specific, for the denormalized (``flat`` / ``single``) shapes, so a wide variant is
 not truth-free. A folded dimension is a referenced dimension whose FK-target table a
 normalization level INLINED into a fact; the generator knows the fold because it performed
-the join (``schema_transforms._inline_chart_of_accounts``), and the folded columns'
+the join (``schema_transforms._apply_fold``, driven by the family's ``Fold``), and the folded columns'
 identity is that of the source dimension table — two facts that fold the SAME source share
 ONE dimension. Degenerate operational IDs (a fact's own primary key) identify nothing and
 must abstain; asserting a hierarchy over them is the characteristic wide-data error.
@@ -52,7 +52,9 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from testdata.families import foreign_keys
+from testdata.families import foreign_keys, folded_dimensions, merge_column_renames
+from testdata.families import folds as family_folds
+from testdata.families import table_mapping as family_table_mapping
 from testdata.identity import CorpusIdentity
 from testdata.schema_transforms import ColumnStyle, restyle_column_name
 
@@ -378,8 +380,7 @@ _MEASURED_IN: dict[str, str | None] = {
 }
 _DIMENSIONLESS: frozenset[str] = frozenset({"fx_rates.rate"})
 
-# Pairings CREATED by the CoA fold (mirrors ``_inline_chart_of_accounts``, the same
-# way _FOLDED_DIMENSIONS does): ``account_currency`` lands ON the balance facts at
+# Pairings CREATED by the CoA fold: ``account_currency`` lands ON the balance facts at
 # ``flat``/``single``, becoming their same-table unit source. general_ledger's
 # debit/credit keep journal_lines' own in-table currency (the line's unit column —
 # account_currency is the account's attribute, not the line's denomination).
@@ -488,38 +489,28 @@ _CYCLES: list[dict[str, Any]] = [
 
 # --- folded dimensions --------------------------------------------
 # A folded dimension = a referenced dimension whose FK-target table a normalization
-# level INLINED into a fact (the denormalized / wide / OBT shape). Authored to mirror
-# ``schema_transforms._inline_chart_of_accounts`` (runs at ``flat`` + ``single``):
-# chart_of_accounts (concept "account") is inlined as account_name / account_type /
-# parent_account_id / account_currency, keyed by account_id. ``folded_into`` lists the
-# facts that carry the fold — two facts folding the SAME source dimension share ONE
-# dimension by concept identity (the cross-fact case, no name/value heuristic). The
-# fold is level-specific: ``full`` / ``partial`` are still normalized → no folds.
-_ACCOUNT_FOLD: dict[str, Any] = {
-    "concept": "account",
-    "source_dimension": "chart_of_accounts",
-    "fold_key": "account_id",
-    # opened_date is the coincidental-bijection case: unique per account, so on the
-    # fact grain it is 1:1 with account_id and statistically identical to the true
-    # account_name alias — only meaning separates them. It is a folded ATTRIBUTE of
-    # the account, never an alias of it.
-    "attributes": [
-        "account_name",
-        "account_type",
-        "parent_account_id",
-        "account_currency",
-        "opened_date",
-    ],
-}
-_FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
-    # flat: CoA inlined into general_ledger, trial_balance AND balance_sheet → one
-    # shared concept across three facts (bank_transactions stays key_only by design).
-    "flat": [
-        {**_ACCOUNT_FOLD, "folded_into": ["general_ledger", "trial_balance", "balance_sheet"]}
-    ],
-    # single: everything collapses onto the general_ledger spine → mega_table.
-    "single": [{**_ACCOUNT_FOLD, "folded_into": ["mega_table"]}],
-}
+# level INLINED into a fact (the denormalized / wide / OBT shape). READ from the family
+# registry's ``Fold`` declarations rather than mirrored here: this block used to be
+# hand-authored "to mirror the inline transform", and a mirror is a second copy
+# of a fact — the shape that let the operating chain ship without its FKs.
+#
+# ``folded_into`` lists the facts that carry the fold — two facts folding the SAME
+# source dimension share ONE dimension by concept identity (the cross-fact case, no
+# name/value heuristic). The fold is level-specific: ``full`` / ``partial`` are still
+# normalized → no folds; at ``single`` every fact has collapsed onto one spine.
+def _folded_dimensions(level: str) -> list[dict[str, Any]]:
+    if level not in ("flat", "single"):
+        return []
+    return [
+        {
+            "concept": fold.concept,
+            "source_dimension": fold.dimension,
+            "fold_key": fold.on,
+            "attributes": list(fold.attributes),
+            "folded_into": ["mega_table"] if level == "single" else sorted(set(fold.into.values())),
+        }
+        for fold in family_folds()
+    ]
 
 # --- bus matrix --------------------------------
 # The Kimball bus matrix: fact table x dimension concept -> HOW the fact exposes the
@@ -533,59 +524,34 @@ _FOLDED_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
 # `key` is the fact-side column carrying the exposure (FK column / fold key).
 # The temporal/period conformed dimension is deliberately absent: temporal identity is
 # the workspace calendar, not a categorical concept.
-_DIM_TABLE_CONCEPTS: dict[str, str] = {"chart_of_accounts": "account"}
+#
+# A dimension table's concept comes from the fold that inlines it — the fold already has
+# to name the concept for two facts folding the same source to be known to share ONE
+# dimension, so naming it twice would be one fact in two places.
+_DIM_TABLE_CONCEPTS: dict[str, str] = {fold.dimension: fold.concept for fold in family_folds()}
 
-# Tables a level REMOVES without a single-valued table_mapping entry (their content
-# fans out into MULTIPLE facts — CoA inlines into general_ledger, trial_balance and
-# balance_sheet at `flat`, so no `old -> new` rename can express it). Their inbound FKs
+# Tables a level REMOVES without a single-valued table_mapping entry: their content fans
+# out into MULTIPLE facts (CoA inlines into general_ledger, trial_balance and
+# balance_sheet at `flat`), so no `old -> new` rename can express it. Their inbound FKs
 # stop being discoverable relationships; the bus matrix records the key_only exposure
 # instead (bank_transactions.account_id is the surviving key_only case).
 _REMOVED_TABLES: dict[str, frozenset[str]] = {
-    "flat": frozenset({"chart_of_accounts"}),
-    "single": frozenset({"chart_of_accounts"}),
+    "flat": folded_dimensions(),
+    "single": folded_dimensions(),
 }
 
-# The table_mapping each level's apply_normalization emits — the DEFAULT when a caller
-# passes `level` without a live mapping (tests, offline truth builds). The runner still
-# passes the live mapping, which wins. A live-consistency test pins these to
-# apply_normalization so they cannot drift (mirrors the partial pin in the test suite).
-_LEVEL_TABLE_MAPPINGS: dict[str, dict[str, str]] = {
-    "partial": {
-        "journal_lines": "journal_data",
-        "journal_entries": "journal_data",
-        "invoices": "invoice_data",
-        "payments": "invoice_data",
-        # the operating chain's header/item fold, mirroring journal_data
-        "sales_order_lines": "sales_data",
-        "sales_orders": "sales_data",
-    },
-    "flat": {
-        "journal_lines": "general_ledger",
-        "journal_entries": "general_ledger",
-        "invoices": "invoice_data",
-        "payments": "invoice_data",
-        "sales_order_lines": "sales_data",
-        "sales_orders": "sales_data",
-    },
-    "single": {
-        "journal_lines": "mega_table",
-        "journal_entries": "mega_table",
-        "invoices": "mega_table",
-        "payments": "mega_table",
-        "bank_transactions": "mega_table",
-        "fx_rates": "mega_table",
-        "trial_balance": "mega_table",
-        "balance_sheet": "mega_table",
-        "sales_order_lines": "mega_table",
-        "sales_orders": "mega_table",
-        "customers": "mega_table",
-        "products": "mega_table",
-        "ar_invoices": "mega_table",
-        "receipts": "mega_table",
-        "stock_movements": "mega_table",
-        "inventory_positions": "mega_table",
-    },
-}
+
+def _level_table_mapping(level: str | None) -> dict[str, str]:
+    """The table_mapping *level* emits — the DEFAULT when a caller passes ``level``
+    without a live mapping (tests, offline truth builds). The runner still passes the
+    live mapping, which wins.
+
+    Computed from the registry's merge/fold declarations by the same name algebra
+    ``apply_normalization`` executes over frames. It was a hand-written table per level
+    until the family registry could answer the question; a live-consistency test still
+    pins the two together.
+    """
+    return family_table_mapping(level or "full")
 
 
 def _build_bus_matrix(
@@ -595,7 +561,7 @@ def _build_bus_matrix(
     removed = _REMOVED_TABLES.get(level or "", frozenset())
     bus: dict[str, dict[str, dict[str, str]]] = {}
     # folded exposures first — they win over the key_only residue of the same FK.
-    for fold in _FOLDED_DIMENSIONS.get(level or "", []):
+    for fold in _folded_dimensions(level or ""):
         for fact in fold["folded_into"]:
             bus.setdefault(fact, {})[fold["concept"]] = {
                 "provenance": "folded",
@@ -710,18 +676,12 @@ def _remap_table(table: str, table_mapping: dict[str, str]) -> str:
     return table_mapping.get(table, table)
 
 
-# Column renames the merge transforms apply (mirrors ``_merge_invoice_data``:
-# payments' conflicting columns are prefixed before the join; the CoA-inline
-# renames are irrelevant here because the table is REMOVED and its qualified
-# references are dropped). Keyed by qualified CANONICAL name. Every non-``full``
-# level runs the invoice merge (``apply_normalization``), so these apply at
-# partial / flat / single alike.
-_MERGE_COLUMN_RENAMES: dict[str, str] = {
-    "payments.date": "payment_date",
-    "payments.amount": "payment_amount",
-    "payments.currency": "payment_currency",
-    "payments.method": "payment_method",
-}
+# Column renames the merge transforms apply, READ from the merge declarations that
+# perform them — payments' conflicting columns are prefixed before the join. (The fold
+# renames are irrelevant here: the dimension table is REMOVED and its qualified
+# references are dropped.) Keyed by qualified CANONICAL name. Every non-``full`` level
+# runs every declared merge, so these apply at partial / flat / single alike.
+_MERGE_COLUMN_RENAMES: dict[str, str] = merge_column_renames()
 
 
 def _remap_qualified(
@@ -744,7 +704,7 @@ def _build_folded_dimensions(level: str | None, column_style: ColumnStyle) -> li
     ``folded_into`` / ``source_dimension`` are already the post-transform table names.
     """
     out: list[dict[str, Any]] = []
-    for fold in _FOLDED_DIMENSIONS.get(level or "", []):
+    for fold in _folded_dimensions(level or ""):
         out.append(
             {
                 "concept": fold["concept"],
@@ -783,9 +743,9 @@ def remap_metadata_truth(
     (``folded_dimensions`` / ``degenerate_ids``), which is empty unless the level folds
     (``flat`` / ``single``); None/``full``/``partial`` leave them empty. When
     ``level`` is given without a live ``table_mapping``, the level's known mapping
-    (``_LEVEL_TABLE_MAPPINGS``) is used, so every section stays at post-transform names.
+    (derived from the registry) is used, so every section stays at post-transform names.
     """
-    tm = table_mapping if table_mapping is not None else _LEVEL_TABLE_MAPPINGS.get(level or "", {})
+    tm = table_mapping if table_mapping is not None else _level_table_mapping(level)
     out = deepcopy(truth)
     removed = _REMOVED_TABLES.get(level or "", frozenset())
     # Every non-full level runs the invoice merge and carries its column renames.

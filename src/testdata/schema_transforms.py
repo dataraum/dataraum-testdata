@@ -19,11 +19,15 @@ from typing import Literal
 import polars as pl
 
 from testdata.families import (
+    Fold,
+    Merge,
     ambiguous_key_columns,
     key_columns,
     legacy_names,
     natural_key_prefixes,
 )
+from testdata.families import folds as family_folds
+from testdata.families import merges as family_merges
 
 NormalizationLevel = Literal["full", "partial", "flat", "single"]
 
@@ -248,16 +252,16 @@ def apply_normalization(
     out = dict(dataframes)
     mapping: dict[str, str] = {}
 
-    # partial: merge parent→child pairs
-    out, mapping = _merge_journal_data(out, mapping)
-    out, mapping = _merge_invoice_data(out, mapping)
-    out, mapping = _merge_sales_data(out, mapping)
+    # partial: collapse every declared parent/child pair
+    for merge in family_merges():
+        out, mapping = _apply_merge(merge, out, mapping)
 
     if level == "partial":
         return out, mapping
 
-    # flat: additionally inline lookups
-    out, mapping = _inline_chart_of_accounts(out, mapping)
+    # flat: additionally inline the declared dimension folds
+    for fold in family_folds():
+        out, mapping = _apply_fold(fold, out, mapping)
 
     if level == "flat":
         return out, mapping
@@ -273,76 +277,30 @@ def apply_normalization(
 # ---------------------------------------------------------------------------
 
 
-def _merge_journal_data(
+def _apply_merge(
+    merge: Merge,
     dfs: dict[str, pl.DataFrame],
     mapping: dict[str, str],
 ) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
-    """journal_data = journal_lines LEFT JOIN journal_entries ON entry_id."""
-    lines = dfs.pop("journal_lines")
-    entries = dfs.pop("journal_entries")
+    """``merge.name = merge.spine LEFT JOIN merge.joined ON merge.on``.
 
-    # No column conflicts — join directly.
-    journal_data = lines.join(entries, on="entry_id", how="left")
+    Driven entirely by the family declaration, so a new family's header/item pair
+    collapses at ``partial`` without this function learning its table names.
 
-    dfs["journal_data"] = journal_data
-    mapping["journal_lines"] = "journal_data"
-    mapping["journal_entries"] = "journal_data"
-    return dfs, mapping
-
-
-def _merge_sales_data(
-    dfs: dict[str, pl.DataFrame],
-    mapping: dict[str, str],
-) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
-    """sales_data = sales_order_lines LEFT JOIN sales_orders ON order_id.
-
-    The operating chain's parent→child pair, folded exactly like journal_data — the
-    header/item split is the shape a real ERP presents, and collapsing it is what the
-    ``partial`` level exists to test a consumer against. Customers and products stay
-    as lookups at this level; they are dimension masters, not the order's parent.
-
-    A corpus generated before the chain existed simply has neither table — skip
-    rather than fail, so old fixtures stay loadable.
+    A corpus missing either side — a probe-only fixture, or one generated before a
+    family existed — is skipped rather than failed, so old fixtures stay loadable.
     """
-    if "sales_order_lines" not in dfs or "sales_orders" not in dfs:
+    if merge.spine not in dfs or merge.joined not in dfs:
         return dfs, mapping
 
-    lines = dfs.pop("sales_order_lines")
-    orders = dfs.pop("sales_orders")
-    sales_data = lines.join(orders, on="order_id", how="left")
+    spine = dfs.pop(merge.spine)
+    joined = dfs.pop(merge.joined)
+    if merge.rename:
+        joined = joined.rename(dict(merge.rename))
 
-    dfs["sales_data"] = sales_data
-    mapping["sales_order_lines"] = "sales_data"
-    mapping["sales_orders"] = "sales_data"
-    return dfs, mapping
-
-
-def _merge_invoice_data(
-    dfs: dict[str, pl.DataFrame],
-    mapping: dict[str, str],
-) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
-    """invoice_data = invoices LEFT JOIN payments ON invoice_id.
-
-    Conflicting payment columns are prefixed with ``payment_``.
-    """
-    invoices = dfs.pop("invoices")
-    payments = dfs.pop("payments")
-
-    # Rename conflicting + ambiguous payment columns before join.
-    payments = payments.rename(
-        {
-            "date": "payment_date",
-            "amount": "payment_amount",
-            "currency": "payment_currency",
-            "method": "payment_method",
-        }
-    )
-
-    invoice_data = invoices.join(payments, on="invoice_id", how="left")
-
-    dfs["invoice_data"] = invoice_data
-    mapping["invoices"] = "invoice_data"
-    mapping["payments"] = "invoice_data"
+    dfs[merge.name] = spine.join(joined, on=merge.on, how="left")
+    mapping[merge.spine] = merge.name
+    mapping[merge.joined] = merge.name
     return dfs, mapping
 
 
@@ -351,54 +309,35 @@ def _merge_invoice_data(
 # ---------------------------------------------------------------------------
 
 
-def _inline_chart_of_accounts(
+def _apply_fold(
+    fold: Fold,
     dfs: dict[str, pl.DataFrame],
     mapping: dict[str, str],
 ) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
-    """Inline chart_of_accounts into journal_data → general_ledger, and enrich
-    trial_balance + balance_sheet with account metadata.
+    """Inline ``fold.dimension`` into each fact in ``fold.into``, renaming as declared.
 
-    Every fact that carries ``account_id`` AND has a dimension table to lose gets the
-    fold — that is what denormalizing a warehouse does, and it keeps the three facts'
-    account axes conformed to one concept. ``balance_sheet`` is included so the
-    conformed group has three members rather than two: a consumer that needs >= 2
-    facts per shared dimension (the aggregation-lineage witness) then has slack, and
-    the corpus stops sitting exactly on that boundary where one missing axis silently
-    zeroes the whole group. It also restores level parity — at `full` the witness
-    already reconciles balance_sheet.ending_balance (cumulative/STOCK) against the
-    journal, and that pairing needs a shared account axis to survive `flat`.
-
-    ``bank_transactions`` deliberately does NOT get the fold: its account_id stays a
-    key_only exposure (the Layer-A blind-spot boundary — 2 distinct values, invisible
-    to any overlap measure). Keep it that way; it is a graded acceptance class.
+    A fact may take a new name once it carries the dimension (``journal_data`` becomes
+    ``general_ledger``); one that keeps its own name needs no mapping entry. Facts the
+    fold does not list keep their bare FK column — that key_only exposure is a graded
+    acceptance class, not an omission (``bank_transactions.account_id`` is the case).
     """
-    coa = dfs.pop("chart_of_accounts")
+    if fold.dimension not in dfs:
+        return dfs, mapping
 
-    # Prepare CoA columns: rename to avoid conflicts.
-    coa_renamed = coa.rename(
-        {
-            "name": "account_name",
-            "parent_id": "parent_account_id",
-            "currency": "account_currency",
-        }
-    )
+    dimension = dfs.pop(fold.dimension)
+    if fold.rename:
+        dimension = dimension.rename(dict(fold.rename))
 
-    # general_ledger = journal_data LEFT JOIN coa ON account_id
-    journal_data = dfs.pop("journal_data")
-    general_ledger = journal_data.join(coa_renamed, on="account_id", how="left")
-    dfs["general_ledger"] = general_ledger
-
-    # Update mapping: anything that pointed to journal_data now points to general_ledger
-    for old, new in list(mapping.items()):
-        if new == "journal_data":
-            mapping[old] = "general_ledger"
-
-    # trial_balance / balance_sheet = <fact> LEFT JOIN coa ON account_id.
-    # Both keep their names, so no mapping entry is needed for either.
-    for fact in ("trial_balance", "balance_sheet"):
+    for fact, result in fold.into.items():
+        if fact not in dfs:
+            continue
         df = dfs.pop(fact)
-        dfs[fact] = df.join(coa_renamed, on="account_id", how="left")
-
+        dfs[result] = df.join(dimension, on=fold.on, how="left")
+        if result != fact:
+            # Anything that already pointed at the pre-fold name follows it.
+            for old, new in list(mapping.items()):
+                if new == fact:
+                    mapping[old] = result
     return dfs, mapping
 
 
@@ -413,9 +352,16 @@ def _build_single_table(
 ) -> tuple[dict[str, pl.DataFrame], dict[str, str]]:
     """Combine general_ledger with invoice_data and bank_transactions into one table.
 
-    The mega-table uses the general_ledger as the spine and left-joins
-    invoice_data (on date + amount overlap) and bank_transactions.
-    Non-joinable tables (fx_rates, trial_balance) are dropped.
+    The mega-table uses the general_ledger as the spine and stacks invoice_data and
+    bank_transactions onto it diagonally. Everything else the corpus still holds folds
+    in conceptually and is dropped — **derived, not listed**. The drop set used to be a
+    literal tuple that had to grow with every family (it gained six names when the
+    operating chain and inventory landed), and a family that forgot to appear in it
+    left a table dangling beside the mega-table, so ``single`` quietly produced two.
+
+    A name that only ever existed as a merge RESULT (``sales_data``) is dropped without
+    a mapping entry: its constituents are already mapped, and recording the derived name
+    would put a table that never existed into the rename map.
     """
     gl = dfs.pop("general_ledger")
 
@@ -425,53 +371,24 @@ def _build_single_table(
     # Add invoice data as additional rows (different structure → vertical stack with nulls)
     parts = [gl]
 
-    if "invoice_data" in dfs:
-        inv = dfs.pop("invoice_data")
-        inv = inv.with_columns(pl.lit("invoice").alias("source_table"))
-        parts.append(inv)
-
-    if "bank_transactions" in dfs:
-        bank = dfs.pop("bank_transactions")
-        bank = bank.with_columns(pl.lit("bank").alias("source_table"))
-        parts.append(bank)
+    for name, label in (("invoice_data", "invoice"), ("bank_transactions", "bank")):
+        if name in dfs:
+            part = dfs.pop(name)
+            parts.append(part.with_columns(pl.lit(label).alias("source_table")))
 
     # Vertical concat with diagonal join (fills missing columns with null)
     mega = pl.concat(parts, how="diagonal")
-
-    dfs["mega_table"] = mega
 
     # Map all original tables to mega_table
     for old_name in list(mapping.keys()):
         mapping[old_name] = "mega_table"
     mapping["bank_transactions"] = "mega_table"
 
-    # Drop the non-joinable period/lookup tables — they fold into the single table
-    # conceptually (fx_rates, trial_balance, balance_sheet, and the probe tables —
-    # stock/flow, formula, relationship — when a strategy generated them). Without
-    # this, balance_sheet dangled and "single" produced two tables.
-    for name in (
-        "fx_rates",
-        "trial_balance",
-        "balance_sheet",
-        "measure_probes",
-        "probe_events",
-        "formula_probes",
-        "ref_entities",
-        "ref_activity",
-        "customers",
-        "products",
-        "ar_invoices",
-        "receipts",
-        "stock_movements",
-        "inventory_positions",
-    ):
-        if name in dfs:
-            dfs.pop(name)
+    derived_names = {merge.name for merge in family_merges()}
+    for name in list(dfs):
+        dfs.pop(name)
+        if name not in derived_names:
             mapping[name] = "mega_table"
 
-    # The merged sales_data folds in too, but it is a DERIVED name: its constituents
-    # (sales_orders / sales_order_lines) are already mapped above, so recording it
-    # again would put a table that never existed into the mapping.
-    dfs.pop("sales_data", None)
-
+    dfs["mega_table"] = mega
     return dfs, mapping

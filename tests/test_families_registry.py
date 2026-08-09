@@ -14,11 +14,13 @@ from testdata.families import (
     FAMILIES,
     all_tables,
     ambiguous_key_columns,
+    folds,
     key_columns,
     legacy_names,
+    merges,
     natural_key_prefixes,
 )
-from testdata.schema_transforms import apply_key_strategy
+from testdata.schema_transforms import apply_key_strategy, apply_normalization
 
 
 def test_every_dataset_table_is_declared_by_a_family() -> None:
@@ -79,3 +81,67 @@ def test_natural_keys_rewrite_the_operating_chain() -> None:
     assert out["customers"]["customer_id"].to_list() == ["CUST-00001", "CUST-00002"]
     # The FK follows the PK, or the join breaks.
     assert out["sales_order_lines"]["customer_id"].to_list() == ["CUST-00001"]
+
+
+# --- the shape transforms follow the registry too ---------------------------
+
+
+def test_every_declared_merge_and_fold_names_declared_tables() -> None:
+    """A transform declaration pointing at a table nobody declares is dead wiring."""
+    declared = set(all_tables())
+    merged_names = {merge.name for merge in merges()}
+    for merge in merges():
+        assert {merge.spine, merge.joined} <= declared, merge.name
+    for fold in folds():
+        assert fold.dimension in declared, fold.dimension
+        # A fold's facts are post-merge names, so either a real table or a merge result.
+        assert set(fold.into) <= declared | merged_names, fold.concept
+
+
+def test_a_new_family_reshapes_without_editing_the_transform(monkeypatch) -> None:
+    """The §3 exit criterion for schema transforms, exercised rather than asserted.
+
+    A family declares a header/item pair and a dimension fold; `apply_normalization`
+    collapses both without knowing either table exists. Before the declarations moved
+    into the registry, the merge and inline functions named finance tables in their own
+    bodies, so a new family's pair simply never collapsed — silently, and visible only
+    as a table count.
+    """
+    import polars as pl
+
+    from testdata.families import Family, Fold, Merge
+
+    shipments = Family(
+        name="shipments",
+        description="A stand-in family, declared only for this test.",
+        tables=("shipment_headers", "shipment_lines", "carriers"),
+        merges=(
+            Merge(name="shipment_data", spine="shipment_lines", joined="shipment_headers", on="shipment_id"),
+        ),
+        folds=(
+            Fold(
+                concept="carrier",
+                dimension="carriers",
+                on="carrier_id",
+                into={"shipment_data": "shipment_ledger"},
+                rename={"name": "carrier_name"},
+                attributes=("carrier_name",),
+            ),
+        ),
+    )
+    monkeypatch.setattr("testdata.families.FAMILIES", (shipments,))
+
+    frames = {
+        "shipment_headers": pl.DataFrame({"shipment_id": ["S1"], "carrier_id": ["C1"]}),
+        "shipment_lines": pl.DataFrame({"line_id": ["L1"], "shipment_id": ["S1"], "carrier_id": ["C1"]}),
+        "carriers": pl.DataFrame({"carrier_id": ["C1"], "name": ["Fastly"]}),
+    }
+
+    partial, mapping = apply_normalization(dict(frames), "partial")
+    assert set(partial) == {"shipment_data", "carriers"}
+    assert mapping == {"shipment_lines": "shipment_data", "shipment_headers": "shipment_data"}
+
+    flat, mapping = apply_normalization(dict(frames), "flat")
+    assert set(flat) == {"shipment_ledger"}
+    assert mapping == {"shipment_lines": "shipment_ledger", "shipment_headers": "shipment_ledger"}
+    assert "carrier_name" in flat["shipment_ledger"].columns

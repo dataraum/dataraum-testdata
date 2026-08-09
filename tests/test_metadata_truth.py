@@ -267,14 +267,16 @@ def test_export_table_mapping_matches_live_normalization() -> None:
     — for partial AND for the level-default mappings the bus matrix relies on (2c)."""
     from testdata.canonical.finance.generators import generate_finance_dataset
     from testdata.export import dataset_to_dataframes
-    from testdata.metadata_truth import _LEVEL_TABLE_MAPPINGS
+    from testdata.families import table_mapping as declared_table_mapping
 
     dfs = dataset_to_dataframes(generate_finance_dataset(seed=42, months=2))
     _, mapping = apply_normalization(dict(dfs), "partial")
     assert mapping == _PARTIAL_MAPPING
-    for level, pinned in _LEVEL_TABLE_MAPPINGS.items():
+    for level in ("partial", "flat", "single"):
         _, live = apply_normalization(dict(dfs), level)  # type: ignore[arg-type]
-        assert live == pinned, f"{level}: pinned level mapping drifted from the transform"
+        assert live == declared_table_mapping(level), (
+            f"{level}: the registry's name algebra drifted from the transform that executes it"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +336,7 @@ def test_measured_in_binds_the_models() -> None:
 
 def test_measured_in_flat_fold_creates_unit_columns() -> None:
     """The CoA fold lands account_currency on the balance facts at flat — the truth
-    gains those same-table pairings (mirroring _inline_chart_of_accounts), while the
+    gains those same-table pairings (the CoA Fold declaration), while the
     line-grain measures keep their OWN currency and merged names carry the renames."""
     flat = remap_metadata_truth(canonical_metadata_truth(), level="flat")
     entries = {e["measure"]: e["unit_column"] for e in flat["measured_in"]}

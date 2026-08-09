@@ -24,6 +24,48 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class Merge:
+    """A parent/child pair the ``partial`` normalization collapses into one table.
+
+    The header/item split is what a real ERP presents; collapsing it is what the level
+    exists to test a consumer against. ``spine`` is the table whose grain survives —
+    ``journal_lines``, not ``journal_entries`` — and ``rename`` is applied to the joined
+    side before the join, because a merge that silently drops a colliding column would
+    lose data rather than reshape it.
+
+    Declared here rather than in the transform because three other files need to know
+    what the merge did: the exporter, the entropy map's table remap, and
+    ``metadata_truth``, which used to carry its own hand-copied list of these renames.
+    """
+
+    name: str
+    spine: str
+    joined: str
+    on: str
+    rename: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Fold:
+    """A dimension the ``flat`` normalization inlines into its facts.
+
+    ``into`` maps each fact to the name it takes afterwards — the fold renames
+    ``journal_data`` to ``general_ledger`` but leaves ``trial_balance`` alone, and both
+    facts still end up sharing one account axis. ``attributes`` is what lands on the
+    fact (post-rename, key excluded); ``concept`` is the conformed dimension the folded
+    columns still identify, which is how two facts folding the SAME source are known to
+    share ONE dimension rather than to have coincidentally similar columns.
+    """
+
+    concept: str
+    dimension: str
+    on: str
+    into: Mapping[str, str]
+    attributes: tuple[str, ...]
+    rename: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Family:
     """One cohesive group of tables and what it declares about their schema."""
 
@@ -42,6 +84,11 @@ class Family:
     # in the same breath. The operating chain shipped without them for exactly as
     # long as it shipped without its key maps.
     foreign_keys: tuple[tuple[str, str], ...] = ()
+    # How this family's tables reshape under `partial` and `flat`. The transforms used
+    # to name finance tables in their own bodies, so a new family's header/item pair
+    # would simply never collapse — silently, and only visible as a table count.
+    merges: tuple[Merge, ...] = ()
+    folds: tuple[Fold, ...] = ()
     # A probe family materializes only when a strategy injects into it.
     optional: bool = False
 
@@ -132,6 +179,49 @@ CORE_LEDGER = Family(
         ("balance_sheet.account_id", "chart_of_accounts.account_id"),
         ("chart_of_accounts.parent_id", "chart_of_accounts.account_id"),
     ),
+    merges=(
+        Merge(name="journal_data", spine="journal_lines", joined="journal_entries", on="entry_id"),
+        Merge(
+            name="invoice_data",
+            spine="invoices",
+            joined="payments",
+            on="invoice_id",
+            rename={
+                "date": "payment_date",
+                "amount": "payment_amount",
+                "currency": "payment_currency",
+                "method": "payment_method",
+            },
+        ),
+    ),
+    folds=(
+        # Every fact carrying `account_id` that has a dimension table to lose gets the
+        # fold — that is what denormalizing a warehouse does, and it keeps the three
+        # facts' account axes conformed to one concept. `balance_sheet` is included so
+        # the conformed group has three members rather than two: a consumer needing >= 2
+        # facts per shared dimension then has slack instead of sitting exactly on the
+        # boundary where one missing axis silently zeroes the group.
+        #
+        # `bank_transactions` deliberately does NOT get the fold: its account_id stays a
+        # key_only exposure (2 distinct values, invisible to any overlap measure). That
+        # is a graded acceptance class, not an oversight.
+        Fold(
+            concept="account",
+            dimension="chart_of_accounts",
+            on="account_id",
+            into={
+                "journal_data": "general_ledger",
+                "trial_balance": "trial_balance",
+                "balance_sheet": "balance_sheet",
+            },
+            rename={"name": "account_name", "parent_id": "parent_account_id", "currency": "account_currency"},
+            # opened_date is the coincidental-bijection case: unique per account, so on
+            # the fact grain it is 1:1 with account_id and statistically identical to
+            # the true account_name alias. It is a folded ATTRIBUTE of the account,
+            # never an alias of it.
+            attributes=("account_name", "account_type", "parent_account_id", "account_currency", "opened_date"),
+        ),
+    ),
 )
 
 OPERATING_CHAIN = Family(
@@ -195,6 +285,10 @@ OPERATING_CHAIN = Family(
         ("receipts.ar_invoice_id", "ar_invoices.ar_invoice_id"),
         ("receipts.customer_id", "customers.customer_id"),
     ),
+    # The chain's own header/item pair, folded exactly like journal_data. Customers and
+    # products stay as lookups at this level: they are dimension masters, not the
+    # order's parent.
+    merges=(Merge(name="sales_data", spine="sales_order_lines", joined="sales_orders", on="order_id"),),
 )
 
 INVENTORY = Family(
@@ -316,6 +410,78 @@ def legacy_names() -> dict[str, str]:
     for fam in FAMILIES:
         merged.update(fam.legacy_names)
     return merged
+
+
+def merges() -> tuple[Merge, ...]:
+    """Every declared parent/child merge, in family order.
+
+    Order is the contract: ``partial`` applies them in this sequence, and a fold later
+    references a merged name (``journal_data`` → ``general_ledger``), so a family
+    declaring a merge that another family folds must come first.
+    """
+    return tuple(merge for fam in FAMILIES for merge in fam.merges)
+
+
+def folds() -> tuple[Fold, ...]:
+    """Every declared dimension fold, in family order."""
+    return tuple(fold for fam in FAMILIES for fold in fam.folds)
+
+
+def merge_column_renames() -> dict[str, str]:
+    """``joined_table.column -> new column name`` for every merge that renames.
+
+    The remap ``metadata_truth`` needs to keep qualified references valid after a merge.
+    It used to carry its own copy of this map, one file away from the transform that
+    performed the rename.
+    """
+    return {
+        f"{merge.joined}.{old}": new
+        for fam in FAMILIES
+        for merge in fam.merges
+        for old, new in merge.rename.items()
+    }
+
+
+def folded_dimensions() -> frozenset[str]:
+    """Dimension tables a fold REMOVES from the corpus at ``flat`` and below.
+
+    Their content fans out into several facts, so no single ``old -> new`` rename can
+    express what happened to them — which is why they need naming separately from
+    ``table_mapping``.
+    """
+    return frozenset(fold.dimension for fold in folds())
+
+
+def table_mapping(level: str) -> dict[str, str]:
+    """The ``old -> new`` table rename *level* produces for a corpus of default tables.
+
+    Name algebra over the same declarations ``apply_normalization`` executes over
+    frames, so the two cannot disagree about what a level does. Callers with a live run
+    still pass the real mapping; this is the answer for tests, offline truth builds, and
+    anything reasoning about a level it is not currently generating.
+    """
+    if level == "full":
+        return {}
+
+    mapping: dict[str, str] = {}
+    for merge in merges():
+        mapping[merge.spine] = merge.name
+        mapping[merge.joined] = merge.name
+    if level == "partial":
+        return mapping
+
+    for fold in folds():
+        for fact, result in fold.into.items():
+            if result == fact:
+                continue
+            for old, new in list(mapping.items()):
+                if new == fact:
+                    mapping[old] = result
+    if level == "flat":
+        return mapping
+
+    removed = folded_dimensions()
+    return {table: "mega_table" for table in default_tables() if table not in removed}
 
 
 def foreign_keys() -> tuple[tuple[str, str], ...]:

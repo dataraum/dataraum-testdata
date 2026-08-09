@@ -79,7 +79,24 @@ family now declares its joins where it declares its tables. Table-count assertio
 tests read `default_tables()` too, so a new family no longer costs a round of magic-number
 edits across five test files.
 
-Still to come, and the reason this is only half of S0:
+Then **shape**. `apply_normalization` named finance tables in its own function bodies —
+`journal_lines LEFT JOIN journal_entries`, `chart_of_accounts` inlined into three facts —
+so a new family's header/item pair would simply never collapse at `partial`, silently, and
+visible only as a table count. A family now declares `Merge` (which parent/child pair
+folds, on what key, renaming what) and `Fold` (which dimension inlines into which facts,
+under which conformed concept). The transform executes the declarations and knows no table
+names. `single`'s drop set is derived rather than listed — it was a literal tuple that had
+already grown by six names, and a family missing from it left a table dangling beside the
+mega-table.
+
+Four things stopped being written twice in the process: `metadata_truth`'s merge-rename
+map, its per-level table mappings, its folded-dimension block (authored, in its own words,
+"to mirror `_inline_chart_of_accounts`" — a mirror is a second copy) and its
+dimension→concept map. All four now read the declarations that perform the transform.
+`tests/test_families_registry.py` runs a stand-in family through `apply_normalization` and
+asserts it reshapes, which is the exit criterion exercised rather than asserted.
+
+Still to come, and the reason this is only most of S0:
 
 | Site | Hardcoding | State |
 | :-- | :-- | :-- |
@@ -87,7 +104,7 @@ Still to come, and the reason this is only half of S0:
 | `schema_transforms` | `_KEY_COLUMNS`, `_NATURAL_KEYS`, `_LEGACY_NAMES` | **registry** |
 | `metadata_truth._RELATIONSHIPS` | the FK topology re-listed away from the tables | **registry** |
 | `export._write_manifest` | a literal version string, and run parameters repeated under `parameters` | **identity** (§6) |
-| `schema_transforms` | the merge/inline functions name finance tables | open |
+| `schema_transforms` | the merge/inline functions name finance tables | **registry** |
 | `ground_truth.GroundTruth` | finance-specific fields (`ar_balance`, `dso`, …) | open |
 | `metadata_truth` | `VERTICAL = "finance"`, one canonical authored blob | open |
 | `scenarios/runner` | imports `generate_finance_dataset` directly | open |
