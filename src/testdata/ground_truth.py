@@ -8,6 +8,7 @@ for use by downstream evaluators and test assertions.
 from __future__ import annotations
 
 import calendar
+from collections import Counter
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -178,6 +179,69 @@ class InjectionImpact(BaseModel):
     affected_by: list[str]
 
 
+class DimensionProfile(BaseModel):
+    """What is true of a high-cardinality dimension's frequency distribution.
+
+    A corpus whose dimensions are all small and near-uniform lets a consumer answer
+    "the top 10 merchants" by reading the table. Once the axis has thousands of
+    members drawn from a power law, that question has a real answer that is only
+    obtainable by aggregating — and this is that answer, so the claim can be graded
+    rather than believed.
+
+    ``head`` is the exact top-20 with their counts, because a top-N claim is what
+    consumers actually make. ``coverage`` is the cumulative share at several N, which
+    is what distinguishes a genuine power law from a merely large dimension:
+    ``distinct_observed`` well below ``pool_size`` with a large ``seen_once`` is the
+    signature — a long tail the sample never fully reaches.
+    """
+
+    table: str
+    column: str
+    law: str
+    exponent: float
+    pool_size: int
+    rows: int
+    distinct_observed: int
+    seen_once: int
+    coverage: dict[str, float]
+    head: list[dict[str, Any]]
+
+
+def dimension_profile(
+    rows: list[str | None], *, table: str, column: str, pool_size: int, exponent: float
+) -> DimensionProfile:
+    """Measure a dimension's realised distribution — from the data, never from the spec.
+
+    The exponent is what was ASKED for; every other number here is what the corpus
+    actually holds. A sample of n rows from a pool of N never reaches every member, so
+    publishing the pool size as the cardinality would put a figure on disk that no
+    query can reproduce.
+    """
+    counts = Counter(value for value in rows if value is not None)
+    total = sum(counts.values())
+    ranked = counts.most_common()
+    coverage = {
+        str(n): round(sum(count for _, count in ranked[:n]) / total, 6)
+        for n in (1, 5, 10, 50, 100, 500, 1000)
+        if n <= len(ranked)
+    }
+    return DimensionProfile(
+        table=table,
+        column=column,
+        law="zipf",
+        exponent=exponent,
+        pool_size=pool_size,
+        rows=total,
+        distinct_observed=len(counts),
+        seen_once=sum(1 for count in counts.values() if count == 1),
+        coverage=coverage,
+        head=[
+            {"value": value, "rows": count, "share": round(count / total, 6)}
+            for value, count in ranked[:20]
+        ],
+    )
+
+
 class GroundTruth(BaseModel):
     """Complete ground truth for a generated finance dataset.
 
@@ -195,6 +259,9 @@ class GroundTruth(BaseModel):
     # the chain existed; a grader must treat absence as "not gradeable", never as 0.
     db1_by_customer: list[ContributionMargin] = []
     db1_by_product_group: list[ContributionMargin] = []
+    # — the realised shape of any high-cardinality dimension the corpus carries.
+    # Empty unless one was asked for; absence means the corpus has no such axis.
+    dimensions: list[DimensionProfile] = []
 
 
 # --- Calculation ---
@@ -205,6 +272,7 @@ def calculate_ground_truth(
     *,
     fiscal_start: date | None = None,
     months: int = 12,
+    merchant_exponent: float = 1.05,
 ) -> GroundTruth:
     """Compute all ground truth metrics from a clean Corpus.
 
@@ -215,6 +283,9 @@ def calculate_ground_truth(
         dataset: The finance dataset (ideally clean, pre-injection).
         fiscal_start: First day of fiscal year.
         months: Number of months in the dataset.
+        merchant_exponent: The Zipf exponent the payer dimension was asked for —
+            recorded beside the realised distribution, which is measured from the
+            data. Ignored when the corpus carries no such dimension.
 
     Returns:
         GroundTruth with annual metrics, monthly metrics, and invariants.
@@ -450,7 +521,23 @@ def calculate_ground_truth(
         invariants=invariants,
         db1_by_customer=_contribution_margin(dataset, by="customer"),
         db1_by_product_group=_contribution_margin(dataset, by="product_group"),
+        dimensions=_dimension_profiles(dataset, merchant_exponent),
     )
+
+
+def _dimension_profiles(dataset: Corpus, merchant_exponent: float) -> list[DimensionProfile]:
+    """The high-cardinality axes this corpus carries — none, on most corpora."""
+    if not dataset.merchants:
+        return []
+    return [
+        dimension_profile(
+            [txn.merchant_id for txn in dataset.bank_transactions],
+            table="bank_transactions",
+            column="merchant_id",
+            pool_size=len(dataset.merchants),
+            exponent=merchant_exponent,
+        )
+    ]
 
 
 def _contribution_margin(
@@ -781,6 +868,10 @@ def export_ground_truth(truth: GroundTruth, output_dir: Path, identity: CorpusId
     data["metrics"] = metric_contract(truth)
     data["invariants"] = invariant_contract(truth)
     data["injection_impact"] = [impact.model_dump() for impact in truth.injection_impact]
+    # Present only when the corpus HAS such an axis — an always-emitted empty list
+    # would rewrite ground_truth.yaml for every corpus that never asked for one.
+    if truth.dimensions:
+        data["dimensions"] = [profile.model_dump() for profile in truth.dimensions]
     with open(output_dir / "ground_truth.yaml", "w") as f:
         yaml.dump(_to_yaml_dict(data), f, default_flow_style=False, sort_keys=False)
 

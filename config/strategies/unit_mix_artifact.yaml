@@ -1,0 +1,44 @@
+name: unit-mix-artifact
+level: low
+description: >
+  The artifact half of the confusable pair. One scoped unit-mix defect on the
+  revenue lineage: Enterprise order lines from 2025-07 on carry amounts silently
+  scaled by a constant, with nothing on the row declaring it.
+
+  Its counterpart is not a strategy but a lever — run the same scenario with
+  `clean` and {"type": "rate", "driver": "price", "factor": 1.15, "period_k": 6,
+  "scope": {"segment": ["Enterprise"]}}. The two move the revenue total by the
+  same amount (a `ratio: 1.0` unit mix at `fx_rate` F over the slice a price
+  lever with factor F covers is the SAME arithmetic on the same rows), so the
+  apparent effect is matched by construction rather than by tuning. What differs
+  is only whether the firm's prices actually changed: under the lever the units,
+  the discount and the customer's behaviour are all consistent with the higher
+  amounts; under the artifact nothing else moved, because nothing else happened.
+
+  Deliberately its OWN file rather than an addition to clean/low/medium/high.
+  Injectors share one sequential RNG and one id counter, so inserting a spec into
+  an existing strategy re-rolls every injector after it and shifts every
+  injection id in that strategy.
+
+injections:
+  - injector: mix_units
+    table: sales_order_lines
+    consumer_hint: unit_mix_artifact
+    params:
+      col: line_amount
+      alt_currency: EUR
+      # The whole slice, so the artifact is a clean constant scaling rather than a
+      # sample of one — matched magnitude needs the same rows, not the same count.
+      ratio: 1.0
+      fx_rate: 1.15
+      scope:
+        segment:
+          - Enterprise
+      periods:
+        - "2025-07"
+        - "2025-08"
+        - "2025-09"
+        - "2025-10"
+        - "2025-11"
+        - "2025-12"
+      severity: high

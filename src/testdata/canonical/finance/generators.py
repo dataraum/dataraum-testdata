@@ -7,15 +7,25 @@ transactions, and trial balance are numerically consistent.
 
 from __future__ import annotations
 
+import bisect
 import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
-from testdata.scale import ScaleProfile, customer_names, get_profile, product_catalog, supplier_names
+from testdata.scale import (
+    MERCHANT_CATEGORIES,
+    MERCHANT_COUNTRIES,
+    ScaleProfile,
+    customer_names,
+    get_profile,
+    merchant_names,
+    product_catalog,
+    supplier_names,
+)
 
 from .models import (
     AccountType,
@@ -38,6 +48,7 @@ from .models import (
     JournalLine,
     JournalStatus,
     MeasureProbe,
+    Merchant,
     Order,
     Payment,
     PaymentMethod,
@@ -322,6 +333,245 @@ def generate_chart_of_accounts() -> list[ChartOfAccounts]:
 # --- Revenue Cycle: Sales → Cash Receipts ---
 
 
+# The dimensions a lever's scope may name, split by which entity carries them. The
+# split is not cosmetic: an order COUNT is a property of (customer, month) and no
+# product exists at the point it is drawn, so a product-side scope on a volume lever
+# is not a narrower intervention — it is an unanswerable one, and it raises.
+_CUSTOMER_SCOPE_DIMS = ("segment", "region", "customer_id")
+_PRODUCT_SCOPE_DIMS = ("product_group", "product_id")
+_SCOPE_DIMS = _CUSTOMER_SCOPE_DIMS + _PRODUCT_SCOPE_DIMS
+
+_LEVER_TYPES = ("price_level", "volume", "rate", "mix")
+_DRIVERS = ("price", "frequency", "collection_lag")
+# `price_level` and `volume` predate the typed set and stay valid: they are these two
+# drivers under their original names, so existing runs keep working and the generator
+# still tests one vocabulary.
+_LEGACY_DRIVER = {"price_level": "price", "volume": "frequency"}
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """A lever's scope resolved against the master data, as id sets.
+
+    Resolved ONCE per run rather than per line: at ``large`` the alternative is a
+    dict walk per order line for an answer that depends only on the entity. ``None``
+    on a side means that side is unscoped — every entity matches — which is what
+    keeps the unscoped path free of a membership test it would always pass.
+    """
+
+    customer_ids: frozenset[str] | None
+    product_ids: frozenset[str] | None
+
+    def covers_customer(self, customer_id: str) -> bool:
+        return self.customer_ids is None or customer_id in self.customer_ids
+
+    def covers_product(self, product_id: str) -> bool:
+        return self.product_ids is None or product_id in self.product_ids
+
+
+_UNSCOPED = _Scope(customer_ids=None, product_ids=None)
+
+_ONE = Decimal("1")
+
+
+@dataclass(frozen=True)
+class _Factors:
+    """What a lever multiplies by, per entity — one number, or one per member.
+
+    A homogeneous lever moves its whole slice as a block, which answers "did this
+    slice move". A HETEROGENEOUS one moves each member by its own declared amount,
+    which is what makes "the aggregate moved, but not uniformly, and here is who
+    moved how much" a question with an answer key rather than an inference. A single
+    aggregate delta is consistent with infinitely many per-member stories; declaring
+    the story is the only way to grade an attribution claim.
+
+    Resolved to entity ids once per run, and looked up through one method whichever
+    spelling was given, so the generation loop never branches on which it got and the
+    homogeneous path stays byte-identical to the one that predates this.
+    """
+
+    uniform: Decimal
+    by_member: Mapping[str, Decimal] | None = None
+    side: str = ""  # "customer" or "product" — which id keys `by_member`
+
+    def of(self, customer_id: str, product_id: str = "") -> Decimal:
+        if self.by_member is None:
+            return self.uniform
+        return self.by_member.get(customer_id if self.side == "customer" else product_id, _ONE)
+
+    def num(self, customer_id: str, product_id: str = "") -> float:
+        """The same factor where the caller works in floats (counts, day lags)."""
+        return float(self.of(customer_id, product_id))
+
+
+_UNIFORM_ONE = _Factors(uniform=_ONE)
+
+
+def _resolve_factors(
+    lever: "Lever | None", customers: list[Customer], products: list[Product], scope: _Scope
+) -> _Factors:
+    """Turn a lever's declared factor — scalar or per-member map — into an id lookup.
+
+    Expanded against the RESOLVED scope, so a member's factor reaches exactly the
+    entities the scope already admits: with ``scope={"segment": [...], "region":
+    ["EMEA"]}`` and a factor keyed by segment, a non-EMEA enterprise account is out of
+    scope and never consulted, rather than picking up its segment's factor.
+    """
+    if lever is None or lever.effective_driver == "share":
+        return _UNIFORM_ONE
+    if not isinstance(lever.factor, Mapping):
+        return _Factors(uniform=Decimal(str(lever.factor)))
+
+    dim = lever.factor_dimension
+    table = {str(member): Decimal(str(value)) for member, value in lever.factor.items()}
+    if dim in _CUSTOMER_SCOPE_DIMS:
+        return _Factors(
+            uniform=_ONE,
+            by_member={
+                c.customer_id: table[str(getattr(c, dim))]
+                for c in customers
+                if scope.covers_customer(c.customer_id) and str(getattr(c, dim)) in table
+            },
+            side="customer",
+        )
+    return _Factors(
+        uniform=_ONE,
+        by_member={
+            p.product_id: table[str(getattr(p, dim))]
+            for p in products
+            if scope.covers_product(p.product_id) and str(getattr(p, dim)) in table
+        },
+        side="product",
+    )
+
+
+_TREND_DIMENSIONS = ("price", "volume")
+
+
+@dataclass(frozen=True)
+class Trend:
+    """A secular drift — the firm growing, not the firm changing.
+
+    A lever answers "did something happen at period k". A TREND is the control for
+    that question: prices and volumes creep a few percent a year for no reason at all,
+    every metric rises monotonically, and the honest answer to "what changed in
+    September" is *nothing*. Without a corpus where drift is the whole story, a
+    consumer that flags every upward line is indistinguishable from one that is right.
+
+    Rates are ANNUAL and compound continuously across the year — month *m* carries
+    ``(1 + rate) ** (m / 12)`` — so period 0 is undrifted and the year-end factor is
+    exactly ``1 + rate``. Deterministic in the month, so it adds no draw of its own on
+    the price side and leaves a lever's same-seed counterfactual exact: both runs of a
+    pair carry the identical trend, and it cancels.
+
+    A trend is NOT a lever: it has no activation period, no scope, and no
+    counterfactual, because there is nothing to attribute. It is a property of the
+    corpus, and the corpus stamp is where it is recorded.
+    """
+
+    price: float = 0.0
+    volume: float = 0.0
+
+    def __post_init__(self) -> None:
+        for name in _TREND_DIMENSIONS:
+            rate = getattr(self, name)
+            if rate <= -1.0:
+                raise ValueError(f"trend {name}={rate} would drive the corpus to zero or below")
+
+    @property
+    def active(self) -> bool:
+        return self.price != 0.0 or self.volume != 0.0
+
+    def price_at(self, month_offset: int) -> Decimal:
+        return Decimal(str((1.0 + self.price) ** (month_offset / 12.0)))
+
+    def volume_at(self, month_offset: int) -> float:
+        return (1.0 + self.volume) ** (month_offset / 12.0)
+
+    def as_dict(self) -> dict[str, float]:
+        return {name: getattr(self, name) for name in _TREND_DIMENSIONS if getattr(self, name)}
+
+
+_NO_TREND = Trend()
+
+
+@dataclass(frozen=True)
+class _Applied:
+    """One lever resolved against the master data — scope and factors, ready to use.
+
+    Levers compose by MULTIPLYING where they meet. Two price levers over overlapping
+    slices scale the same line twice; a price lever and a collection-lag lever act at
+    different sites and simply both happen. That is what makes an interaction pair
+    possible: run A, run B, run A+B, and the combined corpus is not the sum of the
+    two single ones, because the second lever acts on amounts the first already moved.
+    """
+
+    lever: "Lever"
+    scope: _Scope
+    factors: _Factors
+
+
+def _resolve_levers(
+    levers: Sequence["Lever"], customers: list[Customer], products: list[Product]
+) -> list[_Applied]:
+    """Resolve every lever once per run, in declaration order."""
+    resolved = []
+    for lever in levers:
+        scope = _resolve_scope(lever, customers, products)
+        resolved.append(_Applied(lever, scope, _resolve_factors(lever, customers, products, scope)))
+    return resolved
+
+
+def _normalise_levers(lever: "Lever | None", levers: "Sequence[Lever] | None") -> tuple["Lever", ...]:
+    """One lever or many, onto one list — and refuse the combinations that lie.
+
+    ``mix`` measures its baseline share by re-running the order draw with no lever at
+    all. Another lever in the same run moves that draw, so the measured share would
+    describe a corpus that never existed and ``intervention.yaml`` would publish it as
+    truth. Refused rather than silently approximated.
+    """
+    if lever is not None and levers:
+        raise ValueError("pass `lever` or `levers`, not both")
+    out = tuple(levers) if levers else ((lever,) if lever is not None else ())
+    if len(out) > 1 and any(item.effective_driver == "share" for item in out):
+        raise ValueError(
+            "a `mix` lever cannot share a run with another lever: its baseline share is "
+            "measured against a no-lever draw that the other lever would move"
+        )
+    return out
+
+
+def _resolve_scope(
+    lever: "Lever | None", customers: list[Customer], products: list[Product]
+) -> _Scope:
+    """Turn a lever's declared scope into the id sets the generation loop tests.
+
+    Membership is decided on entity IDENTITY, never on a drawn value, so scoping a
+    lever does not introduce control flow that branches on anything the lever moved
+    — the property that keeps a same-seed pair exact (see :class:`Lever`).
+    """
+    if lever is None or not lever.scope:
+        return _UNSCOPED
+    scope = {dim: frozenset(members) for dim, members in lever.scope.items()}
+
+    def ids(entities: list[Customer] | list[Product], dims: tuple[str, ...], key: str) -> frozenset[str] | None:
+        active = {dim: members for dim, members in scope.items() if dim in dims}
+        if not active:
+            return None
+        # Several dimensions INTERSECT — `segment: [Enterprise], region: [EMEA]` is
+        # enterprise accounts in EMEA, not their union.
+        return frozenset(
+            str(getattr(e, key))
+            for e in entities
+            if all(str(getattr(e, dim)) in members for dim, members in active.items())
+        )
+
+    return _Scope(
+        customer_ids=ids(customers, _CUSTOMER_SCOPE_DIMS, "customer_id"),
+        product_ids=ids(products, _PRODUCT_SCOPE_DIMS, "product_id"),
+    )
+
+
 @dataclass(frozen=True)
 class Lever:
     """A constructed intervention: a DGP parameter change at a known period.
@@ -330,13 +580,24 @@ class Lever:
     changes the generating process itself, so the effect propagates naturally
     through the event cascade (sales → AR/revenue → receipts → cash/bank → TB/BS).
 
-    ``price_level``: every realised line amount in ``month_offset >= period_k`` is
-    scaled by ``factor`` after the order lines are drawn. Scaling happens after all
-    random draws for the event and no downstream control flow branches on amount
-    values, so the RNG stream is identical with and without the lever — a same-seed
-    pair is an exact counterfactual: revenue in months >= period_k scales by exactly
-    ``factor``; receipts/cash follow with the collection lag; cost of sale and the
-    expenditure cycle are untouched (a price change does not move volumes or costs).
+    ``price_level``: the realised ``unit_price`` of every order line in
+    ``month_offset >= period_k`` is scaled by ``factor``, and ``line_amount`` follows
+    from it. Scaling happens after all random draws for the event — after the discount
+    draw, so the discount off list is what it was — and no downstream control flow
+    branches on amount values, so the RNG stream is identical with and without the
+    lever. A same-seed pair is an exact counterfactual: revenue in months >= period_k
+    scales by exactly ``factor``; receipts/cash follow with the collection lag; cost
+    of sale and the expenditure cycle are untouched (a price change does not move
+    volumes or costs).
+
+    It applies at the **draw site**, not at the GL posting. It used to scale the
+    revenue credit inside ``_generate_revenue_entries`` and leave
+    ``sales_order_lines`` at baseline, which desynchronised the order lines from the
+    ledger they are supposed to derive: ``operating_revenue`` no longer reconstructed
+    from the lines, and every entity-grain metric (``db1_by_customer``,
+    ``db1_by_product_group``) read identical in the levered run and its baseline —
+    the lever moved the aggregate and moved nothing at the grain "which slice drove
+    it" is asked at.
 
     ``volume``: the number of orders a customer places in ``month_offset >=
     period_k`` is scaled by ``factor``. Exact for a different and stronger reason: order *i* of a (customer, month) draws from its own identity-keyed
@@ -344,19 +605,152 @@ class Lever:
     byte-identical, plus the added ones. The ledger cycles never draw from those
     streams, so purchases, payroll and depreciation are untouched, and the added
     rows' revenue, cost of sale and DB1 contribution are computable to the cent.
+
+    ``rate``: shift one named ``driver`` WITHIN a slice, holding member shares fixed —
+    ``price`` (realised unit price), ``frequency`` (orders per customer-month) or
+    ``collection_lag`` (days from sale to receipt). The aggregate then moves through
+    behaviour rather than composition, which is the half of "artifact or real change"
+    that ``mix`` is the other half of.
+
+    ``mix``: shift the SHARE of order activity toward the scoped members, from 20% to
+    ``target_share``, while holding every within-member rate fixed. The complement's
+    factor is *derived* rather than declared, so total activity stays put and the
+    aggregate moves purely through composition. Declaring only the target's factor
+    would move total volume too, and the lever would be a frequency change wearing a
+    mix label. Shares are of order COUNT, so the scope is customer-side only.
+
+    ``price_level`` and ``volume`` remain valid and mean exactly ``rate``/``price``
+    and ``rate``/``frequency``; ``driver`` normalises all four onto one code path.
+
+    ``scope`` narrows a lever to a subset of entities — ``{"segment":
+    ["Enterprise"], "region": ["EMEA"]}`` is enterprise accounts in EMEA, since
+    several dimensions intersect rather than union. Omitted, the lever applies to
+    everything, which is the behaviour every unscoped run keeps. Scoping is what
+    makes "a metric moved — which slice drove it" answerable by construction: the
+    aggregate moves, and exactly one named slice moved under it.
+
+    Membership is decided on entity identity, so a scoped lever is exact for the same
+    reason an unscoped one is. What it costs is the global subset property of the
+    frequency driver: with a scope, the baseline's orders are a strict subset of the
+    levered run's *within the scope* and byte-identical outside it. That is a
+    sharper statement than the unscoped one, not a weaker one, but it is a different
+    statement and ``intervention.yaml`` says so.
+
+    ``factor`` may be a MAP instead of a number — ``{"Enterprise": 1.15, "Mid-Market":
+    1.05}`` — and then each member moves by its own amount. Its keys must be exactly
+    one scope dimension's members, so the dimension is derived rather than declared
+    twice. This is what separates "the aggregate moved" from "and here is who moved
+    how much": a single delta is consistent with infinitely many per-member stories,
+    so a consumer that recovers the total has shown nothing about attribution. With a
+    per-member factor the story is on disk and an attribution claim is gradeable —
+    naming the wrong member as the driver is wrong even when the total is right.
+    ``mix`` takes no factor at all; its knob is ``target_share``.
     """
 
     period_k: int  # month offset (0-based) at which the lever activates
-    factor: float  # multiplicative change, e.g. 1.15
+    # Multiplicative change — a scalar (1.15, the whole slice moves together) or a map
+    # keyed by the members of ONE scope dimension ({"Enterprise": 1.15, "Mid-Market":
+    # 1.05}), which moves each member by its own amount.
+    factor: float | Mapping[str, float] = 1.0
     type: str = "price_level"
+    # Plain JSON all the way down — dimension name -> member ids. The spec crosses a
+    # process boundary and feeds the corpus digest, so a custom object here would
+    # either fail to serialize or hash as its repr.
+    scope: Mapping[str, Sequence[str]] | None = None
+    driver: str | None = None  # required for `rate`; implied by the legacy type names
+    target_share: float | None = None  # `mix` only — the scoped members' post-shift share
+
+    @property
+    def effective_driver(self) -> str:
+        """One vocabulary for four spellings, so the generator tests a driver only."""
+        if self.type in _LEGACY_DRIVER:
+            return _LEGACY_DRIVER[self.type]
+        if self.driver is not None:  # `rate`, and __post_init__ has checked it is set
+            return self.driver
+        return "share"
+
+    @property
+    def factor_dimension(self) -> str:
+        """The scope dimension a per-member factor map is keyed by.
+
+        Derived rather than declared: the map's keys must be exactly one scope
+        dimension's members, so naming it again would be a second place to get it
+        wrong. ``__post_init__`` has already established there is exactly one.
+        """
+        if not isinstance(self.factor, Mapping) or not self.scope:
+            return ""
+        keys = {str(k) for k in self.factor}
+        return next(dim for dim, members in self.scope.items() if {str(m) for m in members} == keys)
 
     def __post_init__(self) -> None:
-        if self.type not in ("price_level", "volume"):
+        if self.type not in _LEVER_TYPES:
+            raise ValueError(f"unknown lever type: {self.type!r} (supported: {list(_LEVER_TYPES)})")
+        if self.period_k < 0:
+            raise ValueError(f"invalid lever: period_k={self.period_k}")
+        if self.type == "rate" and self.driver not in _DRIVERS:
+            raise ValueError(f"a rate lever needs driver in {list(_DRIVERS)}, got {self.driver!r}")
+        if self.type != "rate" and self.driver is not None:
+            raise ValueError(f"driver is a `rate` field; {self.type!r} implies its own")
+        if self.type == "mix":
+            if self.target_share is None or not 0.0 < self.target_share < 1.0:
+                raise ValueError(f"a mix lever needs 0 < target_share < 1, got {self.target_share!r}")
+            if not self.scope:
+                raise ValueError("a mix lever needs a scope — the members whose share is shifted")
+            if isinstance(self.factor, Mapping):
+                raise ValueError("a mix lever takes no factor at all — its knob is target_share")
+        elif isinstance(self.factor, Mapping):
+            if self.target_share is not None:
+                raise ValueError(f"target_share is a `mix` field; {self.type!r} takes a factor")
+            self._check_factor_map()
+        else:
+            if self.target_share is not None:
+                raise ValueError(f"target_share is a `mix` field; {self.type!r} takes a factor")
+            if self.factor <= 0:
+                raise ValueError(f"invalid lever: factor={self.factor}")
+        if self.scope is None:
+            return
+        unknown = sorted(set(self.scope) - set(_SCOPE_DIMS))
+        if unknown:
+            raise ValueError(f"unknown scope dimension(s): {unknown} (supported: {list(_SCOPE_DIMS)})")
+        empty = sorted(dim for dim, members in self.scope.items() if not members)
+        if empty:
+            raise ValueError(f"empty scope dimension(s): {empty} — omit the key to leave it unscoped")
+        # Silently ignoring a scope would produce a corpus whose intervention.yaml
+        # claims a narrower intervention than the one that ran. Order counts, shares
+        # and collection are all decided before or above the product grain, so only
+        # the price driver can honour a product-side scope.
+        product_side = sorted(set(self.scope) & set(_PRODUCT_SCOPE_DIMS))
+        if product_side and self.effective_driver != "price":
             raise ValueError(
-                f"unknown lever type: {self.type!r} (supported: price_level, volume)"
+                f"a {self.effective_driver!r} lever cannot scope on {product_side}: it acts at "
+                "(customer, month) grain, before any product is chosen"
             )
-        if self.period_k < 0 or self.factor <= 0:
-            raise ValueError(f"invalid lever: period_k={self.period_k}, factor={self.factor}")
+
+    def _check_factor_map(self) -> None:
+        """A per-member factor map must name members the scope already admits.
+
+        The map's keys ARE one dimension's scope, so the two must agree exactly. A map
+        that named members outside the scope would declare a change to entities the
+        lever never touches; one that omitted a scoped member would leave that member
+        moving by an amount nothing on disk states. Either way ``intervention.yaml``
+        would describe a run that did not happen.
+        """
+        assert isinstance(self.factor, Mapping)  # narrowed by the caller
+        if not self.factor:
+            raise ValueError("an empty factor map declares nothing — give a scalar factor instead")
+        bad = sorted(str(m) for m, v in self.factor.items() if not isinstance(v, int | float) or v <= 0)
+        if bad:
+            raise ValueError(f"factor map holds non-positive or non-numeric value(s) for: {bad}")
+        if not self.scope:
+            raise ValueError("a per-member factor needs a scope — the dimension its keys belong to")
+        keys = {str(k) for k in self.factor}
+        matching = [dim for dim, members in self.scope.items() if {str(m) for m in members} == keys]
+        if len(matching) != 1:
+            raise ValueError(
+                f"a factor map must match exactly one scope dimension's members; keys {sorted(keys)} "
+                f"match {matching or 'no dimension'} in scope "
+                f"{ {dim: sorted(str(m) for m in members) for dim, members in self.scope.items()} }"
+            )
 
 
 @dataclass
@@ -459,6 +853,71 @@ def generate_customers(
     return out
 
 
+def generate_merchants(seed: int, count: int) -> list[Merchant]:
+    """The payer dimension's members — ``count`` of them, which is the point.
+
+    A thin reference table on purpose. What this dimension contributes is not richer
+    attributes but CARDINALITY and a frequency law: the corpus's other dimensions are
+    small and near-uniform, so every top-N question over them can be answered by
+    reading the table. This one cannot.
+    """
+    names = merchant_names(count)
+    rows = []
+    for i, name in enumerate(names):
+        pick = _stream(seed, "merchant", str(i))
+        rows.append(
+            Merchant(
+                merchant_id=f"MRC-{i + 1:06d}",
+                merchant_name=name,
+                category=pick.choice(MERCHANT_CATEGORIES),
+                country=pick.choice(MERCHANT_COUNTRIES),
+            )
+        )
+    return rows
+
+
+def _zipf_cumulative(count: int, exponent: float) -> list[float]:
+    """Cumulative Zipf weights over ranks 1..count — the inverse-CDF sampling table.
+
+    Built once and binary-searched per row, because the alternative at ``large`` is a
+    linear scan over thousands of merchants for every one of hundreds of thousands of
+    bank lines.
+    """
+    weights = [1.0 / (rank**exponent) for rank in range(1, count + 1)]
+    total = sum(weights)
+    running = 0.0
+    cumulative = []
+    for weight in weights:
+        running += weight / total
+        cumulative.append(running)
+    cumulative[-1] = 1.0  # close the interval against float drift
+    return cumulative
+
+
+def assign_merchants(
+    seed: int, transactions: list[BankTransaction], merchants: list[Merchant], exponent: float
+) -> None:
+    """Attach a Zipf-drawn merchant to every bank transaction, in place.
+
+    Drawn from a stream keyed by the transaction's own id, so the assignment does not
+    depend on how many transactions exist or in what order they were minted — the same
+    property every other entity-keyed draw in this generator has, and the reason
+    turning the dimension on does not disturb a lever's counterfactual.
+
+    Rank order is NOT id order: rank *r* maps to a merchant chosen by a fixed
+    seed-derived permutation, so the most frequent merchant is not ``MRC-000001``. A
+    corpus where the head is readable off the key is not testing an aggregation.
+    """
+    if not merchants:
+        return
+    cumulative = _zipf_cumulative(len(merchants), exponent)
+    order = list(range(len(merchants)))
+    random.Random(f"merchant_rank:{seed}").shuffle(order)
+    for txn in transactions:
+        rank = bisect.bisect_left(cumulative, _stream(seed, "merchant_draw", txn.txn_id).random())
+        txn.merchant_id = merchants[order[min(rank, len(merchants) - 1)]].merchant_id
+
+
 def generate_products(
     seed: int, profile: ScaleProfile, fiscal_start: date, months: int
 ) -> list[Product]:
@@ -535,9 +994,132 @@ def _pareto_normalizer(alpha: float, cap: float) -> float:
     return (alpha / (mean_x * (1.0 - alpha))) * (threshold ** (1.0 - alpha) - 1.0) + cap * threshold ** (-alpha)
 
 
+@dataclass(frozen=True)
+class MixSolution:
+    """What a ``mix`` lever has to solve before it can be applied.
+
+    A share target is not a factor. Moving the scoped members from ``baseline_share``
+    to ``target_share`` while holding TOTAL activity fixed needs two factors that
+    satisfy ``s0·ft + (1-s0)·fc = 1``, and only one of them is declared. Deriving the
+    complement is what separates a mix from a frequency change: scale the target
+    alone and total volume moves with it, so the aggregate would shift through
+    volume as well as composition and the lever would not mean what it says.
+
+    ``baseline_share`` is measured, not assumed — it is the scoped members' share of
+    the order counts the same seed draws with no lever at all, over the months from
+    ``period_k`` on, which is the window the shift applies to.
+    """
+
+    baseline_share: float
+    target_share: float
+    target_factor: float
+    complement_factor: float
+
+
+def _mix_solution(
+    seed: int,
+    customers: list[Customer],
+    products: list[Product],
+    fiscal_start: date,
+    months: int,
+    profile: ScaleProfile,
+    q4_seasonal_boost: float,
+    lever: "Lever",
+) -> MixSolution:
+    """Measure the baseline share, then solve for the two factors.
+
+    A pre-pass over ``_order_count`` at ``lever=None`` — one gauss draw per live
+    customer-month, negligible beside generation — rather than an assumed starting
+    share. It mirrors the generation loop's own gates (a customer places no orders
+    before it exists or after it lapses; no orders in a month with no live product),
+    because a share measured over customer-months that never produced an order is
+    not the share the corpus actually has.
+
+    Pure and deterministic given the same arguments, so the runner can call it again
+    to record the solution in ``intervention.yaml`` without threading state out of
+    generation.
+    """
+    scope = _resolve_scope(lever, customers, products)
+    live_months = {
+        m for m in range(months)
+        if any(_is_active(p.launched_date, p.discontinued_date, *_month_start_end(fiscal_start, m)) for p in products)
+    }
+
+    target = complement = 0
+    for customer in customers:
+        weight = _customer_weight(seed, customer.customer_id, profile)
+        in_scope = scope.covers_customer(customer.customer_id)
+        for month_offset in range(lever.period_k, months):
+            if month_offset not in live_months:
+                continue
+            m_start, m_end = _month_start_end(fiscal_start, month_offset)
+            if not _is_active(customer.created_date, customer.churned_date, m_start, m_end):
+                continue
+            seasonal = 1.0 + q4_seasonal_boost * (m_start.month >= 10)
+            n = _order_count(
+                seed, customer.customer_id, month_offset,
+                profile.orders_per_customer_month * weight, seasonal,
+            )
+            if in_scope:
+                target += n
+            else:
+                complement += n
+
+    total = target + complement
+    s0 = target / total if total else 0.0
+    s1 = lever.target_share if lever.target_share is not None else s0
+    if not 0.0 < s0 < 1.0:
+        # No baseline activity in the scope (or nothing outside it) — there is no
+        # share to shift, and a factor of s1/0 is not a number. Say so rather than
+        # emit an intervention whose truth is a division by zero.
+        raise ValueError(
+            f"mix lever cannot shift a share of {s0:.4f}: the scope holds "
+            f"{target} of {total} orders from period_k={lever.period_k} on"
+        )
+    return MixSolution(
+        baseline_share=s0,
+        target_share=s1,
+        target_factor=s1 / s0,
+        complement_factor=(1.0 - s1) / (1.0 - s0),
+    )
+
+
+def mix_outcome(
+    lever: "Lever",
+    corpus: Corpus,
+    *,
+    seed: int,
+    months: int,
+    fiscal_start: date,
+    q4_seasonal_boost: float = 0.3,
+    profile: str | ScaleProfile | None = None,
+) -> tuple[MixSolution, float]:
+    """The mix a lever solved for, and the share the corpus actually landed on.
+
+    The two differ: an order count is a rounded draw, so scaling by the solved
+    factors lands NEAR the target rather than on it. Publishing only the request
+    would put a number on disk that the data does not hold, which is the shape the
+    oracle contract exists to remove.
+
+    Reads the master data off the corpus rather than regenerating it, so the shares
+    are measured against the rows that actually shipped.
+    """
+    solution = _mix_solution(
+        seed, corpus.customers, corpus.products, fiscal_start, months,
+        get_profile(profile), q4_seasonal_boost, lever,
+    )
+    scope = _resolve_scope(lever, corpus.customers, corpus.products)
+    in_window = [
+        order for order in corpus.sales_orders
+        if _month_offset(fiscal_start, order.order_date) >= lever.period_k
+    ]
+    scoped = sum(1 for order in in_window if scope.covers_customer(order.customer_id))
+    return solution, (scoped / len(in_window) if in_window else 0.0)
+
+
 def _order_count(
     seed: int, customer_id: str, month_offset: int, base: float, seasonal: float,
-    lever: "Lever | None",
+    scale: float | None = None,
 ) -> int:
     """How many orders this customer places this month — the volume lever's target.
 
@@ -545,12 +1127,40 @@ def _order_count(
     else. A ``volume`` lever scales the count from ``period_k`` on; because order *i*
     keys its own stream, the baseline's orders remain a strict SUBSET of the levered
     run's and the added rows are exactly attributable.
+
+    ``scale`` is the combined multiplier the caller resolved for this customer-month —
+    ``None`` when no lever reaches it. The draw happens either way and only the
+    scaling is conditional, so an out-of-scope customer is byte-identical to its
+    baseline rather than merely similar. Resolving it OUTSIDE keeps the scope tests,
+    the period test and the composition of several levers in one place, and leaves
+    this function a draw.
     """
     draw = _stream(seed, "order_count", customer_id, month_offset)
     n = max(0, round(draw.gauss(base * seasonal, base * 0.25)))
-    if lever is not None and lever.type == "volume" and month_offset >= lever.period_k:
-        n = int(round(n * lever.factor))
-    return n
+    if scale is None:
+        return n
+    return _scale_count(n, scale, seed, customer_id, month_offset)
+
+
+def _scale_count(n: int, factor: float, seed: int, customer_id: str, month_offset: int) -> int:
+    """Scale an order count without letting rounding eat the factor.
+
+    ``round(n * factor)`` is badly biased at this grain. A customer-month holds 0-3
+    orders, so a 2.5% shift rounds to nothing on nearly every one of them: a mix
+    lever asked to move a segment's share from 34.1% to 35.0% landed on 34.3%,
+    roughly a seventh of the way, and the shortfall grew as the requested shift got
+    smaller. A lever that quietly under-delivers is worse than one that refuses,
+    because ``intervention.yaml`` would still name the target.
+
+    Stochastic rounding carries the fraction as a probability instead of discarding
+    it, so ``E[result] == n * factor`` exactly and the aggregate lands on the target.
+    Drawn from its OWN identity-keyed stream, so no other draw moves; and monotone in
+    ``factor`` — at ``factor >= 1`` the result is never below ``n``, which is what
+    keeps the baseline's orders a strict subset of the levered run's.
+    """
+    scaled = n * factor
+    whole = int(scaled)
+    return whole + (1 if _stream(seed, "count_scale", customer_id, month_offset).random() < scaled - whole else 0)
 
 
 def generate_sales_orders(
@@ -563,6 +1173,8 @@ def generate_sales_orders(
     profile: ScaleProfile,
     q4_seasonal_boost: float = 0.3,
     lever: Lever | None = None,
+    levers: Sequence[Lever] | None = None,
+    trend: Trend = _NO_TREND,
 ) -> tuple[list[SalesOrder], list[SalesOrderLine]]:
     """The operating chain — customer orders with priced, costed lines.
 
@@ -580,6 +1192,21 @@ def generate_sales_orders(
     lines: list[SalesOrderLine] = []
     log_median = math.log(profile.order_units_median)
 
+    # A price lever acts HERE, on the realised unit price, not on the GL credit
+    # derived from it — see :class:`Lever`. Scopes and per-member factors resolve to
+    # entity ids once, so the loops below ask one question per entity either way.
+    applied = _resolve_levers(_normalise_levers(lever, levers), customers, products)
+    price_levers = [a for a in applied if a.lever.effective_driver == "price"]
+    frequency_levers = [a for a in applied if a.lever.effective_driver == "frequency"]
+    mix_lever = next((a for a in applied if a.lever.effective_driver == "share"), None)
+    mix = (
+        _mix_solution(
+            seed, customers, products, fiscal_start, months, profile, q4_seasonal_boost, mix_lever.lever
+        )
+        if mix_lever is not None
+        else None
+    )
+
     # The sellable catalogue per month, computed once rather than per customer-month:
     # at `large` that inner filter would be 4,000 x 12 x 1,200 comparisons for an
     # answer that only depends on the month.
@@ -587,9 +1214,17 @@ def generate_sales_orders(
         [p for p in products if _is_active(p.launched_date, p.discontinued_date, *_month_start_end(fiscal_start, m))]
         for m in range(months)
     ]
+    # Deterministic in the month, so it costs one lookup rather than a draw, and both
+    # runs of a lever pair carry the identical drift — it cancels in the difference.
+    price_drift = [trend.price_at(m) for m in range(months)] if trend.price else None
+    volume_drift = [trend.volume_at(m) for m in range(months)] if trend.volume else None
 
     for customer in customers:
         weight = _customer_weight(seed, customer.customer_id, profile)
+        # Loop-invariant per customer; the product side is tested per line below.
+        price_here = [a for a in price_levers if a.scope.covers_customer(customer.customer_id)]
+        frequency_here = [a for a in frequency_levers if a.scope.covers_customer(customer.customer_id)]
+        mix_here = mix_lever is not None and mix_lever.scope.covers_customer(customer.customer_id)
         for month_offset in range(months):
             m_start, m_end = _month_start_end(fiscal_start, month_offset)
             # A customer places no orders before it exists or after it lapses. This is
@@ -601,9 +1236,20 @@ def generate_sales_orders(
             if not live:
                 continue
             seasonal = 1.0 + q4_seasonal_boost * (m_start.month >= 10)
+            # Several frequency levers over one customer MULTIPLY, and the product is
+            # applied in a single scaling call so the count draws from one stream —
+            # scaling twice would consume the stream twice and desynchronise the
+            # single-lever runs this is meant to be comparable with.
+            count_scale = volume_drift[month_offset] if volume_drift is not None else 1.0
+            for a in frequency_here:
+                if month_offset >= a.lever.period_k:
+                    count_scale *= a.factors.num(customer.customer_id)
+            if mix is not None and mix_lever is not None and month_offset >= mix_lever.lever.period_k:
+                count_scale *= mix.target_factor if mix_here else mix.complement_factor
             n_orders = _order_count(
                 seed, customer.customer_id, month_offset,
-                profile.orders_per_customer_month * weight, seasonal, lever,
+                profile.orders_per_customer_month * weight, seasonal,
+                count_scale if count_scale != 1.0 else None,
             )
             for i in range(n_orders):
                 o = _stream(seed, "order", customer.customer_id, month_offset, i)
@@ -626,6 +1272,13 @@ def generate_sales_orders(
                     # thin tail actually goes negative rather than merely looking thin.
                     discount = Decimal(str(round(line.uniform(0.0, 0.18), 4)))
                     unit_price = _quantize(product.list_price * (Decimal("1") - discount))
+                    if price_drift is not None:
+                        unit_price = _quantize(unit_price * price_drift[month_offset])
+                    for a in price_here:
+                        if month_offset >= a.lever.period_k and a.scope.covers_product(product.product_id):
+                            unit_price = _quantize(
+                                unit_price * a.factors.of(customer.customer_id, product.product_id)
+                            )
                     lines.append(
                         SalesOrderLine(
                             order_line_id=f"{order_id}-L{j + 1}",
@@ -648,8 +1301,6 @@ def _generate_revenue_entries(
     products: list[Product],
     counters: _Counters,
     fiscal_start: date,
-    *,
-    lever: Lever | None = None,
 ) -> tuple[list[JournalEntry], list[JournalLine], list[_SaleRecord], dict[str, str]]:
     """Revenue and cost of sale, DERIVED from the order lines.
 
@@ -666,9 +1317,11 @@ def _generate_revenue_entries(
     cost-of-sale entry per order — the link the stock subledger hangs its issue
     movements off, so every issue names the GL posting it detailed.
 
-    A ``price_level`` lever scales the realised unit price here — after every draw,
-    exactly as before, so it remains an exact counterfactual. A ``volume`` lever acts
-    earlier, on the order count.
+    Lever-free by construction. Both legs are a pure function of the order lines, so
+    a ``price_level`` lever reaches the ledger by having already moved
+    ``unit_price``, and a ``volume`` lever by having already added orders. Applying a
+    factor here as well is what desynchronised the lines from the ledger; see
+    :class:`Lever`.
     """
     lines_by_order: dict[str, list[SalesOrderLine]] = {}
     for line in order_lines:
@@ -681,31 +1334,16 @@ def _generate_revenue_entries(
     sales: list[_SaleRecord] = []
     cogs_entry_by_order: dict[str, str] = {}
 
-    price_factor = (
-        Decimal(str(lever.factor))
-        if lever is not None and lever.type == "price_level"
-        else None
-    )
-
     for order in orders:
         rows = lines_by_order.get(order.order_id, [])
         if not rows:
             continue
         post = _stream(seed, "revenue_post", order.order_id)
-        month_offset = _month_offset(fiscal_start, order.order_date)
-        active = (
-            price_factor is not None and lever is not None and month_offset >= lever.period_k
-        )
 
         cost_center = post.choice(COST_CENTERS) if post.random() < 0.85 else None
         customer = customer_name.get(order.customer_id, order.customer_id)
 
-        def priced(line: SalesOrderLine) -> Decimal:
-            if price_factor is None or not active:
-                return line.line_amount
-            return _quantize(line.line_amount * price_factor)
-
-        total = _quantize(sum((priced(r) for r in rows), Decimal("0.00")))
+        total = _quantize(sum((r.line_amount for r in rows), Decimal("0.00")))
         cost = _quantize(sum((r.line_cost for r in rows), Decimal("0.00")))
 
         # ── Revenue: DR AR / CR revenue per line ──
@@ -736,7 +1374,7 @@ def _generate_revenue_entries(
                     entry_id=entry_id,
                     account_id=_GROUP_REVENUE_ACCOUNT.get(product_group[row.product_id], _DEFAULT_REVENUE_ACCOUNT),
                     debit=Decimal("0.00"),
-                    credit=priced(row),
+                    credit=row.line_amount,
                     cost_center=cost_center,
                 )
             )
@@ -1225,6 +1863,7 @@ def _generate_cash_receipts(
     counters: _Counters,
     *,
     collection_rate: float = 0.85,
+    applied: Sequence[_Applied] = (),
 ) -> tuple[list[JournalEntry], list[JournalLine], list[BankTransaction], list[Receipt]]:
     """Cash receipts for collected sales: DR Cash, CR AR + Bank Txn + the AR document.
 
@@ -1232,8 +1871,20 @@ def _generate_cash_receipts(
     is collected, when, and how much must not depend on how many other orders exist,
     or a volume lever would silently re-roll the collection outcome of every
     pre-existing sale and destroy the subset property the counterfactual rests on.
+
+    A ``collection_lag`` lever scales the drawn lag for in-scope sales from
+    ``period_k`` on. It is applied after the draw and *whether* a sale is collected is
+    decided before it, so the levered and baseline runs collect exactly the same set
+    of sales and differ only in when the cash lands.
+
+    One honest caveat, recorded in ``intervention.yaml`` rather than left to be
+    discovered: a receipt is clamped to the fiscal end, so late-year sales absorb
+    part of a lag increase instead of moving by the full factor. DSO therefore moves
+    by less than the factor near the year boundary, and the effect is not linear in
+    it.
     """
     fiscal_end = _month_start_end(fiscal_start, months - 1)[1]
+    lag_levers = [a for a in applied if a.lever.effective_driver == "collection_lag"]
 
     entries: list[JournalEntry] = []
     lines: list[JournalLine] = []
@@ -1257,7 +1908,17 @@ def _generate_cash_receipts(
         sale.collected = True
 
         # Payment arrives 5-45 days after sale
-        receipt_date = sale.sale_date + timedelta(days=rng.randint(5, 45))
+        lag = rng.randint(5, 45)
+        lag_scale = 1.0
+        for a in lag_levers:
+            if (
+                _month_offset(fiscal_start, sale.sale_date) >= a.lever.period_k
+                and a.scope.covers_customer(sale.customer_id)
+            ):
+                lag_scale *= a.factors.num(sale.customer_id)
+        if lag_scale != 1.0:
+            lag = max(0, int(round(lag * lag_scale)))
+        receipt_date = sale.sale_date + timedelta(days=lag)
         if receipt_date > fiscal_end:
             receipt_date = fiscal_end
 
@@ -2219,6 +2880,10 @@ def generate_finance_dataset(
     roleplay_orders: int = 0,
     roleplay_deliveries: int = 0,
     lever: Lever | None = None,
+    levers: Sequence[Lever] | None = None,
+    trend: Trend | Mapping[str, float] | None = None,
+    merchants: int = 0,
+    merchant_exponent: float = 1.05,
     profile: str | ScaleProfile | None = None,
 ) -> Corpus:
     """Generate a complete finance dataset with closed-loop accounting.
@@ -2235,6 +2900,18 @@ def generate_finance_dataset(
         q4_seasonal_boost: Fractional boost applied to Q4 revenue months.
         lever: Optional constructed intervention — a DGP parameter
             change at a known period with a known effect; see :class:`Lever`.
+        levers: Several interventions in one run, which is how an interaction pair
+            is built: the combined corpus is not the sum of the two single-lever
+            ones, because the second lever acts on what the first already moved.
+            Mutually exclusive with ``lever``.
+        trend: Optional secular drift in prices and/or volumes — see :class:`Trend`.
+            The control corpus for "did something happen": everything rises and
+            nothing happened. Recorded in the corpus stamp, not as an intervention.
+        merchants: Size of the opt-in high-cardinality payer dimension. 0 (the
+            default) means no merchants table and no ``bank_transactions.merchant_id``
+            column at all — an untouched corpus, byte for byte.
+        merchant_exponent: The Zipf exponent that dimension's frequencies follow.
+            Around 1.0 is the empirical law; higher concentrates the head.
         profile: Scale profile name or object (§9). Defaults to ``tiny``.
 
     Returns:
@@ -2259,6 +2936,8 @@ def generate_finance_dataset(
     # Drawn from entity-keyed streams only, NEVER the sequential `rng`, so the
     # ledger cycles below are independent of order volume and a volume lever stays
     # an exact counterfactual. Its GL entries are minted LAST (see below).
+    active_levers = _normalise_levers(lever, levers)
+    drift = trend if isinstance(trend, Trend) else (Trend(**trend) if trend else _NO_TREND)
     customers = generate_customers(seed, scale, fiscal_start, months)
     products = generate_products(seed, scale, fiscal_start, months)
     sales_orders, sales_order_lines = generate_sales_orders(
@@ -2269,7 +2948,8 @@ def generate_finance_dataset(
         months,
         profile=scale,
         q4_seasonal_boost=q4_boost,
-        lever=lever,
+        levers=active_levers,
+        trend=drift,
     )
 
     # ── The scale anchor ──
@@ -2280,10 +2960,10 @@ def generate_finance_dataset(
     # The baseline chain is regenerated only when a lever is active, and it is pure
     # draws — no ledger, no ids — so the common path costs nothing.
     anchor_lines = sales_order_lines
-    if lever is not None:
+    if active_levers:
         _, anchor_lines = generate_sales_orders(
             seed, customers, products, fiscal_start, months,
-            profile=scale, q4_seasonal_boost=q4_boost, lever=None,
+            profile=scale, q4_seasonal_boost=q4_boost, trend=drift,
         )
     opex_budget = _scale_anchor(anchor_lines) * Decimal(str(scale.opex_share_of_contribution))
 
@@ -2338,10 +3018,11 @@ def generate_finance_dataset(
     # in one column — a self-inflicted format-consistency false positive on clean.)
     sale_entries, sale_lines, sale_records, cogs_entry_by_order = _generate_revenue_entries(
         seed, sales_orders, sales_order_lines, customers, products, counters,
-        fiscal_start, lever=lever,
+        fiscal_start,
     )
     receipt_entries, receipt_lines, receipt_bank, receipts = _generate_cash_receipts(
         seed, sale_records, fiscal_start, months, counters,
+        applied=_resolve_levers(active_levers, customers, products),
     )
     ar_invoices = _generate_ar_invoices(
         sale_records, customers, _month_start_end(fiscal_start, months - 1)[1]
@@ -2378,6 +3059,11 @@ def generate_finance_dataset(
     trial_bal = _derive_trial_balance(all_entries, all_lines, fiscal_start, months)
     # Derive balance sheet (carry-forward ending balance, a stock) for BS accounts
     balance_sheet = _derive_balance_sheet(all_entries, all_lines, chart)
+    # The opt-in payer dimension. Attached AFTER the chronological sort so the draw is
+    # keyed by txn_id and not by position — turning it on must not renumber anything.
+    merchant_rows = generate_merchants(seed, merchants) if merchants else []
+    assign_merchants(seed, all_bank, merchant_rows, merchant_exponent)
+
     # Skeleton grain for the stock/flow probe table — empty unless a strategy needs it.
     measure_probes = _generate_measure_probes(months, fiscal_start, probe_series)
     # Skeleton grain for the formula-divergence probe table — same gating.
@@ -2396,6 +3082,7 @@ def generate_finance_dataset(
         invoices=invoices,
         payments=payments,
         bank_transactions=all_bank,
+        merchants=merchant_rows,
         fx_rates=fx_rates,
         trial_balance=trial_bal,
         balance_sheet=balance_sheet,

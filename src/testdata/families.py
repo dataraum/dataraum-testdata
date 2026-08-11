@@ -594,7 +594,36 @@ PROBES = Family(
     optional=True,
 )
 
-FAMILIES: tuple[Family, ...] = (CORE_LEDGER, OPERATING_CHAIN, INVENTORY, PROBES)
+PAYER_DIMENSION = Family(
+    name="payer_dimension",
+    description="A high-cardinality Zipfian payer axis on the bank statement — thousands of merchants, half of them seen once.",
+    tables=("merchants",),
+    primary_keys={"merchants": "merchant_id"},
+    natural_prefixes={"merchant_id": "MRC"},
+    legacy_names={
+        "merchant_id": "MRCH_ID",
+        "merchant_name": "MRCH_NM",
+        "category": "MRCH_CAT",
+        "country": "CTRY",
+    },
+    foreign_keys=(("bank_transactions.merchant_id", "merchants.merchant_id"),),
+    structure=Structure(
+        # A pure reference row: an id, a name and two attributes, no measure. No
+        # `business_concepts` — those key a MEASURE by `table.column`, and this table
+        # has none; a table-keyed entry among them breaks the canonical remap.
+        dimensions=("merchants",),
+    ),
+    optional=True,
+)
+
+FAMILIES: tuple[Family, ...] = (CORE_LEDGER, OPERATING_CHAIN, INVENTORY, PAYER_DIMENSION, PROBES)
+
+# A column that exists only while its optional dimension does. Without this, adding
+# the payer dimension would put an all-null `merchant_id` on every bank_transactions
+# export ever produced — a bytes change for a feature the corpus never asked for.
+OPTIONAL_DIMENSION_COLUMNS: Mapping[str, tuple[str, str]] = {
+    "bank_transactions": ("merchant_id", "merchants"),
+}
 
 
 def all_tables() -> tuple[str, ...]:

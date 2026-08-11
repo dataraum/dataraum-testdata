@@ -42,6 +42,7 @@ def test_each_container_fragment_carries_exactly_its_family() -> None:
         CoreLedgerTables,
         InventoryTables,
         OperatingChainTables,
+        PayerDimensionTables,
         ProbeTables,
     )
 
@@ -49,6 +50,7 @@ def test_each_container_fragment_carries_exactly_its_family() -> None:
         "core_ledger": CoreLedgerTables,
         "operating_chain": OperatingChainTables,
         "inventory": InventoryTables,
+        "payer_dimension": PayerDimensionTables,
         "probes": ProbeTables,
     }
     by_name = {fam.name: fam for fam in FAMILIES}

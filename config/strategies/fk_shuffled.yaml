@@ -1,0 +1,43 @@
+name: fk-shuffled
+level: low
+description: >
+  One referential-integrity defect, in the shape that defeats every check short
+  of asking what the pairing MEANS. No invented ids: the sampled payments trade
+  invoice_ids among themselves, so every FK still resolves, the column's value
+  distribution is bit-for-bit the one it had, and nothing about the column read
+  on its own is wrong. Each payment is simply attached to the wrong invoice.
+
+  `within_col: amount` with `bands: null` swaps only between payments owing the
+  IDENTICAL amount. This matters more than it sounds. In the clean corpus 99.17%
+  of payments settle their invoice to the cent, so a blind shuffle — or even one
+  banded by magnitude — leaves an exact-match failure a detector catches on the
+  amounts without ever looking at the relationship. Under exact-value swapping
+  the amount surface is unchanged: same 99.17% exact-match rate, same mean gap,
+  to the cent. The reconciliation still balances.
+
+  What is left is the relationship and its consequences: the payment now sits
+  against another vendor's invoice, and ~41% of moved payments now carry a date
+  that PRECEDES the invoice they claim to pay. That is the intended signal — a
+  temporal and lineage incoherence that only exists because the pairing is
+  wrong, findable only by reasoning about what the join asserts.
+
+  Because only rows sharing an amount with another row can take part, `ratio`
+  counts against those; the record carries `eligible_rows` as the real
+  denominator. `correct_values` carries the invoice each broken payment should
+  have pointed at, in `target_rows` order, so a repair claim is gradeable and
+  not just a detection claim.
+
+  Counterpart to `fk-repeated-orphan`; control is any strategy carrying the
+  default `distinct_orphan` shape (medium, high).
+
+injections:
+  - injector: break_referential_integrity
+    table: payments
+    consumer_hint: fk_shuffled
+    params:
+      fk_col: invoice_id
+      variant: shuffled
+      within_col: amount
+      bands: null
+      ratio: 0.10
+      severity: high

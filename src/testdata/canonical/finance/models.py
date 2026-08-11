@@ -151,6 +151,10 @@ class BankTransaction(BaseModel):
     counterparty: str
     reconciled: bool = False
     payment_id: str | None = Field(default=None, description="FK to Payment (vendor payments only)")
+    merchant_id: str | None = Field(
+        default=None,
+        description="FK to Merchant — the opt-in payer dimension. Dropped at export when that dimension is off.",
+    )
 
 
 class FXRate(BaseModel):
@@ -456,6 +460,34 @@ class InventoryTables(BaseModel):
     inventory_positions: list[InventoryPosition] = []
 
 
+class Merchant(BaseModel):
+    """One member of the high-cardinality payer dimension.
+
+    Deliberately a thin reference row: what matters about this dimension is not what
+    a merchant IS but how many of them there are and how unevenly they occur.
+    """
+
+    merchant_id: str
+    merchant_name: str
+    category: str
+    country: str
+
+
+class PayerDimensionTables(BaseModel):
+    """`payer_dimension` — the high-cardinality Zipfian axis, opt-in.
+
+    Every dimension the corpus otherwise carries is small and near-uniform: a few
+    hundred customers, a handful of vendors, five product groups. A consumer can top-N
+    those by reading them. This one cannot be read: thousands of members drawn from a
+    power law, so the head is a few percent of the rows, half the members occur once,
+    and "the top 10 merchants" is a question whose answer depends on getting the
+    aggregation right rather than on eyeballing a list. Materialized only when asked
+    for, so no corpus that never wanted it pays a column for it.
+    """
+
+    merchants: list[Merchant] = []
+
+
 class ProbeTables(BaseModel):
     """`probes` — labelled shapes, materialized only when a strategy asks for them."""
 
@@ -468,7 +500,7 @@ class ProbeTables(BaseModel):
     deliveries: list[Delivery] = []
 
 
-class Corpus(CoreLedgerTables, OperatingChainTables, InventoryTables, ProbeTables):
+class Corpus(CoreLedgerTables, OperatingChainTables, InventoryTables, PayerDimensionTables, ProbeTables):
     """One corpus: every family's tables, over one key space and one calendar.
 
     Composed from the family fragments rather than accumulating their fields, so adding

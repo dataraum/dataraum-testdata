@@ -292,17 +292,53 @@ is the one figure we synthesize**, and the corpus must say so.*
   its own refusal fires — a quarantine rule nobody can test is not a rule.
 - Levers: rate (yield, cycle time), capacity (shift structure), timing (batch size).
 
-### S5 · Levers as DGP parameters
+### S5 · Levers as DGP parameters · **shipped**
 
-One lever type exists (`price_level`, Python-API only). The pattern is right and it
-generalizes: a lever is a **DGP parameter**, applied after every RNG draw with no control
-flow branching on values, so a same-seed pair is an *exact* counterfactual, recorded in
-`intervention.yaml`.
+A lever is a **DGP parameter**, applied after every RNG draw with no control flow
+branching on values, so a same-seed pair is an *exact* counterfactual, recorded in
+`intervention.yaml`. Exactness comes from entity-keyed RNG streams; a volume lever
+changes event *counts*, which would diverge a sequential stream.
 
-Complete the typed set — volume, price, mix, rate, timing, capacity, allocation key — one
-per dimension family as it lands, and expose them on the CLI. The exactness constraint is
-already met by entity-keyed RNG streams; a volume lever changes event *counts*, which
-would diverge a sequential stream.
+What exists now, all on the CLI (`--lever`, `--levers` as JSON):
+
+- **Types** — `rate` with a named `driver` (`price`, `frequency`, `collection_lag`) and
+  `mix` (shift a slice's share of order count, holding within-member rates fixed and
+  total volume put). `price_level` and `volume` remain valid as the first two drivers'
+  original names.
+- **Scope** — `segment`, `region`, `customer_id`, `product_group`, `product_id`,
+  intersecting. Membership is decided on entity identity, so a scoped lever is exact
+  for the same reason an unscoped one is. This is what makes "a metric moved — which
+  slice drove it" answerable by construction.
+- **Heterogeneous factors** — `factor` may be a per-member map keyed by one scope
+  dimension. A single aggregate delta is consistent with infinitely many per-member
+  stories; declaring the story is what makes an *attribution* claim gradeable rather
+  than only a detection claim.
+- **Interaction pairs** — several levers in one run. The combined corpus is not the
+  sum of the singles, so the export carries a **measured** `interaction` block built
+  from the generated full factorial (a pair costs three extra corpora, since the
+  full-set one is the run itself). Recorded per annual metric AND per period: a lever
+  that moves timing rather than totals can interact by millions inside the year and
+  read 0.00 at year end, which is exactly what price × payment-terms does.
+
+Still open: capacity and allocation-key levers, which need S3 and the allocation
+object first.
+
+### The control corpus — trend, not event
+
+`--trend-price` / `--trend-volume` drift the firm a few percent a year. Deterministic
+in the month, so it adds no draw and cancels inside a lever pair; recorded in the
+corpus stamp rather than `intervention.yaml`, because there is no activation period
+and nothing to attribute. It is the control for every "what changed in month k"
+question: everything rises and the answer is *nothing*.
+
+### The high-cardinality axis
+
+`--merchants N` adds a Zipfian payer dimension — a `merchants` table and
+`bank_transactions.merchant_id`, with the realised distribution published under
+`dimensions` in `ground_truth.yaml`. Every other dimension the corpus carries is small
+and near-uniform, so top-N over them is answerable by reading the table; this one is
+not. Absent by default, and absent means the table, the column and the truth block do
+not exist rather than existing empty.
 
 ### Cross-cutting · Allocation
 

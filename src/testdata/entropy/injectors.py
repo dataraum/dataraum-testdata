@@ -31,6 +31,7 @@ from .families import (
     stock_flow_events_column,
 )
 from .registry import EntropyInjection, InjectionRegistry
+from .scoping import scope_parameters, slice_rows
 
 
 def _safe_series(name: str, values: list, existing_dtype: pl.DataType) -> pl.Series:
@@ -560,6 +561,9 @@ def mix_units(
     fx_rate: float = 1.1,
     severity: str = "medium",
     unit_col: str | None = None,
+    dataframes: dict[str, pl.DataFrame] | None = None,
+    scope: dict[str, list[str]] | None = None,
+    periods: list[str] | None = None,
 ) -> pl.DataFrame:
     """Mix currencies — convert some values at FX rate, declared or undeclared.
 
@@ -573,12 +577,25 @@ def mix_units(
       economic amounts recorded in another currency, honestly declared). This is the
       shape the cross-unit drill gate must flag, and the data-derived
       ``measured_in.cross_unit`` truth flips True from it.
+
+    ``scope`` and ``periods`` confine it to a slice — the **unit-mix artifact**: a
+    named slice of a named period whose measure is silently scaled by a constant. It
+    is one half of the confusable pair, the other being a price ``rate`` lever on the
+    same slice. The two are meant to be separable only by reasoning about whether the
+    business changed, so this records the analytic effect on the column total
+    (below), which is what lets the pair be tuned to the same apparent magnitude.
     """
     n = len(df)
-    count = max(1, int(n * ratio))
-    indices = rng.sample(range(n), min(count, n))
+    in_scope = (
+        slice_rows(df, table_name, dataframes, scope=scope, periods=periods)
+        if (scope or periods) and dataframes is not None
+        else list(range(n))
+    )
+    count = max(1, int(len(in_scope) * ratio)) if in_scope else 0
+    indices = rng.sample(in_scope, min(count, len(in_scope)))
 
     values = df[col].to_list()
+    original = [float(v) if v is not None else 0.0 for v in values]
     converted: list[int] = []
     for i in indices:
         if values[i] is not None:
@@ -592,6 +609,15 @@ def mix_units(
         for i in converted:
             units[i] = alt_currency
         df = df.with_columns(_safe_series(unit_col, units, df[unit_col].dtype))
+
+    # The analytic effect on the column total. Exact, not estimated: the artifact is
+    # a constant scaling of a known set of rows, so the delta is closed-form. This is
+    # the number the confusable pair is tuned on — ground truth is computed BEFORE
+    # injection by design, so a baseline/injected pair yields no metric delta and
+    # there would otherwise be nothing to match a lever's magnitude against.
+    affected_mass = sum(original[i] for i in converted)
+    column_total = sum(original)
+    delta = affected_mass * (fx_rate - 1.0)
 
     registry.record(
         EntropyInjection(
@@ -608,6 +634,11 @@ def mix_units(
                 "ratio": ratio,
                 "fx_rate": fx_rate,
                 "unit_col": unit_col,
+                **scope_parameters(scope, periods, len(in_scope), n),
+                "affected_mass": round(affected_mass, 2),
+                "column_total_before": round(column_total, 2),
+                "apparent_delta": round(delta, 2),
+                "apparent_delta_pct": round(delta / column_total * 100, 4) if column_total else 0.0,
             },
             severity=severity,
         )
@@ -759,6 +790,86 @@ def corrupt_dates(
     return df
 
 
+_FK_VARIANTS = ("distinct_orphan", "repeated_orphan", "shuffled")
+
+_FK_DETAIL = {
+    "distinct_orphan": "orphaned_foreign_keys",
+    "repeated_orphan": "repeated_orphan_foreign_key",
+    "shuffled": "shuffled_foreign_keys",
+}
+
+
+def _banded_rows(rows: list[int], df: pl.DataFrame, within_col: str | None, bands: int) -> list[list[int]]:
+    """Split rows into ``bands`` groups of similar ``within_col`` magnitude.
+
+    A shuffle confined to a band keeps the swapped rows' amounts comparable, so the
+    amount disagreement it creates is small rather than arbitrary. It does not
+    ELIMINATE that disagreement — for that, see :func:`_exact_groups`.
+    """
+    if within_col is None or bands <= 1:
+        return [rows]
+    values = df[within_col].to_list()
+
+    def magnitude(i: int) -> tuple[int, float]:
+        try:
+            return (0, float(values[i]))
+        except (TypeError, ValueError):  # unparseable sorts last, in its own band
+            return (1, 0.0)
+
+    ordered = sorted(rows, key=magnitude)
+    size = max(1, -(-len(ordered) // bands))  # ceil, so `bands` groups at most
+    return [ordered[i : i + size] for i in range(0, len(ordered), size)]
+
+
+def _exact_groups(
+    df: pl.DataFrame, in_scope: list[int], within_col: str, target: int, rng: random.Random
+) -> tuple[list[list[int]], int]:
+    """Groups of rows sharing an EXACT ``within_col`` value, until ``target`` rows are covered.
+
+    Rows that swap keys with a row owing the identical amount leave every amount
+    agreement intact to the cent — the reconciliation still balances, the payment
+    still equals its invoice, and no numeric check anywhere sees anything. Only the
+    non-numeric consequences of the pairing remain: the payment now sits against
+    another vendor's invoice, on a date that no longer follows from it.
+
+    Whole groups are taken rather than sampled rows, because a sample would mostly
+    land on values that occur once and those rows have nobody to trade with. Returns
+    the taken groups and the ELIGIBLE row count — the real denominator, since only
+    rows with a peer can take part, and a consumer comparing ``ratio`` against the
+    table would otherwise be comparing against the wrong population.
+    """
+    values = df[within_col].to_list()
+    by_value: dict[str, list[int]] = {}
+    for i in in_scope:
+        by_value.setdefault(str(values[i]), []).append(i)
+
+    peers = sorted((rows for rows in by_value.values() if len(rows) > 1), key=lambda rows: rows[0])
+    eligible = sum(len(rows) for rows in peers)
+    rng.shuffle(peers)
+
+    taken: list[list[int]] = []
+    covered = 0
+    for rows in peers:
+        if covered >= target:
+            break
+        taken.append(rows)
+        covered += len(rows)
+    return taken, eligible
+
+
+def _derange(group: list[int], rng: random.Random) -> list[int]:
+    """A random cyclic permutation of ``group`` — no element keeps its position.
+
+    Sattolo's algorithm: guaranteed a derangement in one pass, so every sampled row
+    genuinely receives another row's key rather than rejection-sampling a shuffle.
+    """
+    perm = list(group)
+    for i in range(len(perm) - 1, 0, -1):
+        j = rng.randrange(i)  # strictly below i — this is what makes it cyclic
+        perm[i], perm[j] = perm[j], perm[i]
+    return perm
+
+
 def break_referential_integrity(
     df: pl.DataFrame,
     fk_col: str,
@@ -767,29 +878,130 @@ def break_referential_integrity(
     table_name: str,
     rng: random.Random,
     severity: str = "high",
+    variant: str = "distinct_orphan",
+    within_col: str | None = None,
+    bands: int | None = 4,
+    dataframes: dict[str, pl.DataFrame] | None = None,
+    scope: dict[str, list[str]] | None = None,
+    periods: list[str] | None = None,
 ) -> pl.DataFrame:
-    """Replace FK values with non-existent IDs."""
+    """Break the child→parent relationship, in one of three shapes.
+
+    All three break the same thing — a row points at a parent it should not — but they
+    look different enough on the surface that a detector can pass one and fail the
+    others. The point of having all three is to make "does the FK resolve" the only
+    test that catches every one:
+
+    * ``distinct_orphan`` (default, the original) — each broken row gets its OWN
+      invented id. The orphan values are unique, so they also look like a burst of
+      rare categories, and a cardinality or frequency heuristic catches them without
+      ever joining.
+    * ``repeated_orphan`` — ONE invented id reused across every broken row. Now the
+      orphan is a *common* value, the single most frequent key in the column. Every
+      rare-value heuristic is silent on it and only the join says anything.
+    * ``shuffled`` — no invented ids at all: the sampled rows trade keys among
+      themselves. Every value still exists in the parent, the column's value
+      distribution is untouched, and the FK "resolves" on every row — it just resolves
+      to the wrong parent. Nothing short of checking what the pairing MEANS finds it.
+
+    ``within_col`` decides how much of the amount surface the shuffle disturbs, which
+    matters because shuffling ``payments.invoice_id`` blind also breaks payment↔invoice
+    amount agreement — and then a detector catches it on the amounts, never looking at
+    the relationship at all. The same shortcut in a new coat. Three settings:
+
+    * ``within_col=None`` — free shuffle. Amounts disagree arbitrarily.
+    * ``within_col`` + ``bands=N`` — swap inside a magnitude band. Disagreements are
+      small but present; in a corpus where payments settle their invoices exactly,
+      "small but present" is still an exact-match failure.
+    * ``within_col`` + ``bands=None`` — swap only among rows owing the IDENTICAL
+      amount. Every amount check passes to the cent and the relationship is the one
+      and only thing that is wrong. This is the honest hard case, and ``ratio`` then
+      counts against the rows that HAVE a peer (recorded as ``eligible_rows``), since
+      no other row can take part.
+
+    ``scope``/``periods`` confine the breakage to a named slice, the shape a single
+    bad feed produces. Absent, the whole table is in play and the record is exactly
+    what it always was.
+
+    The shuffled variant reuses values already in the column, so it assumes the column
+    still resolves when it runs — order it before any orphan-injecting spec on the
+    same column, not after.
+    """
+    if variant not in _FK_VARIANTS:
+        raise ValueError(f"unknown variant {variant!r} (supported: {list(_FK_VARIANTS)})")
+
     n = len(df)
-    count = max(1, int(n * ratio))
-    indices = rng.sample(range(n), min(count, n))
+    in_scope = (
+        slice_rows(df, table_name, dataframes, scope=scope, periods=periods)
+        if (scope or periods) and dataframes is not None
+        else list(range(n))
+    )
+    count = max(1, int(len(in_scope) * ratio)) if in_scope else 0
+    indices = rng.sample(in_scope, min(count, len(in_scope)))
 
     values = df[fk_col].to_list()
-    for i in indices:
-        values[i] = f"ORPHAN-{rng.randint(900000, 999999)}"
+    original = list(values)
+    detail: dict[str, object] = {}
+
+    if variant == "distinct_orphan":
+        for i in indices:
+            values[i] = f"ORPHAN-{rng.randint(900000, 999999)}"
+        changed = list(indices)
+    elif variant == "repeated_orphan":
+        orphan = f"ORPHAN-{rng.randint(900000, 999999)}"  # drawn ONCE, that is the point
+        for i in indices:
+            values[i] = orphan
+        changed = list(indices)
+        detail = {"orphan_value": orphan, "distinct_orphans": 1}
+    else:
+        eligible: int | None = None
+        if within_col is not None and bands is None:
+            groups, eligible = _exact_groups(df, in_scope, within_col, count, rng)
+        else:
+            groups = _banded_rows(sorted(indices), df, within_col, bands or 1)
+
+        changed = []
+        for group in groups:
+            if len(group) < 2:  # a lone row has nobody to trade with
+                continue
+            for row, source in zip(group, _derange(group, rng), strict=True):
+                # Deranged POSITIONS still coincide in VALUE when two rows already
+                # pointed at the same parent — those rows are unchanged, so they are
+                # not in the answer key.
+                if original[source] != original[row]:
+                    values[row] = original[source]
+                    changed.append(row)
+        detail = {
+            "within_col": within_col,
+            "grouping": "exact_value" if eligible is not None else ("band" if within_col else "free"),
+            "bands": bands if (within_col and bands) else None,
+            # The defining property, and the reason this variant exists: no heuristic
+            # over the column's own values can see it.
+            "all_values_exist_in_parent": True,
+            "correct_values": [str(original[i]) for i in sorted(changed)],
+        }
+        if eligible is not None:
+            detail["eligible_rows"] = eligible
 
     df = df.with_columns(pl.Series(fk_col, values))
+
+    parameters: dict[str, object] = {"ratio": ratio}
+    if variant != "distinct_orphan":
+        parameters["variant"] = variant
+    parameters.update(detail)
+    parameters.update(scope_parameters(scope, periods, len(in_scope), n))
 
     registry.record(
         EntropyInjection(
             injection_id=registry.next_id("FK"),
             target_file=f"{table_name}.csv",
             target_column=fk_col,
-            target_rows=sorted(indices),
+            target_rows=sorted(changed),
             layer="structural",
             defect="referential_integrity",
-            defect_detail="orphaned_foreign_keys",
+            defect_detail=_FK_DETAIL[variant],
             injection_type="break_referential_integrity",
-            parameters={"ratio": ratio},
+            parameters=parameters,
             severity=severity,
         )
     )
@@ -805,15 +1017,29 @@ def add_duplicate_fk_paths(
     rng: random.Random,
     noise_ratio: float = 0.05,
     severity: str = "medium",
+    dataframes: dict[str, pl.DataFrame] | None = None,
+    scope: dict[str, list[str]] | None = None,
+    periods: list[str] | None = None,
 ) -> pl.DataFrame:
-    """Add a redundant FK column with slight noise."""
+    """Add a redundant FK column with slight noise.
+
+    ``scope``/``periods`` confine the DIVERGENCE, not the column: the second path
+    exists on every row (an alternative join path that appeared on half a table would
+    be a different, more obvious defect), and only in-scope rows disagree with it. So
+    a consumer that picks the wrong path gets a wrong answer for exactly one named
+    slice, which is the shape a metric's lineage actually breaks in.
+    """
     values = df[existing_fk_col].to_list()
     n = len(values)
     new_values = list(values)  # copy
 
-    # Add noise to some values
-    noise_count = max(1, int(n * noise_ratio))
-    noise_indices = rng.sample(range(n), min(noise_count, n))
+    in_scope = (
+        slice_rows(df, table_name, dataframes, scope=scope, periods=periods)
+        if (scope or periods) and dataframes is not None
+        else list(range(n))
+    )
+    noise_count = max(1, int(len(in_scope) * noise_ratio)) if in_scope else 0
+    noise_indices = rng.sample(in_scope, min(noise_count, len(in_scope)))
     for i in noise_indices:
         new_values[i] = f"ALT-{rng.randint(100000, 999999)}"
 
@@ -829,7 +1055,85 @@ def add_duplicate_fk_paths(
             defect="join_paths",
             defect_detail="duplicate_fk_path",
             injection_type="add_duplicate_fk_paths",
-            parameters={"source_col": existing_fk_col, "noise_ratio": noise_ratio},
+            parameters={
+                "source_col": existing_fk_col,
+                "noise_ratio": noise_ratio,
+                **scope_parameters(scope, periods, len(in_scope), n),
+            },
+            severity=severity,
+        )
+    )
+    return df
+
+
+def drop_slice_rows(
+    df: pl.DataFrame,
+    registry: InjectionRegistry,
+    table_name: str,
+    rng: random.Random,
+    dataframes: dict[str, pl.DataFrame] | None = None,
+    scope: dict[str, list[str]] | None = None,
+    periods: list[str] | None = None,
+    ratio: float = 1.0,
+    severity: str = "high",
+) -> pl.DataFrame:
+    """A delivery gap — a slice's rows simply absent for a period.
+
+    The defect a late or failed feed actually produces: not corrupted values but
+    missing ones, with nothing on the row to say so. A metric computed over the
+    period is wrong and internally consistent, which is what makes it hard.
+
+    **This is the one injector that changes the row count, and that changes what its
+    truth record means.** Every other injector mutates a column in place, so
+    ``target_rows`` are positions a consumer can look up in the exported file. Here
+    the rows are gone: positional indices would point at whichever rows shifted up
+    into them, naming innocent rows as the defect. So ``target_rows`` is empty and
+    the record carries ``removed_keys`` — the identifying values that are no longer
+    there — plus the row count before and after. A key survives deletion; an index
+    does not.
+
+    ``ratio`` below 1.0 thins the slice rather than removing it, for the partial-feed
+    case; the default is the whole slice.
+    """
+    n = df.height
+    in_scope = (
+        slice_rows(df, table_name, dataframes, scope=scope, periods=periods)
+        if (scope or periods) and dataframes is not None
+        else list(range(n))
+    )
+    if not in_scope:
+        raise ValueError(f"drop_slice_rows matched no rows in {table_name!r}: nothing to remove")
+
+    count = len(in_scope) if ratio >= 1.0 else max(1, int(len(in_scope) * ratio))
+    removed = sorted(rng.sample(in_scope, min(count, len(in_scope))))
+
+    key_col = df.columns[0]  # the identifying column by table convention
+    removed_keys = [df[key_col][i] for i in removed]
+
+    keep = [i for i in range(n) if i not in set(removed)]
+    df = df[keep]
+
+    registry.record(
+        EntropyInjection(
+            injection_id=registry.next_id("GAP"),
+            target_file=f"{table_name}.csv",
+            target_column=key_col,
+            # Deliberately empty: see the docstring. The rows this names are gone, so
+            # an index would point at an innocent survivor.
+            target_rows=[],
+            layer="structural",
+            defect="completeness",
+            defect_detail="delivery_gap",
+            injection_type="drop_slice_rows",
+            parameters={
+                "key_column": key_col,
+                "removed_keys": [str(k) for k in removed_keys],
+                "removed_count": len(removed),
+                "rows_before": n,
+                "rows_after": df.height,
+                "ratio": ratio,
+                **scope_parameters(scope, periods, len(in_scope), n),
+            },
             severity=severity,
         )
     )

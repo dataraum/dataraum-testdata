@@ -1,0 +1,26 @@
+name: fk-repeated-orphan
+level: low
+description: >
+  One referential-integrity defect, in the shape that defeats counting. Every
+  broken payment points at the SAME invented invoice, so the orphan is not a
+  scatter of rare values but the single most frequent key in the column — a
+  cardinality or rare-category heuristic sees nothing unusual, and only actually
+  joining payments to invoices says anything at all.
+
+  Its counterpart is `fk-shuffled`, and the control is any strategy carrying the
+  default `distinct_orphan` shape (medium, high). A detector that passes all
+  three is testing the relationship; one that passes only the default was
+  counting rare values.
+
+  Deliberately a single-injection strategy: a falsification corpus wants one
+  defect, so a miss names one detector rather than a suspect list.
+
+injections:
+  - injector: break_referential_integrity
+    table: payments
+    consumer_hint: fk_repeated_orphan
+    params:
+      fk_col: invoice_id
+      variant: repeated_orphan
+      ratio: 0.05
+      severity: high

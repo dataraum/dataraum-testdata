@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from pathlib import Path
 
 import yaml
 
-from testdata.families import foreign_keys
+from testdata.families import FAMILIES, foreign_keys
 from testdata.metadata_truth import (
     canonical_metadata_truth,
+    drop_absent_optional_tables,
     export_metadata_truth,
     remap_metadata_truth,
 )
@@ -32,6 +35,20 @@ _PARTIAL_MAPPING = {
 # ---------------------------------------------------------------------------
 # canonical shape
 # ---------------------------------------------------------------------------
+
+
+def _declared_edges(present: Iterable[str]) -> int:
+    """Declared FKs, minus those touching an optional table this corpus does not carry.
+
+    The export prunes claims about tables that are not there — a join to a missing
+    table is a false answer key. So the expected edge count is a function of what
+    shipped, not a constant.
+    """
+    tables = set(present)
+    absent = {t for fam in FAMILIES if fam.optional for t in fam.tables if t not in tables}
+    return sum(
+        1 for src, dst in foreign_keys() if src.partition(".")[0] not in absent and dst.partition(".")[0] not in absent
+    )
 
 
 def test_canonical_has_every_graded_section() -> None:
@@ -290,7 +307,12 @@ def test_run_scenario_emits_metadata_truth(tmp_path: Path) -> None:
     # month-end-close is `full` normalization → canonical, plus the corpus stamp
     # (which says WHICH corpus this structure describes, not what the structure is).
     assert written.pop("corpus")["scenario"] == "month-end-close"
-    assert written == canonical_metadata_truth()
+    # `full` normalization → the canonical shape, minus claims about optional tables
+    # this corpus does not carry. Pruned by the SAME function the export uses, so the
+    # rule lives in one place rather than being restated as an expected diff here.
+    expected = canonical_metadata_truth()
+    drop_absent_optional_tables(expected, (path.stem for path in tmp_path.glob("*.csv")))
+    assert written == expected
 
 
 def test_run_scenario_multi_source_emits_top_level_truth(tmp_path: Path) -> None:
@@ -441,7 +463,7 @@ def test_roleplay_truth_is_data_conditional(tmp_path: Path) -> None:
         "orders.ship_to_addr": "ship_to",
         "deliveries.delivery_addr": "ship_to",
     }
-    assert len(truth["relationships"]) == len(foreign_keys()) + 4
+    assert len(truth["relationships"]) == _declared_edges(_roleplay_frames()) + 4
     roled = {r["from"]: r.get("fk_role") for r in truth["relationships"] if "fk_role" in r}
     assert roled == truth["fk_roles"]
     assert "orders" in truth["table_roles"]["facts"]
@@ -473,7 +495,7 @@ def test_run_scenario_roleplay_end_to_end(tmp_path: Path) -> None:
         assert (out / f"{table}.csv").exists(), table
     truth = yaml.safe_load((out / "metadata_truth.yaml").read_text())
     assert len(truth["fk_roles"]) == 3
-    assert len(truth["relationships"]) == len(foreign_keys()) + 4
+    assert len(truth["relationships"]) == _declared_edges(p.stem for p in out.glob("*.csv")) + 4
     emap = yaml.safe_load((out / "entropy_map.yaml").read_text())
     rolefk = [i for i in emap["injections"] if i["injection_type"] == "inject_role_playing_fks"]
     assert len(rolefk) == 3

@@ -6,6 +6,8 @@ from collections import Counter
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from testdata.canonical.finance.generators import generate_finance_dataset
 from testdata.canonical.finance.models import AccountType, JournalStatus
 
@@ -609,6 +611,328 @@ def test_price_lever_leaves_volume_and_cost_untouched() -> None:
     assert base_cogs == lev_cogs
 
 
+def test_price_lever_moves_the_order_lines_the_ledger_derives_from() -> None:
+    """The lever acts at the draw site, so the lines and the GL move together.
+
+    It used to scale the revenue credit and leave ``sales_order_lines`` at baseline.
+    Two things broke silently: ``operating_revenue`` stopped reconstructing from the
+    lines (the oracle contract pins it as reconstructible to the cent), and every
+    entity-grain metric read IDENTICAL in the levered run and its baseline — so a
+    price lever moved the aggregate and moved nothing at the grain "which slice drove
+    it" is asked at.
+    """
+    from datetime import date
+
+    from testdata.canonical.finance.generators import Lever
+    from testdata.ground_truth import calculate_ground_truth
+
+    base = generate_finance_dataset(seed=7, months=6)
+    lev = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=0, factor=1.2))
+
+    # The lines carry the lever, and the ledger still derives from them.
+    lines_total = sum(line.line_amount for line in lev.sales_order_lines)
+    base_lines = sum(line.line_amount for line in base.sales_order_lines)
+    assert lines_total > base_lines
+    operating_revenue = sum(
+        line.credit - line.debit for line in lev.journal_lines if line.account_id.startswith(("41", "42"))
+    )
+    assert lines_total == operating_revenue
+    assert sum(invoice.amount for invoice in lev.ar_invoices) == operating_revenue
+
+    # `line_amount == units x unit_price` survives the lever: the factor lands on the
+    # unit price and the extension follows, rather than being applied to the total.
+    for line in lev.sales_order_lines:
+        assert line.line_amount == (line.unit_price * line.units).quantize(Decimal("0.01"))
+
+    # Entity grain moves — the property the old placement lost entirely.
+    def db1_by_customer(ds: object) -> dict[str, Decimal]:
+        truth = calculate_ground_truth(ds, fiscal_start=date(2025, 1, 1), months=6)
+        return {c.entity: c.db1 for c in truth.db1_by_customer}
+
+    base_db1, lev_db1 = db1_by_customer(base), db1_by_customer(lev)
+    assert base_db1 and set(base_db1) == set(lev_db1)
+    assert all(lev_db1[k] > base_db1[k] for k in base_db1 if base_db1[k] > 0)
+
+
+# --- Lever scope (A1) ---
+
+
+def test_scoped_price_lever_moves_the_slice_and_nothing_else() -> None:
+    """THE property scope exists for: the aggregate moves, one named slice moved.
+
+    Out-of-scope customers must be byte-identical to their baseline, not merely
+    similar — otherwise "which slice drove it" has no answer key, only a correlation.
+    """
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=7, months=6)
+    lev = generate_finance_dataset(
+        seed=7,
+        months=6,
+        lever=Lever(period_k=0, factor=1.3, scope={"segment": ["Enterprise"]}),
+    )
+
+    segment_of = {c.customer_id: c.segment for c in base.customers}
+    order_segment = {o.order_id: segment_of[o.customer_id] for o in base.sales_orders}
+    base_lines = {line.order_line_id: line for line in base.sales_order_lines}
+    lev_lines = {line.order_line_id: line for line in lev.sales_order_lines}
+    assert set(base_lines) == set(lev_lines), "a price lever adds no orders"
+
+    moved = [lid for lid in base_lines if base_lines[lid].unit_price != lev_lines[lid].unit_price]
+    assert moved, "the scoped slice must actually move"
+    assert {order_segment[base_lines[lid].order_id] for lid in moved} == {"Enterprise"}
+
+    # Every out-of-scope line is byte-identical, not approximately unchanged.
+    for lid, line in base_lines.items():
+        if order_segment[line.order_id] != "Enterprise":
+            assert lev_lines[lid] == line, f"{lid} moved outside the scope"
+
+    # The aggregate moved anyway — that is the confusable part of the question.
+    def revenue(ds: object) -> Decimal:
+        return sum((line.line_amount for line in ds.sales_order_lines), Decimal("0"))
+
+    assert revenue(lev) > revenue(base)
+
+
+def test_scope_dimensions_intersect_rather_than_union() -> None:
+    """`segment + region` is enterprise accounts IN EMEA, not enterprise plus EMEA."""
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=7, months=6)
+    lev = generate_finance_dataset(
+        seed=7,
+        months=6,
+        lever=Lever(period_k=0, factor=1.3, scope={"segment": ["Enterprise"], "region": ["DACH"]}),
+    )
+    by_id = {c.customer_id: c for c in base.customers}
+    order_customer = {o.order_id: by_id[o.customer_id] for o in base.sales_orders}
+    base_lines = {line.order_line_id: line for line in base.sales_order_lines}
+    lev_lines = {line.order_line_id: line for line in lev.sales_order_lines}
+
+    moved = {line.order_id for lid, line in base_lines.items() if lev_lines[lid].unit_price != line.unit_price}
+    assert moved
+    for order_id in moved:
+        customer = order_customer[order_id]
+        assert customer.segment == "Enterprise" and customer.region == "DACH"
+
+
+def test_product_scope_moves_only_its_group() -> None:
+    """A price lever scoped to a product group acts per LINE, not per order.
+
+    Orders mix groups, so scoping at order grain would move lines the intervention
+    never named.
+    """
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=7, months=6)
+    lev = generate_finance_dataset(
+        seed=7,
+        months=6,
+        lever=Lever(period_k=0, factor=1.3, scope={"product_group": ["Instruments"]}),
+    )
+    group_of = {p.product_id: p.product_group for p in base.products}
+    base_lines = {line.order_line_id: line for line in base.sales_order_lines}
+    lev_lines = {line.order_line_id: line for line in lev.sales_order_lines}
+
+    moved = {lid for lid in base_lines if base_lines[lid].unit_price != lev_lines[lid].unit_price}
+    assert moved
+    assert {group_of[base_lines[lid].product_id] for lid in moved} == {"Instruments"}
+
+    # A mixed order proves the per-line grain: same order, one line moved, one did not.
+    by_order: dict[str, set[bool]] = {}
+    for lid, line in base_lines.items():
+        by_order.setdefault(line.order_id, set()).add(lid in moved)
+    assert any(states == {True, False} for states in by_order.values()), "no mixed-group order to prove line grain"
+
+
+def test_scoped_volume_lever_adds_orders_only_inside_the_scope() -> None:
+    """Outside the scope the baseline's orders are not a subset — they are equal."""
+    from testdata.canonical.finance.generators import Lever
+
+    base = generate_finance_dataset(seed=11, months=6)
+    lev = generate_finance_dataset(
+        seed=11,
+        months=6,
+        lever=Lever(period_k=0, factor=1.5, type="volume", scope={"segment": ["SMB"]}),
+    )
+    segment_of = {c.customer_id: c.segment for c in base.customers}
+    base_ids = {o.order_id for o in base.sales_orders}
+    lev_ids = {o.order_id for o in lev.sales_orders}
+
+    assert base_ids < lev_ids, "the scoped slice must gain orders"
+    added = lev_ids - base_ids
+    lev_orders = {o.order_id: o for o in lev.sales_orders}
+    assert {segment_of[lev_orders[oid].customer_id] for oid in added} == {"SMB"}
+
+    # Out-of-scope customers: identical order sets, byte-identical rows.
+    base_orders = {o.order_id: o for o in base.sales_orders}
+    for oid, order in base_orders.items():
+        if segment_of[order.customer_id] != "SMB":
+            assert lev_orders[oid] == order
+
+
+def test_a_volume_lever_refuses_a_product_scope() -> None:
+    """Order count is drawn before any product exists, so the scope is unanswerable.
+
+    Ignoring it would put an intervention.yaml on disk claiming a narrower
+    intervention than the one that ran.
+    """
+    import pytest
+
+    from testdata.canonical.finance.generators import Lever
+
+    with pytest.raises(ValueError, match="cannot scope on"):
+        Lever(period_k=0, factor=1.5, type="volume", scope={"product_group": ["Instruments"]})
+
+    for bad in ({"vertical": ["x"]}, {"segment": []}):
+        with pytest.raises(ValueError):
+            Lever(period_k=0, factor=1.2, scope=bad)
+
+
+def test_an_unscoped_lever_is_unchanged_by_the_scope_machinery() -> None:
+    """The opt-in guarantee: absent scope must reproduce the pre-A1 corpus exactly."""
+    from testdata.canonical.finance.generators import Lever
+
+    plain = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=3, factor=1.2))
+    explicit = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=3, factor=1.2, scope=None))
+    assert plain.sales_order_lines == explicit.sales_order_lines
+    assert plain.journal_lines == explicit.journal_lines
+
+
+# --- The mix lever (A2) and the typed rate lever (A3) ---
+
+
+def _segment_share(ds: object, segment: str, period_k: int) -> tuple[float, int]:
+    """The segment's share of order count from period_k on, and the window's size."""
+    seg = {c.customer_id: c.segment for c in ds.customers}
+    window = [o for o in ds.sales_orders if (o.order_date.year - 2025) * 12 + o.order_date.month - 1 >= period_k]
+    return sum(1 for o in window if seg[o.customer_id] == segment) / len(window), len(window)
+
+
+def test_mix_lever_moves_composition_and_holds_volume() -> None:
+    """A mix lever that moved total volume would be a frequency change mislabelled.
+
+    The complement factor is DERIVED to solve s0*ft + (1-s0)*fc = 1, so the scoped
+    share lands on its target while total order count stays put — which makes any
+    move in an aggregate metric compositional by construction.
+    """
+    from testdata.canonical.finance.generators import Lever
+
+    kw = dict(seed=7, months=12, profile="mid")
+    base = generate_finance_dataset(**kw)
+    lev = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="mix", target_share=0.45, scope={"segment": ["Enterprise"]})
+    )
+
+    base_share, base_n = _segment_share(base, "Enterprise", 6)
+    lev_share, lev_n = _segment_share(lev, "Enterprise", 6)
+
+    assert abs(lev_share - 0.45) < 0.01, f"share landed on {lev_share:.4f}, not the 0.45 target"
+    assert lev_share > base_share
+    assert abs(lev_n / base_n - 1.0) < 0.01, f"total order count moved {lev_n / base_n - 1:+.2%} — not a mix"
+
+    # Pre-period months are untouched on both sides.
+    assert _segment_share(base, "Enterprise", 0)[1] > base_n  # the window really is a subset
+    pre_base = [o for o in base.sales_orders if o.order_date.month <= 6]
+    pre_lev = [o for o in lev.sales_orders if o.order_date.month <= 6]
+    assert {o.order_id for o in pre_base} == {o.order_id for o in pre_lev}
+
+
+def test_mix_lever_holds_within_member_rates_fixed() -> None:
+    """Composition moves; how each member behaves does not.
+
+    If unit prices or order sizes moved too, an aggregate shift could no longer be
+    attributed to composition, and the lever would answer a different question than
+    the one it names.
+    """
+    from testdata.canonical.finance.generators import Lever
+
+    kw = dict(seed=7, months=12, profile="mid")
+    base = generate_finance_dataset(**kw)
+    lev = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="mix", target_share=0.45, scope={"segment": ["Enterprise"]})
+    )
+    base_lines = {line.order_line_id: line for line in base.sales_order_lines}
+    lev_lines = {line.order_line_id: line for line in lev.sales_order_lines}
+
+    shared = set(base_lines) & set(lev_lines)
+    assert shared, "the two runs must share most of their lines"
+    for lid in shared:
+        assert base_lines[lid] == lev_lines[lid], f"{lid} changed under a mix lever"
+
+
+def test_mix_refuses_a_share_it_cannot_shift() -> None:
+    """An empty scope has no share to move, and s1/0 is not a truth to publish."""
+    import pytest
+
+    from testdata.canonical.finance.generators import Lever
+
+    with pytest.raises(ValueError, match="cannot shift a share"):
+        generate_finance_dataset(
+            seed=7,
+            months=6,
+            lever=Lever(period_k=0, type="mix", target_share=0.4, scope={"customer_id": ["CU-NOBODY"]}),
+        )
+    with pytest.raises(ValueError, match="needs a scope"):
+        Lever(period_k=0, type="mix", target_share=0.4)
+    with pytest.raises(ValueError, match="target_share"):
+        Lever(period_k=0, type="mix", target_share=1.5, scope={"segment": ["SMB"]})
+
+
+def test_rate_lever_names_its_driver_and_matches_the_legacy_types() -> None:
+    """`rate`/`price` IS `price_level`; one vocabulary, two spellings, one corpus."""
+    from testdata.canonical.finance.generators import Lever
+
+    legacy = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=2, factor=1.2))
+    typed = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=2, factor=1.2, type="rate", driver="price"))
+    assert legacy.sales_order_lines == typed.sales_order_lines
+
+    legacy_vol = generate_finance_dataset(seed=7, months=6, lever=Lever(period_k=2, factor=1.4, type="volume"))
+    typed_vol = generate_finance_dataset(
+        seed=7, months=6, lever=Lever(period_k=2, factor=1.4, type="rate", driver="frequency")
+    )
+    assert legacy_vol.sales_orders == typed_vol.sales_orders
+
+    import pytest
+
+    with pytest.raises(ValueError, match="needs driver"):
+        Lever(period_k=0, factor=1.2, type="rate")
+    with pytest.raises(ValueError, match="driver is a `rate` field"):
+        Lever(period_k=0, factor=1.2, type="price_level", driver="price")
+
+
+def test_collection_lag_lever_moves_when_cash_lands_not_whether() -> None:
+    """The same sales are collected in both runs; only the dates differ.
+
+    Collection is decided before the lag is drawn, so a lag lever cannot silently
+    change WHICH invoices settle — otherwise a DSO shift would be confounded with a
+    collection-rate shift and neither would be attributable.
+    """
+    from testdata.canonical.finance.generators import Lever
+
+    kw = dict(seed=7, months=12, profile="mid")
+    base = generate_finance_dataset(**kw)
+    lev = generate_finance_dataset(
+        **kw,
+        lever=Lever(period_k=0, factor=2.0, type="rate", driver="collection_lag", scope={"segment": ["Enterprise"]}),
+    )
+
+    base_receipts = {r.ar_invoice_id: r for r in base.receipts}
+    lev_receipts = {r.ar_invoice_id: r for r in lev.receipts}
+    assert set(base_receipts) == set(lev_receipts), "the same invoices collect"
+    assert all(base_receipts[k].amount == lev_receipts[k].amount for k in base_receipts)
+
+    segment_of = {c.customer_id: c.segment for c in base.customers}
+    later = [k for k in base_receipts if lev_receipts[k].receipt_date > base_receipts[k].receipt_date]
+    assert later, "the scoped slice must actually pay later"
+    assert {segment_of[base_receipts[k].customer_id] for k in later} == {"Enterprise"}
+
+    # Out of scope, the receipt date is identical — not merely close.
+    for k, receipt in base_receipts.items():
+        if segment_of[receipt.customer_id] != "Enterprise":
+            assert lev_receipts[k].receipt_date == receipt.receipt_date
+
+
 def test_ar_side_exists_and_reconciles() -> None:
     """The AR half of Capital — the corpus defect DAT-884 names.
 
@@ -660,3 +984,294 @@ def test_ar_due_dates_follow_the_customer_terms() -> None:
     for inv in d.ar_invoices[:200]:
         expected = {"net_30": 30, "net_60": 60, "net_90": 90, "due_on_receipt": 0}[terms_of[inv.customer_id].value]
         assert (inv.due_date - inv.invoice_date).days == expected
+
+
+def _revenue_by_segment(ds):
+    """Order-line revenue per customer segment — the grain attribution is claimed at."""
+    from decimal import Decimal
+
+    segment = {c.customer_id: c.segment for c in ds.customers}
+    customer = {o.order_id: o.customer_id for o in ds.sales_orders}
+    out: dict[str, Decimal] = {}
+    for line in ds.sales_order_lines:
+        seg = segment[customer[line.order_id]]
+        out[seg] = out.get(seg, Decimal("0")) + line.line_amount
+    return out
+
+
+def test_a_per_member_factor_moves_each_member_by_its_own_amount():
+    """The aggregate delta matches no single member's factor — that is the point."""
+    from testdata.canonical.finance.generators import Lever, generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid")
+    scope = {"segment": ["Enterprise", "Mid-Market"]}
+
+    base = generate_finance_dataset(**kw)
+    heterogeneous = generate_finance_dataset(
+        **kw,
+        lever=Lever(
+            period_k=6,
+            type="rate",
+            driver="price",
+            scope=scope,
+            factor={"Enterprise": 1.20, "Mid-Market": 1.05},
+        ),
+    )
+    # The same lever with ONE factor, to show the per-member one is not just a relabel.
+    uniform = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="rate", driver="price", scope=scope, factor=1.20)
+    )
+
+    b, h, u = (_revenue_by_segment(ds) for ds in (base, heterogeneous, uniform))
+    lift = {seg: float(h[seg] / b[seg]) - 1.0 for seg in b}
+
+    # Enterprise carries the full 20% (identical to the uniform run, so the map is
+    # genuinely per-member and not an averaged fudge); Mid-Market carries only 5%.
+    assert lift["Enterprise"] == pytest.approx(float(u["Enterprise"] / b["Enterprise"]) - 1.0, abs=1e-9)
+    # 5%/20% = a quarter of the lift, to within the segments' differing H2 weight.
+    assert lift["Mid-Market"] == pytest.approx(lift["Enterprise"] * 0.25, rel=0.05)
+    assert lift["SMB"] == 0.0, "an unscoped segment is byte-identical to its baseline"
+
+    total = float(sum(h.values()) / sum(b.values())) - 1.0
+    assert min(lift["Mid-Market"], lift["Enterprise"]) < total < lift["Enterprise"], (
+        "the aggregate is the member-weighted mix and matches no single member — so "
+        "recovering the total proves nothing about who drove it"
+    )
+
+
+def test_a_per_member_factor_reaches_frequency_and_collection_too():
+    """Heterogeneity is a property of the factor, not of one driver."""
+    from testdata.canonical.finance.generators import Lever, generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid")
+    scope = {"segment": ["Enterprise", "Mid-Market"]}
+    factor = {"Enterprise": 1.5, "Mid-Market": 1.1}
+
+    base = generate_finance_dataset(**kw)
+    segment = {c.customer_id: c.segment for c in base.customers}
+
+    volume = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="rate", driver="frequency", scope=scope, factor=factor)
+    )
+
+    def late_orders(ds):
+        counts: dict[str, int] = {}
+        for order in ds.sales_orders:
+            if order.order_date.month > 6:
+                seg = segment[order.customer_id]
+                counts[seg] = counts.get(seg, 0) + 1
+        return counts
+
+    b, v = late_orders(base), late_orders(volume)
+    assert v["Enterprise"] / b["Enterprise"] == pytest.approx(1.5, rel=0.05)
+    assert v["Mid-Market"] / b["Mid-Market"] == pytest.approx(1.1, rel=0.05)
+    assert v["SMB"] == b["SMB"]
+
+    lag = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="rate", driver="collection_lag", scope=scope, factor=factor)
+    )
+
+    def mean_lag(ds):
+        sale_date = {}
+        for order in ds.sales_orders:
+            sale_date[order.order_id] = order.order_date
+        by_seg: dict[str, list[int]] = {}
+        for inv in ds.ar_invoices:
+            pass
+        return by_seg
+
+    # Receipts carry the customer directly, so the lag shift is readable per segment.
+    def mean_days(ds):
+        order_date = {o.order_id: o.order_date for o in ds.sales_orders}
+        due = {i.ar_invoice_id: order_date.get(i.order_id) for i in ds.ar_invoices}
+        buckets: dict[str, list[int]] = {}
+        for r in ds.receipts:
+            start = due.get(r.ar_invoice_id)
+            if start is None or start.month <= 6:
+                continue
+            buckets.setdefault(segment[r.customer_id], []).append((r.receipt_date - start).days)
+        return {seg: sum(days) / len(days) for seg, days in buckets.items()}
+
+    b_days, l_days = mean_days(base), mean_days(lag)
+    # Clamped at the fiscal end, so the realised shift is BELOW the factor — the
+    # caveat intervention.yaml states. The ordering is what must hold.
+    assert 1.0 < l_days["Mid-Market"] / b_days["Mid-Market"] < l_days["Enterprise"] / b_days["Enterprise"]
+    assert l_days["SMB"] == b_days["SMB"]
+
+
+def test_a_factor_map_must_name_exactly_one_scope_dimension():
+    """The map's keys ARE a dimension's scope, so disagreement is a refusal."""
+    from testdata.canonical.finance.generators import Lever
+
+    ok = Lever(
+        period_k=6,
+        type="rate",
+        driver="price",
+        scope={"segment": ["Enterprise", "Mid-Market"]},
+        factor={"Enterprise": 1.2, "Mid-Market": 1.05},
+    )
+    assert ok.factor_dimension == "segment"
+
+    with pytest.raises(ValueError, match="needs a scope"):
+        Lever(period_k=6, type="rate", driver="price", factor={"Enterprise": 1.2})
+
+    with pytest.raises(ValueError, match="exactly one scope dimension"):
+        Lever(
+            period_k=6,
+            type="rate",
+            driver="price",
+            scope={"segment": ["Enterprise", "Mid-Market"]},
+            factor={"Enterprise": 1.2},  # omits a scoped member
+        )
+
+    with pytest.raises(ValueError, match="exactly one scope dimension"):
+        Lever(
+            period_k=6,
+            type="rate",
+            driver="price",
+            scope={"segment": ["Enterprise"]},
+            factor={"Enterprise": 1.2, "Mid-Market": 1.05},  # names one outside the scope
+        )
+
+    with pytest.raises(ValueError, match="non-positive"):
+        Lever(
+            period_k=6,
+            type="rate",
+            driver="price",
+            scope={"segment": ["Enterprise", "Mid-Market"]},
+            factor={"Enterprise": 1.2, "Mid-Market": 0.0},
+        )
+
+    with pytest.raises(ValueError, match="takes no factor at all"):
+        Lever(
+            period_k=6,
+            type="mix",
+            target_share=0.4,
+            scope={"segment": ["Enterprise"]},
+            factor={"Enterprise": 1.2},
+        )
+
+
+def test_a_scalar_factor_is_untouched_by_the_per_member_machinery():
+    """Opt-in only: the scalar path must be the one that predates the map."""
+    from testdata.canonical.finance.generators import Lever, generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid")
+    scope = {"segment": ["Enterprise"]}
+    scalar = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="rate", driver="price", scope=scope, factor=1.15)
+    )
+    as_map = generate_finance_dataset(
+        **kw, lever=Lever(period_k=6, type="rate", driver="price", scope=scope, factor={"Enterprise": 1.15})
+    )
+    # A one-member map is the scalar lever spelled differently, and must produce the
+    # identical corpus — otherwise the two spellings are two DGPs.
+    assert [line.line_amount for line in scalar.sales_order_lines] == [
+        line.line_amount for line in as_map.sales_order_lines
+    ]
+
+
+def test_a_trend_is_drift_not_an_event():
+    """The control corpus: everything rises and nothing happened."""
+    from testdata.canonical.finance.generators import generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid")
+    base = generate_finance_dataset(**kw)
+    drifted = generate_finance_dataset(**kw, trend={"price": 0.06, "volume": 0.12})
+
+    def revenue_by_month(ds):
+        when = {o.order_id: o.order_date.month for o in ds.sales_orders}
+        out: dict[int, Decimal] = {}
+        for line in ds.sales_order_lines:
+            m = when[line.order_id]
+            out[m] = out.get(m, Decimal("0")) + line.line_amount
+        return out
+
+    b, d = revenue_by_month(base), revenue_by_month(drifted)
+    lift = {m: float(d[m] / b[m]) for m in sorted(b)}
+
+    # Month 0 is undrifted by construction — the drift accumulates, it does not start.
+    assert lift[1] == 1.0
+    # And it compounds: the year-end lift is the two annual rates, near enough that
+    # seasonality and order-size noise are the only slack.
+    assert lift[12] == pytest.approx(1.06 ** (11 / 12) * 1.12 ** (11 / 12), rel=0.05)
+    # No step, anywhere. A consumer looking for "what changed in month k" must find
+    # nothing, which is the entire point of having this corpus.
+    steps = [lift[m + 1] / lift[m] for m in range(2, 12)]
+    assert max(steps) / min(steps) < 1.15, f"a trend must not look like an event: {steps}"
+
+
+def test_a_trend_cancels_in_a_lever_pair():
+    """Drift is a property of the corpus, so it must not disturb a counterfactual."""
+    from testdata.canonical.finance.generators import Lever, generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid", trend={"price": 0.04})
+    lever = Lever(period_k=6, type="rate", driver="price", scope={"segment": ["Enterprise"]}, factor=1.2)
+
+    base = generate_finance_dataset(**kw)
+    levered = generate_finance_dataset(**kw, lever=lever)
+
+    segment = {c.customer_id: c.segment for c in base.customers}
+    owner = {o.order_id: o.customer_id for o in base.sales_orders}
+
+    def revenue(ds, seg, second_half):
+        when = {o.order_id: o.order_date.month for o in ds.sales_orders}
+        return sum(
+            line.line_amount
+            for line in ds.sales_order_lines
+            if segment[owner[line.order_id]] == seg and (when[line.order_id] > 6) == second_half
+        )
+
+    # The lever's effect is exactly its factor on top of whatever the trend did —
+    # both runs carry the identical drift, so it divides out.
+    assert float(revenue(levered, "Enterprise", True) / revenue(base, "Enterprise", True)) == pytest.approx(
+        1.2, rel=1e-3
+    )
+    assert revenue(levered, "Enterprise", False) == revenue(base, "Enterprise", False)
+    assert revenue(levered, "SMB", True) == revenue(base, "SMB", True)
+
+
+def test_the_payer_dimension_is_zipfian_and_opt_in():
+    """High cardinality with a real head and a real tail — and absent by default."""
+    from collections import Counter
+
+    from testdata.canonical.finance.generators import generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid")
+    plain = generate_finance_dataset(**kw)
+    assert plain.merchants == []
+    assert all(txn.merchant_id is None for txn in plain.bank_transactions)
+
+    zipfian = generate_finance_dataset(**kw, merchants=4000)
+    assert len(zipfian.merchants) == 4000
+    counts = Counter(txn.merchant_id for txn in zipfian.bank_transactions)
+    total = sum(counts.values())
+    ranked = counts.most_common()
+
+    # Cardinality the corpus has nowhere else: the flat `counterparty` axis holds a
+    # few hundred members with no head worth the name.
+    flat = Counter(txn.counterparty for txn in plain.bank_transactions)
+    assert len(counts) > 4 * len(flat)
+
+    # A genuine power law, not merely a big dimension: a head that carries real mass,
+    # and a tail the sample never fully reaches.
+    assert ranked[0][1] / total > 0.05, "the top member alone is several percent"
+    assert sum(c for _, c in ranked[:10]) / total > 0.30
+    assert sum(1 for c in counts.values() if c == 1) > 0.25 * len(counts)
+    assert len(counts) < 4000, "a power-law sample does not reach every member"
+
+    # Rank is not id order — a head readable off the key is not an aggregation test.
+    assert ranked[0][0] != zipfian.merchants[0].merchant_id
+
+
+def test_turning_the_payer_dimension_on_does_not_move_anything_else():
+    """Opt-in means opt-in: the ledger is the same corpus, merchants or not."""
+    from testdata.canonical.finance.generators import generate_finance_dataset
+
+    kw = dict(seed=7, months=12, profile="mid")
+    plain = generate_finance_dataset(**kw)
+    zipfian = generate_finance_dataset(**kw, merchants=2000)
+
+    assert [line.debit for line in plain.journal_lines] == [line.debit for line in zipfian.journal_lines]
+    assert [txn.amount for txn in plain.bank_transactions] == [txn.amount for txn in zipfian.bank_transactions]
+    assert [o.order_id for o in plain.sales_orders] == [o.order_id for o in zipfian.sales_orders]

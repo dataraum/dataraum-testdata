@@ -11,6 +11,7 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import yaml
 
 from testdata.families import FAMILIES, default_families
@@ -202,3 +203,149 @@ def test_intervention_names_its_counterfactual() -> None:
         assert record["corpus"]["lever"] == lever
         assert record["counterfactual_corpus_id"] == baseline_stamp["id"]
         assert record["corpus"]["id"] != baseline_stamp["id"]
+
+
+def test_a_lever_set_nests_and_leaves_the_single_lever_digest_alone() -> None:
+    """Opt-in only: `levers` must not change what an existing run hashes to."""
+    lever = {"type": "price_level", "period_k": 1, "factor": 1.2}
+    single = _identity(lever=lever)
+
+    # One lever passed as a list is the SAME corpus — same payload, same digest.
+    assert _identity(lever=dict(lever)).corpus_id == single.corpus_id
+    assert single.lever == lever, "a single lever still serialises as the flat spec dict"
+
+    pair = _identity(lever={"levers": [lever, {"type": "volume", "period_k": 1, "factor": 1.3}]})
+    assert pair.corpus_id != single.corpus_id
+    assert pair.baseline().corpus_id == _identity().corpus_id, "the baseline is still the unlevered run"
+    assert "levers=" in pair.describe()
+
+
+def test_the_interaction_record_is_measured_not_predicted() -> None:
+    """Two levers are not two facts — the pair's truth is its non-additivity."""
+    import pytest
+
+    scope = {"segment": ["Enterprise"]}
+    price = {"type": "rate", "driver": "price", "period_k": 1, "scope": scope, "factor": 1.2}
+    terms = {"type": "rate", "driver": "collection_lag", "period_k": 1, "scope": scope, "factor": 2.0}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "pair"
+        run = run_scenario(
+            "month-end-close",
+            strategy_name="clean",
+            seed=3,
+            months=6,
+            output_dir=out,
+            levers=[price, terms],
+        )
+        record = yaml.safe_load((out / "intervention.yaml").read_text())
+
+        # A lever set gets one record EACH, in the same shape a single lever gets.
+        assert "intervention" not in record
+        assert [r["driver"] for r in record["interventions"]] == ["price", "collection_lag"]
+
+        inter = record["interaction"]
+        assert [lever["label"] for lever in inter["levers"]] == ["A", "B"]
+        # The full-set corpus IS this run, so its id must be this run's own.
+        assert inter["corpus_ids"]["A+B"] == run["identity"].corpus_id
+        assert inter["corpus_ids"]["baseline"] == run["identity"].baseline().corpus_id
+
+        # Every annual entry is internally consistent: interaction is exactly the
+        # error a main-effects model makes.
+        for name, m in inter["metrics"].items():
+            assert m["additive_prediction"] == pytest.approx(m["A"] + m["B"], abs=0.02), name
+            assert m["interaction"] == pytest.approx(m["A+B"] - m["additive_prediction"], abs=0.02), name
+
+        # A payment-terms lever moves WHEN cash lands, and a receipt is clamped to the
+        # fiscal end — so the interaction is real inside the year and gone by year end.
+        # Recording only the annual block would publish 0.00 for a pair that interacts.
+        assert inter["metrics"]["ending_ar_balance"]["interaction"] == 0.0
+        ar = inter["monthly"]["ar_balance"]
+        assert abs(ar["peak_interaction"]) > 1000.0
+        assert ar["interaction"][-1] == 0.0, "the clamp closes the gap by fiscal end"
+        assert ar["interaction"][0] == 0.0, "nothing moves before period_k"
+
+
+def test_a_lever_set_refuses_the_combinations_that_would_lie() -> None:
+    import pytest
+
+    from testdata.canonical.finance.generators import generate_finance_dataset
+
+    price = {"type": "rate", "driver": "price", "period_k": 1, "factor": 1.2}
+    with pytest.raises(ValueError, match="not both"):
+        run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, lever=price, levers=[price])
+
+    from testdata.canonical.finance.generators import Lever
+
+    mix = Lever(period_k=1, type="mix", target_share=0.4, scope={"segment": ["Enterprise"]})
+    with pytest.raises(ValueError, match="cannot share a run"):
+        generate_finance_dataset(seed=3, months=3, levers=[mix, Lever(period_k=1, factor=1.2)])
+
+
+def test_new_parameters_are_absent_from_the_digest_until_they_are_used() -> None:
+    """A corpus id that moves without the bytes moving is worse than no id."""
+    plain = _identity()
+    assert "trend" not in plain.as_dict(), "an unused parameter is not a null field"
+    assert "merchants" not in plain.as_dict()
+
+    trended = _identity(trend={"price": 0.03})
+    zipfian = _identity(merchants=4000)
+    assert trended.corpus_id != plain.corpus_id
+    assert zipfian.corpus_id != plain.corpus_id
+    assert trended.corpus_id != zipfian.corpus_id
+    assert trended.as_dict()["trend"] == {"price": 0.03}
+
+    # Explicitly-empty is the same corpus as never-asked: nothing was done either way.
+    assert _identity(trend={}).corpus_id == plain.corpus_id
+    assert _identity(merchants=0).corpus_id == plain.corpus_id
+
+
+def test_the_payer_dimension_exists_only_where_it_was_asked_for() -> None:
+    """Its table and its FK column both appear with it, and neither without it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        plain, zipfian = Path(tmp) / "plain", Path(tmp) / "zipf"
+        run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=plain)
+        run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=zipfian, merchants=800)
+
+        def columns(directory: Path) -> list[str]:
+            return (directory / "bank_transactions.csv").read_text().splitlines()[0].split(",")
+
+        assert not (plain / "merchants.csv").exists()
+        assert "merchant_id" not in columns(plain)
+        assert (zipfian / "merchants.csv").exists()
+        assert "merchant_id" in columns(zipfian)
+
+        # The distribution is published where a consumer looks for what is true, and
+        # only when there IS a distribution to publish.
+        assert "dimensions" not in yaml.safe_load((plain / "ground_truth.yaml").read_text())
+        profile = yaml.safe_load((zipfian / "ground_truth.yaml").read_text())["dimensions"][0]
+        assert profile["law"] == "zipf"
+        assert profile["pool_size"] == 800
+        assert profile["distinct_observed"] < profile["pool_size"]
+        # `head` IS the answer to a top-N query, in the order the query returns.
+        assert [row["rows"] for row in profile["head"]] == sorted(
+            (row["rows"] for row in profile["head"]), reverse=True
+        )
+        assert profile["coverage"]["10"] == pytest.approx(sum(row["share"] for row in profile["head"][:10]), abs=1e-4)
+
+
+def test_structural_truth_does_not_claim_a_dimension_the_corpus_lacks() -> None:
+    """An optional family's declaration is true only where its tables exist."""
+    with tempfile.TemporaryDirectory() as tmp:
+        plain, zipfian = Path(tmp) / "plain", Path(tmp) / "zipf"
+        run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=plain)
+        run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=zipfian, merchants=600)
+
+        without = yaml.safe_load((plain / "metadata_truth.yaml").read_text())
+        with_it = yaml.safe_load((zipfian / "metadata_truth.yaml").read_text())
+
+        assert "merchants" not in without["table_roles"]["dimensions"]
+        assert "merchants" in with_it["table_roles"]["dimensions"]
+
+        def merchant_edges(truth):
+            return [
+                rel for rel in truth["relationships"] if "merchant" in str(rel["from"]) or "merchant" in str(rel["to"])
+            ]
+
+        assert merchant_edges(without) == [], "a join to a table that is not there is a false claim"
+        assert len(merchant_edges(with_it)) == 1

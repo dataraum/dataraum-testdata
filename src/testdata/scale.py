@@ -348,6 +348,43 @@ def supplier_names(count: int) -> list[str]:
     return [_compose(i, _SUPPLIER_STEMS, _SUPPLIER_SUFFIXES) for i in range(count)]
 
 
+_MERCHANT_STEMS = [
+    "Bluebird", "Northgate", "Silverline", "Redwood", "Harbourview", "Ironwood",
+    "Copperfield", "Lakeside", "Kingsway", "Greenfield", "Stonebridge", "Fairmont",
+    "Windmere", "Ashford", "Brightwater", "Camden", "Dunmore", "Everly",
+    "Fenwick", "Glenmore", "Hollis", "Inverness", "Juniper", "Kelvin",
+]
+_MERCHANT_TRADES = [
+    "Catering", "Print", "Logistics", "Hardware", "Software", "Travel", "Facilities",
+    "Legal", "Media", "Security", "Cleaning", "Training", "Analytics", "Freight",
+    "Stationery", "Hospitality", "Recruitment", "Translation", "Fuel", "Utilities",
+]
+_MERCHANT_FORMS = ["Ltd", "GmbH", "BV", "SAS", "AB", "Oy", "AG", "SpA", "Inc", "LLC"]
+
+MERCHANT_CATEGORIES = tuple(_MERCHANT_TRADES)
+MERCHANT_COUNTRIES = ("DE", "AT", "CH", "NL", "FR", "GB", "US", "SE", "PL", "ES")
+
+
+def merchant_names(count: int) -> list[str]:
+    """``count`` distinct merchant names, stable for a given index.
+
+    A three-part composition rather than the two-part one the customer and supplier
+    pools use: those need hundreds of names, this needs thousands, and cycling a
+    numeric suffix that far produces "Acme Corp 47", which reads as an id in a name
+    column and hands a consumer the ordering it was supposed to discover.
+    """
+    stems, trades, forms = len(_MERCHANT_STEMS), len(_MERCHANT_TRADES), len(_MERCHANT_FORMS)
+    names = []
+    for i in range(count):
+        stem = _MERCHANT_STEMS[i % stems]
+        trade = _MERCHANT_TRADES[(i // stems) % trades]
+        form = _MERCHANT_FORMS[(i // (stems * trades)) % forms]
+        cycle = i // (stems * trades * forms)
+        name = f"{stem} {trade} {form}"
+        names.append(name if cycle == 0 else f"{name} {cycle + 1}")
+    return names
+
+
 @dataclass(frozen=True)
 class CatalogEntry:
     """One catalogue line: what it is, what it costs, and what it is meant to earn."""

@@ -11,6 +11,7 @@ import polars as pl
 import yaml
 
 from testdata.canonical.finance.models import Corpus
+from testdata.families import OPTIONAL_DIMENSION_COLUMNS
 from testdata.identity import CorpusIdentity
 
 
@@ -45,7 +46,18 @@ def dataset_to_dataframes(dataset: Corpus) -> dict[str, pl.DataFrame]:
             continue
 
         rows = [{k: _serialize_value(v) for k, v in rec.model_dump().items()} for rec in records]
-        result[table_name] = pl.DataFrame(rows)
+        frame = pl.DataFrame(rows)
+
+        # A column belonging to an optional dimension is dropped when that dimension
+        # is absent — see OPTIONAL_DIMENSION_COLUMNS. The alternative is every corpus
+        # carrying an all-null FK to a table it does not have.
+        optional = OPTIONAL_DIMENSION_COLUMNS.get(table_name)
+        if optional is not None:
+            column, dimension = optional
+            if not getattr(dataset, dimension, None) and column in frame.columns:
+                frame = frame.drop(column)
+
+        result[table_name] = frame
 
     return result
 

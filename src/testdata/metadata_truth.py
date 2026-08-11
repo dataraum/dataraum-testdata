@@ -56,7 +56,7 @@ must abstain; asserting a hierarchy over them is the characteristic wide-data er
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from testdata.families import (
+    FAMILIES,
     business_concepts,
     cycles,
     degenerate_ids,
@@ -793,6 +794,28 @@ _HEADER = (
 )
 
 
+def drop_absent_optional_tables(truth: dict[str, Any], present: Iterable[str]) -> None:
+    """Strip claims about optional tables this corpus does not carry.
+
+    An optional family declares what its tables MEAN, and that declaration is true
+    whenever they exist. Publishing it unconditionally makes the truth file assert
+    that a corpus has a dimension it does not have — a false answer key, which is
+    worse than a missing one. So the declaration is filtered against the frames that
+    actually shipped, the same way the role-play and cross-unit blocks already are.
+    """
+    tables = set(present)
+    absent = {table for fam in FAMILIES if fam.optional for table in fam.tables if table not in tables}
+    if not absent:
+        return
+    for role, tables in truth["table_roles"].items():
+        truth["table_roles"][role] = [t for t in tables if t not in absent]
+    truth["relationships"] = [
+        rel
+        for rel in truth["relationships"]
+        if str(rel["from"]).partition(".")[0] not in absent and str(rel["to"]).partition(".")[0] not in absent
+    ]
+
+
 def export_metadata_truth(
     output_dir: Path,
     *,
@@ -836,6 +859,7 @@ def export_metadata_truth(
         _apply_relationship_assertability(truth, dataframes)
         # role-play shape truth: emitted only when the frames carry it
         _apply_roleplay_truth(truth, dataframes)
+        drop_absent_optional_tables(truth, dataframes)
     if identity is not None:
         truth = {"corpus": identity.as_dict(), **truth}
     with open(output_dir / "metadata_truth.yaml", "w") as f:

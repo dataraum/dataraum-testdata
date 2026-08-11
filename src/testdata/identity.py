@@ -67,6 +67,8 @@ class CorpusIdentity:
     profile: str = DEFAULT_PROFILE
     normalization: str = "full"
     lever: Mapping[str, Any] | None = None
+    trend: Mapping[str, float] | None = None
+    merchants: int = 0
     families: tuple[str, ...] = field(default_factory=default_families)
     generator: str = GENERATOR
     version: str = field(default_factory=generator_version)
@@ -91,15 +93,29 @@ class CorpusIdentity:
 
     def describe(self) -> str:
         """One line, for a terminal."""
-        lever = f" lever={self.lever['type']}" if self.lever else ""
+        # A lever set nests under the same key rather than adding a top-level field,
+        # so an unlevered run's digest is untouched — see the runner's _lever_payload.
+        if not self.lever:
+            lever = ""
+        elif "levers" in self.lever:
+            lever = f" levers={'+'.join(str(spec.get('type')) for spec in self.lever['levers'])}"
+        else:
+            lever = f" lever={self.lever['type']}"
         return (
             f"{self.generator} {self.version} · {self.scenario}/{self.strategy} · "
             f"seed {self.seed} · {self.months}mo · {self.profile}/{self.normalization}{lever} · #{self.corpus_id}"
         )
 
     def _payload(self) -> dict[str, Any]:
-        """The digest's input. Field order here is display order in the YAML."""
-        return {
+        """The digest's input. Field order here is display order in the YAML.
+
+        A trend, and the payer dimension's size, appear only when there IS one. A
+        field always present with a null value would change every existing corpus's
+        digest the day it was added, and an id that moves without the bytes moving is
+        worse than no id: every cached corpus and every pinned reference silently
+        stops matching. New parameters earn their place in the digest by being used.
+        """
+        payload = {
             "generator": self.generator,
             "version": self.version,
             "scenario": self.scenario,
@@ -112,3 +128,8 @@ class CorpusIdentity:
             "families": list(self.families),
             "lever": dict(self.lever) if self.lever is not None else None,
         }
+        if self.trend:
+            payload["trend"] = dict(self.trend)
+        if self.merchants:
+            payload["merchants"] = self.merchants
+        return payload
