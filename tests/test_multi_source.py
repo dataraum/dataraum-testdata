@@ -12,6 +12,11 @@ from testdata.families import default_tables
 from testdata.scenarios.multi_system_recon import run_scenario
 
 
+def _truth(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 def test_multi_source_returns_all_tables():
     """run_scenario returns every non-optional table in the dataframes dict."""
     result = run_scenario(strategy_name="clean", seed=42, months=3)
@@ -94,7 +99,7 @@ def test_multi_source_has_ground_truth():
         output = Path(tmpdir) / "output"
         run_scenario(strategy_name="clean", seed=42, months=3, output_dir=output)
 
-        assert (output / "ground_truth.yaml").exists()
+        assert (_truth(output) / "ground_truth.yaml").exists()
 
 
 def test_multi_source_each_source_has_manifest():

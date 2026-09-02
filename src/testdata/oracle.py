@@ -129,7 +129,7 @@ METRICS: tuple[Metric, ...] = (
         unit="currency",
         kind="flow",
         grains=("month", "year", "customer", "product_group"),
-        definition="sum(journal_lines.credit) over accounts 4*, posted entries only",
+        definition="sum(journal_lines.credit - journal_lines.debit) over accounts 4*, posted entries only — corrections post as debits on the same accounts, so gross credits overstate",
         scope=(
             "All revenue accounts: 41xx product, 42xx service, 43xx other income. "
             f"{_ENTITY_DERIVATION} Entity values are sum(sales_order_lines.line_amount), "
@@ -140,7 +140,7 @@ METRICS: tuple[Metric, ...] = (
             Variant(
                 id="operating_revenue",
                 title="Operating revenue (product + service)",
-                definition="sum(journal_lines.credit) over accounts 41* and 42*",
+                definition="sum(journal_lines.credit - journal_lines.debit) over accounts 41* and 42*",
                 rationale=(
                     "Excludes 43xx other income (interest, FX). This is the figure the "
                     "order lines reconstruct to the cent, so it is the denominator a "
@@ -156,7 +156,7 @@ METRICS: tuple[Metric, ...] = (
         unit="currency",
         kind="flow",
         grains=("month", "year", "customer", "product_group"),
-        definition="sum(journal_lines.debit) over account 5100, posted entries only",
+        definition="sum(journal_lines.debit - journal_lines.credit) over account 5100, posted entries only",
         scope=(
             "5100 carries cost of sale ONLY — vendor purchases post to their own expense "
             "accounts, which is what made purchases separable from COGS. "
@@ -171,7 +171,7 @@ METRICS: tuple[Metric, ...] = (
         unit="currency",
         kind="flow",
         grains=("month", "year"),
-        definition="sum(journal_lines.debit) over accounts 5*, posted entries only",
+        definition="sum(journal_lines.debit - journal_lines.credit) over accounts 5*, posted entries only",
         scope="Every expense account, cost of sale included.",
         variants=(
             Variant(

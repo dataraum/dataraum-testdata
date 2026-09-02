@@ -9,6 +9,11 @@ from testdata.families import default_tables
 from testdata.scenarios.month_end_close import run_scenario
 
 
+def _truth(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 def test_clean_scenario_no_injections():
     """Clean strategy produces data with zero injections."""
     result = run_scenario(strategy_name="clean", seed=42, months=6)
@@ -39,7 +44,7 @@ def test_export_creates_files():
         run_scenario(strategy_name="medium", seed=42, months=6, output_dir=output)
 
         assert (output / "manifest.yaml").exists()
-        assert (output / "entropy_map.yaml").exists()
+        assert (_truth(output) / "entropy_map.yaml").exists()
         assert (output / "journal_lines.csv").exists()
         assert (output / "invoices.csv").exists()
         assert (output / "bank_transactions.csv").exists()
@@ -52,7 +57,7 @@ def test_export_creates_files():
         assert len(manifest["files"]) == len(default_tables())
 
         # Verify entropy map has injections
-        with open(output / "entropy_map.yaml") as f:
+        with open(_truth(output) / "entropy_map.yaml") as f:
             emap = yaml.safe_load(f)
         assert emap["total_injections"] > 0
         assert len(emap["injections"]) == emap["total_injections"]
@@ -111,7 +116,7 @@ def test_events_backed_stockflow_strategy_emits_probe_events():
         assert (output / "probe_events.csv").exists()
         assert (output / "measure_probes.csv").exists()
 
-        with open(output / "entropy_map.yaml") as f:
+        with open(_truth(output) / "entropy_map.yaml") as f:
             emap = yaml.safe_load(f)
         stockflow = [
             inj["parameters"] for inj in emap["injections"] if inj["injection_type"] == "inject_stock_flow_probes"
@@ -164,7 +169,7 @@ def test_relationship_probe_strategy_dispatch(tmp_path: Path):
 
     # The exported ground truth carries the pair-level labels the rig reads.
     assert (output / "ref_entities.csv").exists() and (output / "ref_activity.csv").exists()
-    with open(output / "entropy_map.yaml") as f:
+    with open(_truth(output) / "entropy_map.yaml") as f:
         emap = yaml.safe_load(f)
     pairs = [i for i in emap["injections"] if i["injection_type"] == "inject_relationship_pairs"]
     assert len(pairs) == len(records)

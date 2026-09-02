@@ -24,6 +24,11 @@ def _identity(**overrides: object) -> CorpusIdentity:
     return replace(base, **overrides)  # type: ignore[arg-type]
 
 
+def _truth(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 def test_the_digest_is_recomputable_from_the_published_fields() -> None:
     """Nothing feeds the digest that the stamp does not publish.
 
@@ -120,9 +125,10 @@ def test_every_output_file_carries_the_same_stamp() -> None:
         output = Path(tmp) / "out"
         result = run_scenario("month-end-close", strategy_name="medium", seed=7, months=3, output_dir=output)
 
-        stamps = {
-            name: yaml.safe_load((output / name).read_text())["corpus"]
-            for name in ("manifest.yaml", "ground_truth.yaml", "metadata_truth.yaml", "entropy_map.yaml")
+        stamps = {"manifest.yaml": yaml.safe_load((output / "manifest.yaml").read_text())["corpus"]}
+        stamps |= {
+            name: yaml.safe_load((_truth(output) / name).read_text())["corpus"]
+            for name in ("ground_truth.yaml", "metadata_truth.yaml", "entropy_map.yaml")
         }
         assert len(stamps) == 4
         assert len({s["id"] for s in stamps.values()}) == 1
@@ -197,7 +203,7 @@ def test_intervention_names_its_counterfactual() -> None:
         run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=levered, lever=lever)
         run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=baseline)
 
-        record = yaml.safe_load((levered / "intervention.yaml").read_text())
+        record = yaml.safe_load((_truth(levered) / "intervention.yaml").read_text())
         baseline_stamp = yaml.safe_load((baseline / "manifest.yaml").read_text())["corpus"]
 
         assert record["corpus"]["lever"] == lever
@@ -238,7 +244,7 @@ def test_the_interaction_record_is_measured_not_predicted() -> None:
             output_dir=out,
             levers=[price, terms],
         )
-        record = yaml.safe_load((out / "intervention.yaml").read_text())
+        record = yaml.safe_load((_truth(out) / "intervention.yaml").read_text())
 
         # A lever set gets one record EACH, in the same shape a single lever gets.
         assert "intervention" not in record
@@ -317,8 +323,8 @@ def test_the_payer_dimension_exists_only_where_it_was_asked_for() -> None:
 
         # The distribution is published where a consumer looks for what is true, and
         # only when there IS a distribution to publish.
-        assert "dimensions" not in yaml.safe_load((plain / "ground_truth.yaml").read_text())
-        profile = yaml.safe_load((zipfian / "ground_truth.yaml").read_text())["dimensions"][0]
+        assert "dimensions" not in yaml.safe_load((_truth(plain) / "ground_truth.yaml").read_text())
+        profile = yaml.safe_load((_truth(zipfian) / "ground_truth.yaml").read_text())["dimensions"][0]
         assert profile["law"] == "zipf"
         assert profile["pool_size"] == 800
         assert profile["distinct_observed"] < profile["pool_size"]
@@ -336,8 +342,8 @@ def test_structural_truth_does_not_claim_a_dimension_the_corpus_lacks() -> None:
         run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=plain)
         run_scenario("month-end-close", strategy_name="clean", seed=3, months=3, output_dir=zipfian, merchants=600)
 
-        without = yaml.safe_load((plain / "metadata_truth.yaml").read_text())
-        with_it = yaml.safe_load((zipfian / "metadata_truth.yaml").read_text())
+        without = yaml.safe_load((_truth(plain) / "metadata_truth.yaml").read_text())
+        with_it = yaml.safe_load((_truth(zipfian) / "metadata_truth.yaml").read_text())
 
         assert "merchants" not in without["table_roles"]["dimensions"]
         assert "merchants" in with_it["table_roles"]["dimensions"]

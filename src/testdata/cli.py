@@ -24,6 +24,14 @@ def generate(
     scenario: str = typer.Option("month-end-close", help="Scenario to generate"),
     strategy: str = typer.Option(None, help="Injection strategy (default: from scenario YAML)"),
     output: Path = typer.Option(..., help="Output directory"),
+    truth_output: Path = typer.Option(
+        None,
+        "--truth-output",
+        help="Where the answer key lands (ground_truth, metadata_truth, entropy_map, "
+        "manifest, intervention). Default: the <output>-truth sibling — the corpus "
+        "directory holds data alone, so nothing that mounts or serves it can reach "
+        "the truth.",
+    ),
     seed: int = typer.Option(None, help="Random seed (default: from scenario YAML)"),
     months: int = typer.Option(None, help="Number of months (default: from scenario YAML)"),
     fmt: str = typer.Option("csv", "--format", help="Export format: csv, parquet, json, jsonl, both"),
@@ -75,6 +83,7 @@ def generate(
         seed=seed,
         months=months,
         output_dir=output,
+        truth_dir=truth_output,
         fmt=cast(ExportFormat, fmt),
         lever=lever_spec,
         levers=lever_list,
@@ -101,6 +110,7 @@ def generate(
         typer.echo(f"  By defect: {summary.get('by_defect', {})}")
 
     typer.echo(f"\nFiles written to: {output}")
+    typer.echo(f"Answer key written to: {truth_output or Path(str(output) + '-truth')}")
 
 
 @app.command()

@@ -10,6 +10,11 @@ from testdata.families import default_tables
 from testdata.scenarios.month_end_close import run_scenario
 
 
+def _truth(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 def test_parquet_export():
     """Parquet format creates .parquet files instead of .csv."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -80,7 +85,7 @@ def test_parquet_with_injections():
         output = Path(tmpdir) / "injected_pq"
         run_scenario(strategy_name="medium", seed=42, months=6, output_dir=output, fmt="parquet")
 
-        with open(output / "entropy_map.yaml") as f:
+        with open(_truth(output) / "entropy_map.yaml") as f:
             emap = yaml.safe_load(f)
         assert emap["total_injections"] > 0
 

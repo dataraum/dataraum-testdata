@@ -20,6 +20,11 @@ def _truth():
     return calculate_ground_truth(ds, months=12)
 
 
+def _truth_dir(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 def test_annual_revenue_positive():
     """Annual revenue should be a large positive number."""
     truth = _truth()
@@ -182,7 +187,7 @@ def test_scenario_export_includes_ground_truth_yaml():
     with tempfile.TemporaryDirectory() as tmpdir:
         output = Path(tmpdir) / "output"
         run_scenario(strategy_name="clean", seed=42, months=6, output_dir=output)
-        assert (output / "ground_truth.yaml").exists()
+        assert (_truth_dir(output) / "ground_truth.yaml").exists()
         assert (output / "manifest.yaml").exists()
 
 
@@ -239,7 +244,7 @@ def test_injection_impact_in_exported_yaml():
         output = Path(tmpdir) / "output"
         run_scenario(strategy_name="medium", seed=42, months=6, output_dir=output)
 
-        with open(output / "ground_truth.yaml") as f:
+        with open(_truth_dir(output) / "ground_truth.yaml") as f:
             data = yaml.safe_load(f)
 
         assert len(data["injection_impact"]) > 0

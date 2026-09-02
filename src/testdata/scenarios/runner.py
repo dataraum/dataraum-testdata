@@ -188,6 +188,7 @@ def run_scenario(
     seed: int | None = None,
     months: int | None = None,
     output_dir: Path | None = None,
+    truth_dir: Path | None = None,
     fmt: ExportFormat = "csv",
     lever: dict | None = None,
     levers: list[dict] | None = None,
@@ -328,12 +329,18 @@ def run_scenario(
 
     # Step 7: Export
     if output_dir is not None:
+        # The answer key defaults to a sibling, never the corpus dir:
+        # whatever mounts or serves the data cannot reach the truth.
+        if truth_dir is None:
+            truth_dir = output_dir.parent / (output_dir.name + "-truth")
+        truth_dir.mkdir(parents=True, exist_ok=True)
         run_facts = {"injection_count": len(registry)}
         if config.sources:
             _export_multi_source(
                 dataframes=dataframes,
                 sources=config.sources,
                 output_dir=output_dir,
+                truth_dir=truth_dir,
                 seed=seed,
                 entropy_records=registry.export_dicts(),
                 identity=identity,
@@ -347,13 +354,14 @@ def run_scenario(
                 identity=identity,
                 run_facts=run_facts,
                 fmt=fmt,
+                truth_dir=truth_dir,
             )
-        export_ground_truth(ground_truth, output_dir, identity)
+        export_ground_truth(ground_truth, truth_dir, identity)
         # Agent-layer ground truth — top-level like entropy_map/ground_truth,
         # table names remapped to this run's normalization, canonical (snake) columns.
         # ``level`` drives the folded-dimension truth for denormalized shapes.
         export_metadata_truth(
-            output_dir,
+            truth_dir,
             table_mapping=table_mapping,
             level=config.normalization,
             # post-injection frames drive the data-derived measured_in.cross_unit flags
@@ -398,7 +406,7 @@ def run_scenario(
                         "factorial; generate the subsets yourself if you need the term"
                     ),
                 }
-            _write_intervention(records, output_dir, identity=identity, interaction=interaction)
+            _write_intervention(records, truth_dir, identity=identity, interaction=interaction)
 
     return {
         "dataframes": dataframes,
@@ -772,6 +780,7 @@ def _export_multi_source(
     entropy_records: list[dict],
     identity: CorpusIdentity,
     run_facts: dict,
+    truth_dir: Path | None = None,
 ) -> None:
     """Export data split across multiple source directories.
 
@@ -807,6 +816,7 @@ def _export_multi_source(
             identity=identity,
             run_facts={**run_facts, "source": src.name, "column_style": src.column_style},
             fmt=src.format,
+            truth_dir=(truth_dir / src.name) if truth_dir else None,
         )
 
         source_index.append(
@@ -830,13 +840,16 @@ def _export_multi_source(
             sort_keys=False,
         )
 
-    # Write top-level entropy map
+    # Write top-level entropy map — answer-key material, so it rides
+    # with the truth when a truth_dir stands.
     entropy_data = {
         "corpus": identity.as_dict(),
         "injections": entropy_records or [],
         "total_injections": len(entropy_records) if entropy_records else 0,
     }
-    with open(output_dir / "entropy_map.yaml", "w") as f:
+    if truth_dir is not None:
+        truth_dir.mkdir(parents=True, exist_ok=True)
+    with open((truth_dir or output_dir) / "entropy_map.yaml", "w") as f:
         yaml.dump(entropy_data, f, default_flow_style=False, sort_keys=False)
 
 

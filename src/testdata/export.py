@@ -102,6 +102,7 @@ def export_dataset(
     identity: CorpusIdentity | None = None,
     run_facts: dict | None = None,
     fmt: ExportFormat = "csv",
+    truth_dir: Path | None = None,
 ) -> None:
     """Export dataset to files with manifest and optional entropy map.
 
@@ -120,8 +121,14 @@ def export_dataset(
     for table_name, df in dataframes.items():
         file_manifest.extend(_write_table(df, output_dir, table_name, fmt))
 
+    # The manifest is the corpus's own packing list and stays with the
+    # data. The entropy map names every injection coordinate — answer
+    # key — so with a truth_dir it lands there, out of reach of
+    # anything that mounts or serves the corpus.
     _write_manifest(output_dir, file_manifest, identity, run_facts)
-    _write_entropy_map(output_dir, entropy_records, identity)
+    map_dir = truth_dir or output_dir
+    map_dir.mkdir(parents=True, exist_ok=True)
+    _write_entropy_map(map_dir, entropy_records, identity)
 
 
 def export_dataframes(
@@ -131,6 +138,7 @@ def export_dataframes(
     identity: CorpusIdentity | None = None,
     run_facts: dict | None = None,
     fmt: ExportFormat = "csv",
+    truth_dir: Path | None = None,
 ) -> None:
     """Export pre-built DataFrames (after injection) to files + manifest.
 
@@ -151,8 +159,14 @@ def export_dataframes(
     for table_name, df in dataframes.items():
         file_manifest.extend(_write_table(df, output_dir, table_name, fmt))
 
+    # The manifest is the corpus's own packing list and stays with the
+    # data. The entropy map names every injection coordinate — answer
+    # key — so with a truth_dir it lands there, out of reach of
+    # anything that mounts or serves the corpus.
     _write_manifest(output_dir, file_manifest, identity, run_facts)
-    _write_entropy_map(output_dir, entropy_records, identity)
+    map_dir = truth_dir or output_dir
+    map_dir.mkdir(parents=True, exist_ok=True)
+    _write_entropy_map(map_dir, entropy_records, identity)
 
 
 def _write_manifest(

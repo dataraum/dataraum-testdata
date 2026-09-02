@@ -32,6 +32,11 @@ _PARTIAL_MAPPING = {
 }
 
 
+def _truth(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 # ---------------------------------------------------------------------------
 # canonical shape
 # ---------------------------------------------------------------------------
@@ -303,7 +308,7 @@ def test_export_table_mapping_matches_live_normalization() -> None:
 
 def test_run_scenario_emits_metadata_truth(tmp_path: Path) -> None:
     run_scenario("month-end-close", strategy_name="clean", months=2, output_dir=tmp_path)
-    written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
+    written = yaml.safe_load((_truth(tmp_path) / "metadata_truth.yaml").read_text())
     # month-end-close is `full` normalization → canonical, plus the corpus stamp
     # (which says WHICH corpus this structure describes, not what the structure is).
     assert written.pop("corpus")["scenario"] == "month-end-close"
@@ -317,8 +322,8 @@ def test_run_scenario_emits_metadata_truth(tmp_path: Path) -> None:
 
 def test_run_scenario_multi_source_emits_top_level_truth(tmp_path: Path) -> None:
     run_scenario("multi-system-recon", strategy_name="clean", months=2, output_dir=tmp_path)
-    assert (tmp_path / "metadata_truth.yaml").exists()
-    written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
+    assert (_truth(tmp_path) / "metadata_truth.yaml").exists()
+    written = yaml.safe_load((_truth(tmp_path) / "metadata_truth.yaml").read_text())
     assert len(written["relationships"]) >= 1
 
 
@@ -401,7 +406,7 @@ def test_run_scenario_unit_columns_exist_in_exported_frames(tmp_path: Path) -> N
     for level_scenario in ("month-end-close",):
         result = run_scenario(level_scenario, strategy_name="clean", months=2, output_dir=tmp_path)
         frames = result["dataframes"]
-        written = yaml.safe_load((tmp_path / "metadata_truth.yaml").read_text())
+        written = yaml.safe_load((_truth(tmp_path) / "metadata_truth.yaml").read_text())
         for entry in written["measured_in"]:
             if not entry["unit_column"]:
                 continue
@@ -493,10 +498,10 @@ def test_run_scenario_roleplay_end_to_end(tmp_path: Path) -> None:
 
     for table in ("addresses", "orders", "deliveries"):
         assert (out / f"{table}.csv").exists(), table
-    truth = yaml.safe_load((out / "metadata_truth.yaml").read_text())
+    truth = yaml.safe_load((_truth(out) / "metadata_truth.yaml").read_text())
     assert len(truth["fk_roles"]) == 3
     assert len(truth["relationships"]) == _declared_edges(p.stem for p in out.glob("*.csv")) + 4
-    emap = yaml.safe_load((out / "entropy_map.yaml").read_text())
+    emap = yaml.safe_load((_truth(out) / "entropy_map.yaml").read_text())
     rolefk = [i for i in emap["injections"] if i["injection_type"] == "inject_role_playing_fks"]
     assert len(rolefk) == 3
     assert all(i["parameters"]["stratum"] == "genuine_clean" for i in rolefk)

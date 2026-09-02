@@ -9,6 +9,11 @@ from testdata.families import default_tables
 from testdata.scenarios.erp_migration import run_scenario
 
 
+def _truth(corpus: Path) -> Path:
+    """The answer key's sibling dir (run_scenario's --truth-output default)."""
+    return corpus.parent / (corpus.name + "-truth")
+
+
 def test_erp_clean_no_injections():
     """Clean strategy produces data with zero injections."""
     result = run_scenario(strategy_name="clean", seed=7777, months=6)
@@ -46,7 +51,7 @@ def test_erp_export_creates_files():
         run_scenario(strategy_name="medium", seed=7777, months=6, output_dir=output)
 
         assert (output / "manifest.yaml").exists()
-        assert (output / "entropy_map.yaml").exists()
+        assert (_truth(output) / "entropy_map.yaml").exists()
         # partial normalization tables
         assert (output / "journal_data.csv").exists()
         assert (output / "invoice_data.csv").exists()
