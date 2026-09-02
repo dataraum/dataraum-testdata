@@ -373,23 +373,36 @@ def calculate_ground_truth(
         month_int = int(period_str[5:7])
         days_in_period = calendar.monthrange(year_int, month_int)[1]
 
-        # Revenue: credits to revenue accounts
-        revenue = Decimal("0")
-        for acct_id in _all_accounts_with_prefix(period_account_credits, period_str, _REVENUE_PREFIX):
-            revenue += period_account_credits.get((period_str, acct_id), Decimal("0"))
+        # Revenue: net credits to revenue accounts — what the oracle prose says
+        # and what the trial balance carries. Gross credits overstate wherever a
+        # correction posts as a debit on the same account.
+        revenue = _net_movement(
+            period_account_debits, period_account_credits, period_str, _REVENUE_PREFIX,
+            credit_side=True,
+        )
 
         # Operating revenue: product + service only. The order lines reconstruct this
         # figure to the cent; they cannot reconstruct `revenue`, which carries 43xx
         # other income on top.
-        operating_revenue = Decimal("0")
-        for prefix in _OPERATING_REVENUE_PREFIXES:
-            for acct_id in _all_accounts_with_prefix(period_account_credits, period_str, prefix):
-                operating_revenue += period_account_credits.get((period_str, acct_id), Decimal("0"))
+        operating_revenue = sum(
+            (
+                _net_movement(
+                    period_account_debits, period_account_credits, period_str, prefix,
+                    credit_side=True,
+                )
+                for prefix in _OPERATING_REVENUE_PREFIXES
+            ),
+            Decimal("0"),
+        )
 
-        # Expenses: debits to expense accounts
-        expenses = Decimal("0")
-        for acct_id in _all_accounts_with_prefix(period_account_debits, period_str, _EXPENSE_PREFIX):
-            expenses += period_account_debits.get((period_str, acct_id), Decimal("0"))
+        # Expenses: net debits to expense accounts. A cycle count that finds more
+        # than the book says credits 5150 — the trial balance nets that credit, so
+        # the answer key must too, or every quarter-end operating income is high
+        # by exactly the count gain.
+        expenses = _net_movement(
+            period_account_debits, period_account_credits, period_str, _EXPENSE_PREFIX,
+            credit_side=False,
+        )
 
         # Balance sheet: cumulative
         for acct in _AR_ACCOUNTS:
@@ -407,7 +420,9 @@ def calculate_ground_truth(
         cumulative_inventory += period_account_debits.get((period_str, _INVENTORY_ACCOUNT), Decimal("0"))
         cumulative_inventory -= period_account_credits.get((period_str, _INVENTORY_ACCOUNT), Decimal("0"))
 
-        cogs = period_account_debits.get((period_str, _COGS_ACCOUNT), Decimal("0"))
+        cogs = period_account_debits.get((period_str, _COGS_ACCOUNT), Decimal("0")) - (
+            period_account_credits.get((period_str, _COGS_ACCOUNT), Decimal("0"))
+        )
         purchases = purchases_by_period.get(period_str, Decimal("0"))
 
         # DSO: (AR / Revenue) × days_in_period (avoid div by zero)
@@ -603,6 +618,26 @@ def _all_accounts_with_prefix(
 ) -> set[str]:
     """Find all account IDs with a given prefix that have movements in a period."""
     return {acct for (p, acct) in movements if p == period and acct.startswith(prefix)}
+
+
+def _net_movement(
+    debits: dict[tuple[str, str], Decimal],
+    credits: dict[tuple[str, str], Decimal],
+    period: str,
+    prefix: str,
+    *,
+    credit_side: bool,
+) -> Decimal:
+    """Net movement over every account under *prefix* in *period*: credits less
+    debits for a credit-side family (revenue), debits less credits for a
+    debit-side one (expense). This is the trial balance's own arithmetic — the
+    answer key and the statement the corpus ships must agree."""
+    accounts = _all_accounts_with_prefix(debits, period, prefix) | _all_accounts_with_prefix(
+        credits, period, prefix
+    )
+    dr = sum((debits.get((period, a), Decimal("0")) for a in accounts), Decimal("0"))
+    cr = sum((credits.get((period, a), Decimal("0")) for a in accounts), Decimal("0"))
+    return cr - dr if credit_side else dr - cr
 
 
 def _check_invariants(
