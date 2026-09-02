@@ -144,7 +144,7 @@ def test_every_output_file_carries_the_same_stamp() -> None:
 
 
 def test_the_manifest_states_parameters_once() -> None:
-    """Run parameters live in ``corpus``; ``run`` holds only what follows from the run.
+    """Run parameters live in ``corpus``; the dirt count lives with the truth.
 
     The manifest used to repeat scenario/strategy/seed/months under ``parameters``
     beside a literal version string — the one-fact-in-two-places shape that let the
@@ -155,10 +155,13 @@ def test_the_manifest_states_parameters_once() -> None:
         run_scenario("month-end-close", strategy_name="low", seed=5, months=2, output_dir=output)
         manifest = yaml.safe_load((output / "manifest.yaml").read_text())
 
-        assert set(manifest) == {"generated_at", "corpus", "run", "files"}
-        assert set(manifest["run"]) == {"injection_count"}
-        assert manifest["run"]["injection_count"] > 0
-        assert not set(manifest["run"]) & set(manifest["corpus"])
+        # The injection count is the answer key's to tell: it lives in the
+        # truth sibling's entropy map, never in a packing list that travels
+        # with the data (ruled 2026-09-02).
+        entropy = yaml.safe_load((Path(tmp) / "out-truth" / "entropy_map.yaml").read_text())
+        assert set(manifest) == {"generated_at", "corpus", "files"}
+        assert "injection" not in (output / "manifest.yaml").read_text()
+        assert entropy["total_injections"] > 0
 
 
 def test_a_changed_parameter_changes_the_written_id() -> None:

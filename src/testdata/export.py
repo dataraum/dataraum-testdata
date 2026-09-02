@@ -180,12 +180,15 @@ def _write_manifest(
     The run parameters live in ``corpus`` and nowhere else. They used to be repeated
     under ``parameters`` beside a hand-written generator version, which is how a file
     that claims to be an answer key starts disagreeing with itself. ``run`` carries
-    what is *not* a parameter — counts and per-source facts that follow from the run.
+    what is *not* a parameter — per-source facts that follow from the run — and is
+    absent when there are none. Nothing about the dirt: the manifest travels with the
+    data, and the injection count is the answer key's to tell.
     """
     manifest: dict[str, Any] = {"generated_at": datetime.now().isoformat()}
     if identity is not None:
         manifest["corpus"] = identity.as_dict()
-    manifest["run"] = run_facts or {}
+    if run_facts:
+        manifest["run"] = run_facts
     manifest["files"] = file_manifest
     with open(output_dir / "manifest.yaml", "w") as f:
         yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)

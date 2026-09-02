@@ -334,7 +334,12 @@ def run_scenario(
         if truth_dir is None:
             truth_dir = output_dir.parent / (output_dir.name + "-truth")
         truth_dir.mkdir(parents=True, exist_ok=True)
-        run_facts = {"injection_count": len(registry)}
+        # Run facts that may travel with the data: none for a single
+        # source; a multi-source export names its source. The injection
+        # count is answer-key material — entropy_map.yaml carries it as
+        # total_injections — and stays out of anything the corpus dir
+        # holds (ruled 2026-09-02).
+        run_facts: dict = {}
         if config.sources:
             _export_multi_source(
                 dataframes=dataframes,
@@ -832,13 +837,12 @@ def _export_multi_source(
         )
 
     # Write top-level sources.yaml
+    index: dict = {"corpus": identity.as_dict()}
+    if run_facts:
+        index["run"] = run_facts
+    index["sources"] = source_index
     with open(output_dir / "sources.yaml", "w") as f:
-        yaml.dump(
-            {"corpus": identity.as_dict(), "run": run_facts, "sources": source_index},
-            f,
-            default_flow_style=False,
-            sort_keys=False,
-        )
+        yaml.dump(index, f, default_flow_style=False, sort_keys=False)
 
     # Write top-level entropy map — answer-key material, so it rides
     # with the truth when a truth_dir stands.

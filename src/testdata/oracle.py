@@ -318,7 +318,11 @@ METRICS: tuple[Metric, ...] = (
         kind="ratio",
         grains=("month", "year"),
         definition="ap_balance[end of w] / purchases[w] * days[w]",
-        scope="Closing payable over the window's purchases; 0.0 when purchases are 0.",
+        scope=(
+            "Closing AP — trade payables 2110 plus accrued expenses 2120 — over the "
+            "window's vendor invoices by invoice date, times the days in the window; "
+            "0.0 when purchases are 0."
+        ),
         variants=(
             Variant(
                 id="dpo_on_total_expenses",
